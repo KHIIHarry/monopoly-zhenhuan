@@ -1,0 +1,648 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomStatus {
+  LOBBY
+  PLAYING
+  ENDED
+  FINISHED
+  CLOSED
+}
+
+enum AccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum MembershipStatus {
+  ACTIVE
+  LEFT
+}
+
+enum RoleSwapStatus {
+  PENDING_TARGET
+  PENDING_BANK
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXPIRED
+  CONFLICTED
+}
+
+enum RuleProfile {
+  STANDARD
+  CUSTOM
+}
+
+enum Difficulty {
+  SIMPLE
+  NIGHTMARE
+  HELL
+  CUSTOM
+}
+
+enum BankMode {
+  SHARED_SELF_SERVICE
+  DESIGNATED_PARTICIPANT
+  DEDICATED_MODERATOR
+}
+
+enum CharacterAssignmentMode {
+  RANDOM
+  PLAYER_SELECT
+}
+
+enum StoryMoneyCounterpartyMode {
+  TREASURY
+  CURRENT_PROPERTY_OWNER
+}
+
+enum Role {
+  PLAYER
+  BANK
+  ADMIN
+}
+
+enum DiceMode {
+  ELECTRONIC
+  PHYSICAL
+}
+
+enum VictoryMode {
+  LAST_SOLVENT
+  TIME_LIMIT
+  ASSET_TARGET
+  CUSTOM
+}
+
+enum AssetValuationPolicy {
+  LIQUIDATION_VALUE
+  CUSTOM
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXECUTED
+  REVERSED
+}
+
+enum TransactionStatus {
+  COMMITTED
+  REVERSED
+}
+
+enum PlayerStatus {
+  ACTIVE
+  BANKRUPT
+  LEFT
+}
+
+enum TurnStatus {
+  ACTIVE
+  ENDED
+  INVALIDATED
+}
+
+enum LandingSpaceType {
+  PROPERTY
+  START
+  PLOT
+  COMPANION
+  COLD_PALACE
+  OTHER
+}
+
+enum LandingEventStatus {
+  DECLARED
+  CONFIRMED
+  INVALIDATED
+}
+
+enum DebtCreditorType {
+  TREASURY
+  PLAYER
+}
+
+enum DebtStatus {
+  OPEN
+  PARTIALLY_PAID
+  SETTLED
+  WRITTEN_OFF
+}
+
+model Room {
+  id                             String                     @id @default(cuid())
+  code                           String                     @unique
+  name                           String
+  stateVersion                   Int                        @default(0)
+  status                         RoomStatus                 @default(LOBBY)
+  ruleProfile                    RuleProfile                @default(STANDARD)
+  difficulty                     Difficulty                 @default(SIMPLE)
+  participantCount               Int
+  playerLimit                    Int                        @default(5)
+  bankMode                       BankMode                   @default(SHARED_SELF_SERVICE)
+  characterAssignmentMode        CharacterAssignmentMode    @default(RANDOM)
+  initialBalance                 Int
+  diceMode                       DiceMode                   @default(ELECTRONIC)
+  skillEnabled                   Boolean                    @default(false)
+  storyMoneyCounterpartyMode     StoryMoneyCounterpartyMode
+  transferApprovalRequired       Boolean                    @default(false)
+  criticalActionApprovalRequired Boolean                    @default(true)
+  autoSkipTurn                   Boolean                    @default(true)
+  bankUndoAllowed                Boolean                    @default(true)
+  showTotalAssets                Boolean                    @default(true)
+  startReward                    Int                        @default(1000)
+  redemptionFee                  Int                        @default(200)
+  victoryMode                    VictoryMode
+  scheduledEndAt                 DateTime?
+  assetTarget                    Int?
+  customVictoryRule              String?
+  assetValuationPolicy           AssetValuationPolicy       @default(LIQUIDATION_VALUE)
+  currentTurnPlayerId            String?
+  turnNumber                     Int?
+  createdBy                      String
+  createdByAccountId             String
+  passwordHash                   String?
+  visibility                     String                     @default("PUBLIC")
+  createdByAccount               Account                    @relation("RoomCreator", fields: [createdByAccountId], references: [id], onDelete: Restrict)
+  createdAt                      DateTime                   @default(now())
+  startedAt                      DateTime?
+  updatedAt                      DateTime                   @updatedAt
+  expiresAt                      DateTime
+  allowMidgameJoin               Boolean                    @default(false)
+  currentTurnPlayer              Player?                    @relation("RoomCurrentTurn", fields: [currentTurnPlayerId], references: [id], onDelete: SetNull)
+  members                        RoomMembership[]
+  players                        Player[]                   @relation("RoomPlayers")
+  properties                     RoomProperty[]
+  requests                       GameRequest[]
+  transactions                   GameTransaction[]
+  ledgerEntries                  LedgerEntry[]
+  turns                          Turn[]
+  landingEvents                  LandingEvent[]
+  skipTurnEntries                SkipTurnEntry[]
+  gameResult                     GameResult?
+  debts                          DebtRecord[]
+  auditLogs                      AuditLog[]
+  roleSwapRequests               RoleSwapRequest[]
+  settlement                     GameSettlement?
+
+  @@index([status, expiresAt])
+}
+
+model Account {
+  id               String             @id @default(cuid())
+  username         String             @unique
+  passwordHash     String
+  displayName      String
+  canCreateRoom    Boolean            @default(false)
+  status           AccountStatus      @default(ACTIVE)
+  note             String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  lastLoginAt      DateTime?
+  deletedAt        DateTime?
+  sessions         AccountSession[]
+  memberships      RoomMembership[]
+  createdRooms     Room[]             @relation("RoomCreator")
+  endedSettlements GameSettlement[]   @relation("SettlementEnder")
+  settlementRows   SettlementPlayer[]
+  securityLogs     SecurityLog[]      @relation("SecurityLogAccount")
+  actorLogs        SecurityLog[]      @relation("SecurityLogActor")
+}
+
+model AccountSession {
+  id                    String           @id @default(cuid())
+  accountId             String
+  sessionTokenHash      String           @unique
+  deviceId              String
+  deviceName            String
+  browser               String
+  operatingSystem       String
+  userAgent             String
+  loginIp               String
+  lastIp                String
+  ipRegion              String?
+  createdAt             DateTime         @default(now())
+  lastActiveAt          DateTime         @default(now())
+  expiresAt             DateTime
+  revokedAt             DateTime?
+  revokeReason          String?
+  account               Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  controlledMemberships RoomMembership[] @relation("MembershipActiveSession")
+
+  @@index([accountId, revokedAt, expiresAt])
+}
+
+model RoomMembership {
+  id                   String            @id @default(cuid())
+  roomId               String
+  accountId            String
+  status               MembershipStatus  @default(ACTIVE)
+  characterId          String?
+  isBank               Boolean           @default(false)
+  activeSessionId      String?
+  controlClaimedAt     DateTime?
+  displayNameSnapshot  String            @map("displayName")
+  joinedAt             DateTime          @default(now())
+  leftAt               DateTime?
+  room                 Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  account              Account           @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  character            Character?        @relation("MembershipCharacter", fields: [characterId], references: [id], onDelete: SetNull)
+  activeSession        AccountSession?   @relation("MembershipActiveSession", fields: [activeSessionId], references: [id], onDelete: SetNull)
+  player               Player?
+  approvedRequests     GameRequest[]     @relation("RequestApprover")
+  declaredLandings     LandingEvent[]    @relation("LandingDeclarer")
+  confirmedLandings    LandingEvent[]    @relation("LandingConfirmer")
+  createdLedgerEntries LedgerEntry[]     @relation("LedgerCreator")
+  createdSkipEntries   SkipTurnEntry[]   @relation("SkipCreator")
+  approvedSkipEntries  SkipTurnEntry[]   @relation("SkipApprover")
+  confirmedResults     GameResult[]      @relation("ResultConfirmer")
+  auditLogs            AuditLog[]        @relation("AuditActor")
+  requestedSwaps       RoleSwapRequest[] @relation("SwapRequester")
+  targetedSwaps        RoleSwapRequest[] @relation("SwapTarget")
+  bankApprovedSwaps    RoleSwapRequest[] @relation("SwapBankApprover")
+
+  @@unique([roomId, accountId])
+  @@unique([roomId, characterId])
+  @@index([activeSessionId])
+  @@map("RoomMember")
+}
+
+model Player {
+  id                  String          @id @default(cuid())
+  roomId              String
+  memberId            String          @unique
+  characterId         String?
+  pawnColor           String
+  balance             Int
+  status              PlayerStatus    @default(ACTIVE)
+  turnOrder           Int?
+  remainingSkipTurns  Int             @default(0)
+  partnerCardCount    Int             @default(0)
+  version             Int             @default(0)
+  room                Room            @relation("RoomPlayers", fields: [roomId], references: [id], onDelete: Cascade)
+  member              RoomMembership  @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  character           Character?      @relation(fields: [characterId], references: [id], onDelete: SetNull)
+  currentTurnForRooms Room[]          @relation("RoomCurrentTurn")
+  ownedProperties     RoomProperty[]
+  actorRequests       GameRequest[]   @relation("RequestActor")
+  targetRequests      GameRequest[]   @relation("RequestTarget")
+  ledgerEntries       LedgerEntry[]
+  turns               Turn[]
+  landingEvents       LandingEvent[]
+  skipEntries         SkipTurnEntry[]
+  debtorRecords       DebtRecord[]    @relation("DebtDebtor")
+  creditorRecords     DebtRecord[]    @relation("DebtCreditor")
+
+  @@unique([roomId, characterId])
+  @@index([roomId, status])
+}
+
+model Character {
+  id                String             @id
+  name              String             @unique
+  initialPropertyId String             @unique
+  skillCode         String             @unique
+  skillConfig       Json
+  enabled           Boolean            @default(true)
+  initialProperty   PropertyDefinition @relation(fields: [initialPropertyId], references: [id])
+  players           Player[]
+  memberships       RoomMembership[]   @relation("MembershipCharacter")
+}
+
+model PropertyDefinition {
+  id                String         @id @default(cuid())
+  name              String         @unique
+  displayOrder      Int            @unique
+  mortgagePrice     Int
+  purchasePrice     Int
+  buildCost         Int
+  buildingSellPrice Int
+  tollEmpty         Int
+  tollLevel1        Int
+  tollLevel2        Int
+  tollLevel3        Int
+  tollLevel4        Int
+  tollPalace        Int
+  enabled           Boolean        @default(true)
+  initialCharacter  Character?
+  roomProperties    RoomProperty[]
+}
+
+model RoomProperty {
+  id                   String             @id @default(cuid())
+  roomId               String
+  propertyDefinitionId String
+  ownerPlayerId        String?
+  buildingLevel        Int                @default(0)
+  mortgaged            Boolean            @default(false)
+  lockedByRequestId    String?            @unique
+  version              Int                @default(0)
+  room                 Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  definition           PropertyDefinition @relation(fields: [propertyDefinitionId], references: [id])
+  owner                Player?            @relation(fields: [ownerPlayerId], references: [id], onDelete: SetNull)
+  lockedByRequest      GameRequest?       @relation("PropertyLock", fields: [lockedByRequestId], references: [id], onDelete: SetNull)
+  requests             GameRequest[]      @relation("RequestProperty")
+  landingEvents        LandingEvent[]
+
+  @@unique([roomId, propertyDefinitionId])
+  @@index([roomId, ownerPlayerId])
+}
+
+model GameRequest {
+  id                 String           @id @default(cuid())
+  roomId             String
+  type               String
+  status             RequestStatus    @default(PENDING)
+  actorPlayerId      String?
+  targetPlayerId     String?
+  propertyId         String?
+  landingEventId     String?
+  turnId             String?
+  amount             Int?
+  quantity           Int?
+  note               String?
+  payload            Json?
+  idempotencyKey     String
+  requestHash        String?
+  approvedByMemberId String?
+  approvedAt         DateTime?
+  rejectionReason    String?
+  createdAt          DateTime         @default(now())
+  resolvedAt         DateTime?
+  room               Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actor              Player?          @relation("RequestActor", fields: [actorPlayerId], references: [id], onDelete: SetNull)
+  target             Player?          @relation("RequestTarget", fields: [targetPlayerId], references: [id], onDelete: SetNull)
+  property           RoomProperty?    @relation("RequestProperty", fields: [propertyId], references: [id], onDelete: SetNull)
+  landingEvent       LandingEvent?    @relation(fields: [landingEventId], references: [id], onDelete: SetNull)
+  turn               Turn?            @relation(fields: [turnId], references: [id], onDelete: SetNull)
+  approvedBy         RoomMembership?  @relation("RequestApprover", fields: [approvedByMemberId], references: [id], onDelete: SetNull)
+  lockedProperty     RoomProperty?    @relation("PropertyLock")
+  transaction        GameTransaction?
+  debts              DebtRecord[]
+
+  @@unique([roomId, idempotencyKey])
+  @@index([roomId, status, createdAt])
+  @@index([propertyId, status])
+}
+
+model GameTransaction {
+  id                      String            @id @default(cuid())
+  roomId                  String
+  type                    String
+  status                  TransactionStatus @default(COMMITTED)
+  requestId               String?           @unique
+  reversible              Boolean           @default(true)
+  reversedByTransactionId String?           @unique
+  metadata                Json
+  createdAt               DateTime          @default(now())
+  room                    Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  request                 GameRequest?      @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  ledgerEntries           LedgerEntry[]
+  reversedBy              GameTransaction?  @relation("TransactionReversal", fields: [reversedByTransactionId], references: [id], onDelete: SetNull)
+  reverses                GameTransaction?  @relation("TransactionReversal")
+
+  @@index([roomId, createdAt])
+}
+
+model LedgerEntry {
+  id            String          @id @default(cuid())
+  roomId        String
+  transactionId String
+  playerId      String
+  amount        Int
+  balanceBefore Int
+  balanceAfter  Int
+  type          String
+  description   String
+  createdBy     String?
+  createdAt     DateTime        @default(now())
+  room          Room            @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  transaction   GameTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  player        Player          @relation(fields: [playerId], references: [id], onDelete: Restrict)
+  creator       RoomMembership? @relation("LedgerCreator", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@index([roomId, createdAt])
+  @@index([playerId, createdAt])
+  @@index([transactionId])
+}
+
+model Turn {
+  id            String         @id @default(cuid())
+  roomId        String
+  turnNumber    Int
+  playerId      String
+  status        TurnStatus     @default(ACTIVE)
+  die1          Int?
+  die2          Int?
+  diceValue     Int?
+  rolledAt      DateTime?
+  endedAt       DateTime?
+  invalidatedAt DateTime?
+  room          Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  player        Player         @relation(fields: [playerId], references: [id], onDelete: Restrict)
+  landingEvents LandingEvent[]
+  requests      GameRequest[]
+
+  @@unique([roomId, turnNumber])
+  @@index([roomId, status])
+}
+
+model LandingEvent {
+  id                       String             @id @default(cuid())
+  roomId                   String
+  turnId                   String?
+  playerId                 String
+  spaceType                LandingSpaceType
+  propertyId               String?
+  status                   LandingEventStatus @default(DECLARED)
+  plotResolved             Boolean            @default(false)
+  propertyActionsCancelled Boolean            @default(false)
+  declaredBy               String
+  confirmedBy              String?
+  declaredAt               DateTime           @default(now())
+  confirmedAt              DateTime?
+  invalidatedAt            DateTime?
+  room                     Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  turn                     Turn?              @relation(fields: [turnId], references: [id], onDelete: SetNull)
+  player                   Player             @relation(fields: [playerId], references: [id], onDelete: Restrict)
+  property                 RoomProperty?      @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  declarer                 RoomMembership     @relation("LandingDeclarer", fields: [declaredBy], references: [id], onDelete: Restrict)
+  confirmer                RoomMembership?    @relation("LandingConfirmer", fields: [confirmedBy], references: [id], onDelete: SetNull)
+  requests                 GameRequest[]
+
+  @@index([roomId, playerId, declaredAt])
+  @@index([turnId, status])
+}
+
+model SkipTurnEntry {
+  id                   String          @id @default(cuid())
+  roomId               String
+  playerId             String
+  sourceType           String
+  sourceDescription    String
+  originalCount        Int
+  remainingCount       Int
+  blocksTollCollection Boolean
+  createdBy            String
+  approvedBy           String?
+  createdAt            DateTime        @default(now())
+  room                 Room            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  player               Player          @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  creator              RoomMembership  @relation("SkipCreator", fields: [createdBy], references: [id], onDelete: Restrict)
+  approver             RoomMembership? @relation("SkipApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
+
+  @@index([roomId, playerId, createdAt])
+}
+
+model GameResult {
+  id                   String         @id @default(cuid())
+  roomId               String         @unique
+  victoryMode          VictoryMode
+  endReason            String
+  rulesSnapshot        Json
+  playerAssetBreakdown Json
+  winnerPlayerIds      Json
+  confirmedBy          String
+  endedAt              DateTime       @default(now())
+  room                 Room           @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  confirmer            RoomMembership @relation("ResultConfirmer", fields: [confirmedBy], references: [id], onDelete: Restrict)
+}
+
+model DebtRecord {
+  id                String           @id @default(cuid())
+  roomId            String
+  debtorPlayerId    String
+  creditorType      DebtCreditorType
+  creditorPlayerId  String?
+  sourceRequestId   String?
+  originalAmount    Int
+  paidAmount        Int              @default(0)
+  outstandingAmount Int
+  status            DebtStatus       @default(OPEN)
+  createdAt         DateTime         @default(now())
+  settledAt         DateTime?
+  room              Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  debtor            Player           @relation("DebtDebtor", fields: [debtorPlayerId], references: [id], onDelete: Restrict)
+  creditor          Player?          @relation("DebtCreditor", fields: [creditorPlayerId], references: [id], onDelete: Restrict)
+  sourceRequest     GameRequest?     @relation(fields: [sourceRequestId], references: [id], onDelete: SetNull)
+
+  @@index([roomId, status])
+  @@index([debtorPlayerId, status])
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(cuid())
+  scope       String
+  key         String
+  requestHash String?
+  response    Json
+  createdAt   DateTime @default(now())
+
+  @@unique([scope, key])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id            String          @id @default(cuid())
+  roomId        String
+  actorMemberId String?
+  actorRole     Role
+  action        String
+  entityType    String
+  entityId      String
+  beforeJson    Json?
+  afterJson     Json?
+  reason        String?
+  ipHash        String?
+  createdAt     DateTime        @default(now())
+  room          Room            @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  actor         RoomMembership? @relation("AuditActor", fields: [actorMemberId], references: [id], onDelete: Restrict)
+
+  @@index([roomId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model RoleSwapRequest {
+  id                    String          @id @default(cuid())
+  roomId                String
+  requesterMembershipId String
+  targetMembershipId    String
+  requesterCharacterId  String?
+  targetCharacterId     String
+  status                RoleSwapStatus  @default(PENDING_TARGET)
+  bankApprovedById      String?
+  rejectionReason       String?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  resolvedAt            DateTime?
+  room                  Room            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  requester             RoomMembership  @relation("SwapRequester", fields: [requesterMembershipId], references: [id], onDelete: Restrict)
+  target                RoomMembership  @relation("SwapTarget", fields: [targetMembershipId], references: [id], onDelete: Restrict)
+  bankApprover          RoomMembership? @relation("SwapBankApprover", fields: [bankApprovedById], references: [id], onDelete: SetNull)
+
+  @@index([roomId, status, createdAt])
+}
+
+model GameSettlement {
+  id               String             @id @default(cuid())
+  roomId           String             @unique
+  endedByAccountId String
+  endedAt          DateTime           @default(now())
+  totalTurns       Int
+  durationSeconds  Int
+  forced           Boolean            @default(false)
+  forceReason      String?
+  winnersJson      Json
+  rankingJson      Json
+  overriddenBlockersJson Json              @default("[]")
+  room             Room               @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  endedBy          Account            @relation("SettlementEnder", fields: [endedByAccountId], references: [id], onDelete: Restrict)
+  players          SettlementPlayer[]
+}
+
+model SettlementPlayer {
+  id                        String         @id @default(cuid())
+  settlementId              String
+  accountId                 String
+  displayNameSnapshot       String
+  characterNameSnapshot     String?
+  cash                      Int
+  unmortgagedPropertyValue  Int
+  mortgagedPropertyNetValue Int
+  buildingSellValue         Int
+  totalWealth               Int
+  rank                      Int
+  isWinner                  Boolean
+  propertyDetailsJson       Json
+  settlement                GameSettlement @relation(fields: [settlementId], references: [id], onDelete: Restrict)
+  account                   Account        @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([settlementId, accountId])
+  @@index([settlementId, rank])
+}
+
+model SecurityLog {
+  id             String   @id @default(cuid())
+  accountId      String?
+  actorAccountId String?
+  action         String
+  detailsJson    Json?
+  ip             String?
+  createdAt      DateTime @default(now())
+  account        Account? @relation("SecurityLogAccount", fields: [accountId], references: [id], onDelete: SetNull)
+  actor          Account? @relation("SecurityLogActor", fields: [actorAccountId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, createdAt])
+  @@index([action, createdAt])
+  @@index([actorAccountId, createdAt, id])
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@zhenhuan/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": { "build": "tsc -b" },
+  "dependencies": { "zod": "latest" },
+  "devDependencies": { "typescript": "latest" }
+}

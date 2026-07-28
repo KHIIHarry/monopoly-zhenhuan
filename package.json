@@ -1,0 +1,39 @@
+{
+  "name": "zhenhuan-monopoly",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build:packages && concurrently -n web,api 'npm run dev -w @zhenhuan/web' 'npm run dev -w @zhenhuan/api'",
+    "start": "concurrently -n web,api 'npm run start -w @zhenhuan/web' 'npm run start -w @zhenhuan/api'",
+    "build": "npm run build -ws --if-present",
+    "build:production": "node scripts/require-production-web-env.mjs && npm run build",
+    "build:packages": "npm run build -w @zhenhuan/shared && npm run build -w @zhenhuan/database",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:integration": "node scripts/require-test-database.mjs && vitest run apps/api/src/prisma-game-service.integration.test.ts",
+    "test:e2e": "playwright test",
+    "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema packages/database/prisma/schema.prisma",
+    "db:seed": "npm run build -w @zhenhuan/shared && tsx packages/database/src/seed.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@playwright/test": "latest",
+    "@types/node": "latest",
+    "concurrently": "latest",
+    "eslint": "latest",
+    "globals": "latest",
+    "prisma": "6.19.0",
+    "tsx": "latest",
+    "typescript": "latest",
+    "typescript-eslint": "latest",
+    "vitest": "latest"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.0"
+  }
+}

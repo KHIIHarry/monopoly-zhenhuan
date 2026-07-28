@@ -1,0 +1,11 @@
+{
+  "name": "@zhenhuan/api",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "dev": "tsx watch src/server.ts", "build": "rm -rf dist && tsc -b --force", "start": "node dist/server.js" },
+  "dependencies": {
+    "@fastify/cors": "latest", "@zhenhuan/database": "*", "@zhenhuan/shared": "*",
+    "fastify": "latest", "socket.io": "latest", "zod": "latest"
+  },
+  "devDependencies": { "typescript": "latest" }
+}

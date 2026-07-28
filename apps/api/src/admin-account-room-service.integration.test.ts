@@ -1,0 +1,1196 @@
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { PrismaClient } from '@prisma/client';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { buildApiApp } from './app.js';
+import { hashPassword, sessionCookieName } from './auth-domain.js';
+import { AccountRoomService } from './account-room-service.js';
+
+function configuredTestDatabaseUrl() {
+  const rawUrl = process.env.TEST_DATABASE_URL;
+  if (!rawUrl) return undefined;
+  const parsed = new URL(rawUrl);
+  const databaseName = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+  if (!['postgresql:', 'postgres:'].includes(parsed.protocol) || !databaseName.endsWith('_test')) {
+    throw new Error('TEST_DATABASE_URL must identify a PostgreSQL *_test database');
+  }
+  return rawUrl;
+}
+
+const testDatabaseUrl = configuredTestDatabaseUrl();
+const integration = describe.skipIf(!testDatabaseUrl);
+const workspaceRoot = fileURLToPath(new URL('../../../', import.meta.url));
+const migrationRoot = fileURLToPath(new URL('../../../packages/database/prisma/migrations/', import.meta.url));
+const prismaCli = fileURLToPath(new URL('../../../node_modules/prisma/build/index.js', import.meta.url));
+const schemaName = `task6_admin_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+let isolatedUrl = '';
+let db: PrismaClient;
+let app: Awaited<ReturnType<typeof buildApiApp>>;
+const configuredSuperAdmins = new Set<string>();
+
+function executeSql(databaseUrl: string, sql: string) {
+  execFileSync(process.execPath, [prismaCli, 'db', 'execute', '--stdin', '--url', databaseUrl], {
+    cwd: workspaceRoot,
+    input: sql,
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+}
+
+function executeMigration(databaseUrl: string, directory: string) {
+  execFileSync(process.execPath, [prismaCli, 'db', 'execute', '--file', `${migrationRoot}${directory}/migration.sql`, '--url', databaseUrl], {
+    cwd: workspaceRoot,
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+}
+
+beforeAll(async () => {
+  if (!testDatabaseUrl) return;
+  const url = new URL(testDatabaseUrl);
+  url.searchParams.set('schema', schemaName);
+  isolatedUrl = url.toString();
+  executeSql(testDatabaseUrl, `CREATE SCHEMA "${schemaName}";`);
+  for (const migration of readdirSync(migrationRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()) {
+    executeMigration(isolatedUrl, migration);
+  }
+  db = new PrismaClient({ datasources: { db: { url: isolatedUrl } } });
+  app = await buildApiApp({
+    database: db,
+    logger: false,
+    accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)),
+  });
+}, 120_000);
+
+afterAll(async () => {
+  await app?.close();
+  await db?.$disconnect();
+  if (testDatabaseUrl && isolatedUrl) executeSql(testDatabaseUrl, `DROP SCHEMA "${schemaName}" CASCADE;`);
+});
+
+async function createAccount(options: { superAdmin?: boolean; canCreateRoom?: boolean; status?: 'ACTIVE' | 'DISABLED' } = {}) {
+  const password = `Task6-${randomUUID()}`;
+  const username = `${options.superAdmin ? 'task6-admin' : 'task6'}-${randomUUID()}`;
+  if (options.superAdmin) configuredSuperAdmins.add(username);
+  const account = await db.account.create({ data: {
+    username,
+    passwordHash: await hashPassword(password),
+    displayName: `Task 6 ${randomUUID().slice(0, 8)}`,
+    canCreateRoom: options.canCreateRoom ?? false,
+    status: options.status ?? 'ACTIVE',
+  } });
+  return { account, password };
+}
+
+async function loginCookie(account: { username: string }, password: string, ip = '120.31.22.36') {
+  const login = await app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    remoteAddress: ip,
+    headers: { 'user-agent': 'Mozilla/5.0 (Mac OS X) AppleWebKit/537.36 Chrome/140.0.0.0' },
+    payload: { username: account.username, password },
+  });
+  expect(login.statusCode).toBe(200);
+  const cookie = login.cookies.find((item) => item.name === sessionCookieName);
+  expect(cookie?.value).toBeTruthy();
+  return { header: `${sessionCookieName}=${cookie!.value}`, token: cookie!.value };
+}
+
+async function createRoom(creatorId: string, status: 'LOBBY' | 'PLAYING' | 'FINISHED' = 'LOBBY') {
+  return db.room.create({ data: {
+    code: randomUUID().slice(0, 8).toUpperCase(),
+    name: `Task 6 Room ${randomUUID().slice(0, 6)}`,
+    status,
+    ruleProfile: 'CUSTOM',
+    difficulty: 'CUSTOM',
+    participantCount: 5,
+    playerLimit: 5,
+    bankMode: 'DEDICATED_MODERATOR',
+    characterAssignmentMode: 'PLAYER_SELECT',
+    initialBalance: 6_000,
+    diceMode: 'ELECTRONIC',
+    skillEnabled: true,
+    storyMoneyCounterpartyMode: 'TREASURY',
+    transferApprovalRequired: false,
+    autoSkipTurn: true,
+    startReward: 1_000,
+    victoryMode: 'LAST_SOLVENT',
+    createdBy: `creator-${creatorId}`,
+    createdByAccountId: creatorId,
+    visibility: 'PRIVATE',
+    allowMidgameJoin: false,
+    expiresAt: new Date(Date.now() + 86_400_000),
+  } });
+}
+
+function expectNoSecrets(value: unknown) {
+  expect(JSON.stringify(value)).not.toMatch(/password|passwordHash|sessionTokenHash|activeSessionId|120\.31\.22\.36/);
+}
+
+integration('Task 6 real-Cookie admin routes', () => {
+  it('physically deletes only the selected room and rejects account deletion while room data remains', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const unrelatedCreator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const target = await createRoom(creator.account.id);
+    const unrelated = await createRoom(unrelatedCreator.account.id);
+    const definition = await db.propertyDefinition.create({ data: {
+      name: `Dashboard delete property ${randomUUID()}`,
+      displayOrder: Math.floor(Math.random() * 1_000_000),
+      mortgagePrice: 100,
+      purchasePrice: 200,
+      buildCost: 50,
+      buildingSellPrice: 25,
+      tollEmpty: 10,
+      tollLevel1: 20,
+      tollLevel2: 30,
+      tollLevel3: 40,
+      tollLevel4: 50,
+      tollPalace: 60,
+    } });
+    const characterId = `dashboard-delete-${randomUUID()}`;
+    await db.character.create({ data: {
+      id: characterId,
+      name: 'Deleted room character',
+      skillCode: `dashboard-delete-skill-${randomUUID()}`,
+      skillConfig: {},
+      initialPropertyId: definition.id,
+    } });
+    await db.securityLog.createMany({ data: [
+      { accountId: creator.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: target.id, characterId, characterNameSnapshot: 'Deleted room character' } },
+      { accountId: unrelatedCreator.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: unrelated.id, characterId, characterNameSnapshot: 'Deleted room character' } },
+    ] });
+    await db.auditLog.create({ data: { roomId: target.id, actorRole: 'ADMIN', action: 'DELETE_COVERAGE', entityType: 'Room', entityId: target.id } });
+    const member = await db.roomMembership.create({ data: { roomId: target.id, accountId: creator.account.id, displayNameSnapshot: creator.account.displayName } });
+    const player = await db.player.create({ data: { roomId: target.id, memberId: member.id, pawnColor: '测试', balance: 0 } });
+    const transaction = await db.gameTransaction.create({ data: { roomId: target.id, type: 'DELETE_COVERAGE', metadata: {} } });
+    await db.ledgerEntry.create({ data: { roomId: target.id, transactionId: transaction.id, playerId: player.id, amount: 0, balanceBefore: 0, balanceAfter: 0, type: 'DELETE_COVERAGE', description: '删除覆盖' } });
+
+    const blocked = await app.inject({
+      method: 'DELETE', url: `/api/admin/accounts/${creator.account.id}`,
+      headers: { cookie: cookie.header, 'idempotency-key': 'blocked-account-delete' },
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toEqual({ error: 'ACCOUNT_DELETE_BLOCKED' });
+    expect(await db.account.findUnique({ where: { id: creator.account.id } })).not.toBeNull();
+
+    const deleted = await app.inject({
+      method: 'DELETE', url: `/api/admin/rooms/${target.id}`,
+      headers: { cookie: cookie.header, 'idempotency-key': 'room-delete' },
+    });
+    const replay = await app.inject({
+      method: 'DELETE', url: `/api/admin/rooms/${target.id}`,
+      headers: { cookie: cookie.header, 'idempotency-key': 'room-delete' },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(replay.json()).toEqual(deleted.json());
+    expect(await db.room.findUnique({ where: { id: target.id } })).toBeNull();
+    expect(await db.auditLog.count({ where: { roomId: target.id } })).toBe(0);
+    expect(await db.ledgerEntry.count({ where: { roomId: target.id } })).toBe(0);
+    expect(await db.securityLog.count({ where: { action: 'CHARACTER_SELECTED', detailsJson: { path: ['roomId'], equals: target.id } } })).toBe(0);
+    expect(await db.securityLog.count({ where: { action: 'CHARACTER_SELECTED', detailsJson: { path: ['roomId'], equals: unrelated.id } } })).toBe(1);
+    expect(await db.room.findUnique({ where: { id: unrelated.id } })).not.toBeNull();
+    expect(await db.account.findUnique({ where: { id: creator.account.id } })).not.toBeNull();
+    expect(await db.account.findUnique({ where: { id: unrelatedCreator.account.id } })).not.toBeNull();
+
+    const dashboard = await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: { cookie: cookie.header } });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.json().characterSelections).toContainEqual({ characterId, characterNameSnapshot: 'Deleted room character', count: 1 });
+  });
+
+  it('excludes character selections from deleted rooms', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const activeRoom = await createRoom(creator.account.id);
+    const definition = await db.propertyDefinition.create({ data: {
+      name: `Dashboard orphan property ${randomUUID()}`,
+      displayOrder: Math.floor(Math.random() * 1_000_000),
+      mortgagePrice: 100,
+      purchasePrice: 200,
+      buildCost: 50,
+      buildingSellPrice: 25,
+      tollEmpty: 10,
+      tollLevel1: 20,
+      tollLevel2: 30,
+      tollLevel3: 40,
+      tollLevel4: 50,
+      tollPalace: 60,
+    } });
+    const characterId = `dashboard-orphan-${randomUUID()}`;
+    await db.character.create({ data: {
+      id: characterId,
+      name: 'Existing room character',
+      skillCode: `dashboard-orphan-skill-${randomUUID()}`,
+      skillConfig: {},
+      initialPropertyId: definition.id,
+    } });
+    await db.securityLog.createMany({ data: [
+      { accountId: creator.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: activeRoom.id, characterId, characterNameSnapshot: 'Existing room character' } },
+      { accountId: creator.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: `deleted-room-${randomUUID()}`, characterId, characterNameSnapshot: 'Existing room character' } },
+    ] });
+
+    const dashboard = await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: { cookie: cookie.header } });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.json().characterSelections).toContainEqual({ characterId, characterNameSnapshot: 'Existing room character', count: 1 });
+  });
+
+  it('physically deletes an unreferenced ordinary account but never a current or super-admin account', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const otherAdmin = await createAccount({ superAdmin: true });
+    const cookie = await loginCookie(admin.account, admin.password);
+    await loginCookie(target.account, target.password);
+
+    const deleted = await app.inject({
+      method: 'DELETE', url: `/api/admin/accounts/${target.account.id}`,
+      headers: { cookie: cookie.header, 'idempotency-key': 'account-delete' },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(await db.account.findUnique({ where: { id: target.account.id } })).toBeNull();
+    expect(await db.accountSession.count({ where: { accountId: target.account.id } })).toBe(0);
+    expect(await db.securityLog.count({ where: { OR: [{ accountId: target.account.id }, { actorAccountId: target.account.id }] } })).toBe(0);
+
+    const current = await app.inject({
+      method: 'DELETE', url: `/api/admin/accounts/${admin.account.id}`,
+      headers: { cookie: cookie.header, 'idempotency-key': 'current-admin-delete' },
+    });
+    const protectedAdmin = await app.inject({
+      method: 'DELETE', url: `/api/admin/accounts/${otherAdmin.account.id}`,
+      headers: { cookie: cookie.header, 'idempotency-key': 'other-admin-delete' },
+    });
+    expect(current.json()).toEqual({ error: 'CANNOT_DELETE_CURRENT_ACCOUNT' });
+    expect(protectedAdmin.json()).toEqual({ error: 'CANNOT_DELETE_SUPER_ADMIN' });
+  });
+
+  it('returns authoritative lastLoginAt in the authenticated login Account DTO', async () => {
+    const account = await createAccount();
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: account.account.username, password: account.password } });
+    expect(login.statusCode).toBe(200);
+    expect(login.json().account.lastLoginAt).toEqual(expect.any(String));
+  });
+
+  it('allows a current super-admin Session to read the bounded SecurityLog API', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const cookie = await loginCookie(admin.account, admin.password);
+    const response = await app.inject({ method: 'GET', url: '/api/admin/security-logs?limit=10', headers: { cookie: cookie.header } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ items: expect.any(Array) });
+    expectNoSecrets(response.json());
+  });
+
+  it('enforces real current admin authorization for account, room, log, and dashboard families', async () => {
+    const ordinary = await createAccount();
+    const ordinaryCookie = await loginCookie(ordinary.account, ordinary.password);
+    for (const url of ['/api/admin/accounts', '/api/admin/rooms', '/api/admin/security-logs', '/api/admin/dashboard']) {
+      const response = await app.inject({ method: 'GET', url, headers: { cookie: ordinaryCookie.header } });
+      expect(response.statusCode, url).toBe(403);
+      expect(response.json(), url).toEqual({ error: 'ADMIN_REQUIRED' });
+    }
+
+    const admin = await createAccount({ superAdmin: true });
+    const adminCookie = await loginCookie(admin.account, admin.password);
+    configuredSuperAdmins.delete(admin.account.username);
+    const privilegeRevoked = await app.inject({ method: 'GET', url: '/api/admin/security-logs', headers: { cookie: adminCookie.header } });
+    expect(privilegeRevoked.statusCode).toBe(403);
+    expect(privilegeRevoked.json()).toEqual({ error: 'ADMIN_REQUIRED' });
+
+    await db.account.update({ where: { id: admin.account.id }, data: { status: 'DISABLED' } });
+    const disabled = await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: { cookie: adminCookie.header } });
+    expect(disabled.statusCode).toBe(401);
+    expect(disabled.json()).toEqual({ error: 'SESSION_INVALID' });
+  });
+
+  it('creates accounts transactionally with replay, payload conflict, actor isolation, and safe DTOs', async () => {
+    const firstAdmin = await createAccount({ superAdmin: true });
+    const secondAdmin = await createAccount({ superAdmin: true });
+    const firstCookie = await loginCookie(firstAdmin.account, firstAdmin.password);
+    const secondCookie = await loginCookie(secondAdmin.account, secondAdmin.password);
+    const username = `created-${randomUUID()}`;
+    const payload = { username, password: 'Created-password-1', displayName: 'Created Account', canCreateRoom: true, note: 'reviewed' };
+    const headers = { cookie: firstCookie.header, 'idempotency-key': 'account-create-key' };
+
+    const created = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers, payload });
+    const replay = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers, payload });
+    const changed = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers, payload: { ...payload, displayName: 'Changed' } });
+    const isolated = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers: { cookie: secondCookie.header, 'idempotency-key': 'account-create-key' }, payload: { ...payload, username: `${username}-other` } });
+
+    expect(created.statusCode).toBe(200);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toEqual(created.json());
+    expect(changed.statusCode).toBe(409);
+    expect(changed.json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    expect(isolated.statusCode).toBe(200);
+    expect(Object.keys(created.json()).sort()).toEqual(['canCreateRoom', 'createdAt', 'displayName', 'id', 'isSuperAdmin', 'lastLoginAt', 'note', 'status', 'updatedAt', 'username']);
+    expectNoSecrets([created.json(), replay.json()]);
+    expect(await db.account.count({ where: { username } })).toBe(1);
+    expect(await db.securityLog.count({ where: { accountId: created.json().id, action: 'ACCOUNT_CREATED' } })).toBe(1);
+
+    const duplicate = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers: { cookie: firstCookie.header, 'idempotency-key': 'duplicate-key' }, payload: { ...payload, password: 'Different-password-2' } });
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toEqual({ error: 'USERNAME_TAKEN' });
+  });
+
+  it('serializes concurrent same-key account creation and persists no password-derived plaintext', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const cookie = await loginCookie(admin.account, admin.password);
+    const username = `concurrent-${randomUUID()}`;
+    const plaintext = `Concurrent-${randomUUID()}`;
+    const request = {
+      method: 'POST' as const,
+      url: '/api/admin/accounts',
+      headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-account-create' },
+      payload: { username, password: plaintext, displayName: 'Concurrent account' },
+    };
+    const responses = await Promise.all([app.inject(request), app.inject(request)]);
+    expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+    expect(responses[0]!.json()).toEqual(responses[1]!.json());
+    expect(await db.account.count({ where: { username } })).toBe(1);
+    expect(await db.securityLog.count({ where: { accountId: responses[0]!.json().id, action: 'ACCOUNT_CREATED' } })).toBe(1);
+    const [records, logs] = await Promise.all([
+      db.idempotencyRecord.findMany({ where: { key: 'concurrent-account-create' } }),
+      db.securityLog.findMany({ where: { accountId: responses[0]!.json().id } }),
+    ]);
+    expect(JSON.stringify([responses.map((response) => response.json()), records, logs])).not.toContain(plaintext);
+  });
+
+  it('rejects an account-create key reused with a different username', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const cookie = await loginCookie(admin.account, admin.password);
+    const first = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers: { cookie: cookie.header, 'idempotency-key': 'changed-create-username' }, payload: { username: `first-${randomUUID()}`, password: 'First-password-1', displayName: 'First' } });
+    const changed = await app.inject({ method: 'POST', url: '/api/admin/accounts', headers: { cookie: cookie.header, 'idempotency-key': 'changed-create-username' }, payload: { username: `second-${randomUUID()}`, password: 'First-password-1', displayName: 'First' } });
+    expect(first.statusCode).toBe(200);
+    expect(changed.statusCode).toBe(409);
+    expect(changed.json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+  });
+
+  it('rolls an account mutation and idempotency record back when its SecurityLog insert fails', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const original = target.account.displayName;
+    executeSql(isolatedUrl, `
+      CREATE OR REPLACE FUNCTION "task6_reject_account_update_log"() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW."action" = 'ACCOUNT_UPDATED' THEN RAISE EXCEPTION 'task6 forced log failure'; END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER "task6_reject_account_update_log"
+      BEFORE INSERT ON "SecurityLog" FOR EACH ROW EXECUTE FUNCTION "task6_reject_account_update_log"();
+    `);
+    try {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/admin/accounts/${target.account.id}`,
+        headers: { cookie: cookie.header, 'idempotency-key': 'atomic-account-update' },
+        payload: { displayName: 'Must roll back' },
+      });
+      expect(response.statusCode).toBe(500);
+      expect((await db.account.findUniqueOrThrow({ where: { id: target.account.id } })).displayName).toBe(original);
+      expect(await db.idempotencyRecord.count({ where: { key: 'atomic-account-update' } })).toBe(0);
+    } finally {
+      executeSql(isolatedUrl, 'DROP TRIGGER IF EXISTS "task6_reject_account_update_log" ON "SecurityLog"; DROP FUNCTION IF EXISTS "task6_reject_account_update_log"();');
+    }
+  });
+
+  it('replays account update/reset/status writes and rejects changed password payloads without plaintext persistence', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const updateRequest = { method: 'PATCH' as const, url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'account-update-replay' }, payload: { displayName: 'Updated exactly once' } };
+    const update = await app.inject(updateRequest);
+    const updateReplay = await app.inject(updateRequest);
+    expect(updateReplay.json()).toEqual(update.json());
+    expect(await db.securityLog.count({ where: { accountId: target.account.id, action: 'ACCOUNT_UPDATED' } })).toBe(1);
+
+    const password = `Reset-${randomUUID()}`;
+    const resetRequest = { method: 'POST' as const, url: `/api/admin/accounts/${target.account.id}/reset-password`, headers: { cookie: cookie.header, 'idempotency-key': 'account-reset-replay' }, payload: { password } };
+    const reset = await app.inject(resetRequest);
+    const resetReplay = await app.inject(resetRequest);
+    const changed = await app.inject({ ...resetRequest, payload: { password: `${password}-changed` } });
+    expect(reset.statusCode).toBe(200);
+    expect(resetReplay.json()).toEqual(reset.json());
+    expect(changed.statusCode).toBe(409);
+    expect(changed.json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+
+    const disabled = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: cookie.header, 'idempotency-key': 'account-disable-replay' } });
+    const disabledReplay = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: cookie.header, 'idempotency-key': 'account-disable-replay' } });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabledReplay.json()).toEqual(disabled.json());
+    const persisted = await db.idempotencyRecord.findMany({ where: { key: { in: ['account-reset-replay', 'account-disable-replay'] } } });
+    expect(JSON.stringify([reset.json(), resetReplay.json(), persisted])).not.toContain(password);
+  });
+
+  it('serializes exact concurrent keys across update, reset, device, status, config, password, and removal writes', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const creator = await createAccount();
+    const memberAccount = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    const member = await db.roomMembership.create({ data: { roomId: room.id, accountId: memberAccount.account.id, displayNameSnapshot: memberAccount.account.displayName } });
+    const exact = async (request: Parameters<typeof app.inject>[0]) => {
+      const responses = await Promise.all([app.inject(request), app.inject(request)]);
+      expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+      expect(responses[1]!.json()).toEqual(responses[0]!.json());
+    };
+
+    await exact({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-update' }, payload: { note: 'one update' } });
+    const resetPassword = `Concurrent-reset-${randomUUID()}`;
+    await exact({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/reset-password`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-reset' }, payload: { password: resetPassword } });
+    const targetCookie = await loginCookie(target.account, resetPassword);
+    const session = await db.accountSession.findFirstOrThrow({ where: { accountId: target.account.id, revokedAt: null } });
+    await exact({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/sessions/${session.id}/revoke`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-device' }, payload: { reason: 'concurrent review' } });
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: targetCookie.header } })).statusCode).toBe(401);
+    await exact({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-disable' } });
+    await exact({ method: 'PATCH', url: `/api/admin/rooms/${room.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-config' }, payload: { name: 'Concurrent room update' } });
+    await exact({ method: 'POST', url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-password' }, payload: { password: 'concurrent-room-secret' } });
+    await exact({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'concurrent-remove' }, payload: {} });
+    for (const [action, count] of [
+      ['ACCOUNT_UPDATED', 1], ['PASSWORD_RESET', 1], ['ACCOUNT_SESSION_REVOKED', 1], ['ACCOUNT_DISABLED', 1],
+      ['ADMIN_ROOM_UPDATED', 1], ['ADMIN_ROOM_PASSWORD_UPDATED', 1], ['ADMIN_MEMBER_REMOVED', 1],
+    ] as const) expect(await db.securityLog.count({ where: { action } }), action).toBeGreaterThanOrEqual(count);
+    for (const key of ['concurrent-update', 'concurrent-reset', 'concurrent-device', 'concurrent-disable', 'concurrent-config', 'concurrent-password', 'concurrent-remove']) {
+      expect(await db.idempotencyRecord.count({ where: { key } }), key).toBe(1);
+    }
+  });
+
+  it('rejects revoked and expired real admin actors before every privileged route family', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const creator = await createAccount();
+    const room = await createRoom(creator.account.id);
+    const member = await db.roomMembership.create({ data: { roomId: room.id, accountId: target.account.id, displayNameSnapshot: target.account.displayName } });
+    const revokedCookie = await loginCookie(admin.account, admin.password);
+    const revokedSession = await db.accountSession.findFirstOrThrow({ where: { accountId: admin.account.id, revokedAt: null } });
+    await db.accountSession.update({ where: { id: revokedSession.id }, data: { revokedAt: new Date(), revokeReason: 'TEST_REVOKED' } });
+    const routeCases = [
+      { method: 'POST' as const, url: '/api/admin/accounts', payload: { username: `blocked-${randomUUID()}`, password: 'Blocked-password-1', displayName: 'Blocked' } },
+      { method: 'GET' as const, url: `/api/admin/accounts/${target.account.id}/sessions` },
+      { method: 'PATCH' as const, url: `/api/admin/rooms/${room.id}`, payload: { name: 'Blocked' } },
+      { method: 'POST' as const, url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, payload: {} },
+      { method: 'GET' as const, url: '/api/admin/security-logs' },
+      { method: 'GET' as const, url: `/api/admin/rooms/${room.id}/audit-logs` },
+      { method: 'GET' as const, url: '/api/admin/dashboard' },
+    ];
+    for (const item of routeCases) {
+      const response = await app.inject({ ...item, headers: { cookie: revokedCookie.header, 'idempotency-key': `revoked-${randomUUID()}` } });
+      expect(response.statusCode, `${item.method} ${item.url}`).toBe(401);
+      expect(response.json()).toEqual({ error: 'SESSION_INVALID' });
+    }
+
+    const expiredCookie = await loginCookie(admin.account, admin.password);
+    await db.accountSession.updateMany({ where: { accountId: admin.account.id, revokedAt: null }, data: { expiresAt: new Date(Date.now() - 1) } });
+    const expired = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: expiredCookie.header, 'idempotency-key': 'expired-room-password' }, payload: { password: null } });
+    expect(expired.statusCode).toBe(401);
+    expect(expired.json()).toEqual({ error: 'SESSION_INVALID' });
+  });
+
+  it('enforces ordinary, disabled, revoked, expired, and privilege-revoked actors across every admin family', async () => {
+    const target = await createAccount();
+    const creator = await createAccount();
+    const room = await createRoom(creator.account.id);
+    const cases = [
+      { method: 'GET' as const, url: `/api/admin/accounts/${target.account.id}/sessions` },
+      { method: 'GET' as const, url: `/api/admin/rooms/${room.id}` },
+      { method: 'GET' as const, url: '/api/admin/security-logs' },
+      { method: 'GET' as const, url: '/api/admin/dashboard' },
+      { method: 'POST' as const, url: `/api/admin/rooms/${room.id}/finish`, payload: { reason: 'must not execute' } },
+    ];
+    const assertActor = async (cookie: string, status: number, code: string, label: string) => {
+      for (const item of cases) {
+        const response = await app.inject({ ...item, headers: { cookie, 'idempotency-key': `${label}-${randomUUID()}` } });
+        expect(response.statusCode, `${label} ${item.method} ${item.url}`).toBe(status);
+        expect(response.json()).toEqual({ error: code });
+      }
+    };
+
+    const ordinary = await createAccount();
+    await assertActor((await loginCookie(ordinary.account, ordinary.password)).header, 403, 'ADMIN_REQUIRED', 'ordinary');
+    for (const state of ['disabled', 'revoked', 'expired', 'privilege'] as const) {
+      const actor = await createAccount({ superAdmin: true });
+      const cookie = await loginCookie(actor.account, actor.password);
+      const session = await db.accountSession.findFirstOrThrow({ where: { accountId: actor.account.id, revokedAt: null } });
+      if (state === 'disabled') await db.account.update({ where: { id: actor.account.id }, data: { status: 'DISABLED' } });
+      if (state === 'revoked') await db.accountSession.update({ where: { id: session.id }, data: { revokedAt: new Date(), revokeReason: 'TEST_REVOKED' } });
+      if (state === 'expired') await db.accountSession.update({ where: { id: session.id }, data: { expiresAt: new Date(Date.now() - 1) } });
+      if (state === 'privilege') configuredSuperAdmins.delete(actor.account.username);
+      await assertActor(cookie.header, state === 'privilege' ? 403 : 401, state === 'privilege' ? 'ADMIN_REQUIRED' : 'SESSION_INVALID', state);
+    }
+    expect(await db.gameSettlement.count({ where: { roomId: room.id } })).toBe(0);
+  });
+
+  it('isolates the same key across admins for every write family and rejects changed payloads within one admin scope', async () => {
+    const firstAdmin = await createAccount({ superAdmin: true });
+    const secondAdmin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const creator = await createAccount();
+    const firstCookie = await loginCookie(firstAdmin.account, firstAdmin.password);
+    const secondCookie = await loginCookie(secondAdmin.account, secondAdmin.password);
+    const accountKey = 'cross-admin-update';
+    expect((await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: firstCookie.header, 'idempotency-key': accountKey }, payload: { displayName: 'First admin name' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: secondCookie.header, 'idempotency-key': accountKey }, payload: { note: 'second admin note' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: firstCookie.header, 'idempotency-key': accountKey }, payload: { displayName: 'Changed again' } })).json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+
+    const resetKey = 'cross-admin-reset';
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/reset-password`, headers: { cookie: firstCookie.header, 'idempotency-key': resetKey }, payload: { password: 'Cross-reset-password-1' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/reset-password`, headers: { cookie: secondCookie.header, 'idempotency-key': resetKey }, payload: { password: 'Cross-reset-password-2' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/reset-password`, headers: { cookie: firstCookie.header, 'idempotency-key': resetKey }, payload: { password: 'Changed-reset-password' } })).json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+
+    const deviceCookie = await loginCookie(target.account, 'Cross-reset-password-2');
+    const session = await db.accountSession.findFirstOrThrow({ where: { accountId: target.account.id, revokedAt: null } });
+    const deviceKey = 'cross-admin-device';
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/sessions/${session.id}/revoke`, headers: { cookie: firstCookie.header, 'idempotency-key': deviceKey }, payload: { reason: 'first reason' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/sessions/${session.id}/revoke`, headers: { cookie: firstCookie.header, 'idempotency-key': deviceKey }, payload: { reason: 'changed reason' } })).json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/sessions/${session.id}/revoke`, headers: { cookie: secondCookie.header, 'idempotency-key': deviceKey }, payload: { reason: 'second actor reason' } })).json()).toEqual({ error: 'SESSION_ALREADY_REVOKED' });
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: deviceCookie.header } })).statusCode).toBe(401);
+
+    const statusKey = 'cross-admin-status';
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: firstCookie.header, 'idempotency-key': statusKey } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: secondCookie.header, 'idempotency-key': statusKey } })).json()).toEqual({ error: 'ACCOUNT_ALREADY_DISABLED' });
+
+    const room = await createRoom(creator.account.id);
+    const configKey = 'cross-admin-config';
+    expect((await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${room.id}`, headers: { cookie: firstCookie.header, 'idempotency-key': configKey }, payload: { name: 'First room name' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${room.id}`, headers: { cookie: secondCookie.header, 'idempotency-key': configKey }, payload: { visibility: 'PUBLIC' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${room.id}`, headers: { cookie: firstCookie.header, 'idempotency-key': configKey }, payload: { name: 'Changed room name' } })).json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    const passwordKey = 'cross-admin-room-password';
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: firstCookie.header, 'idempotency-key': passwordKey }, payload: { password: 'first-room-password' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: secondCookie.header, 'idempotency-key': passwordKey }, payload: { password: 'second-room-password' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: firstCookie.header, 'idempotency-key': passwordKey }, payload: { password: null } })).json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+
+    const removableAccount = await createAccount();
+    const removable = await db.roomMembership.create({ data: { roomId: room.id, accountId: removableAccount.account.id, displayNameSnapshot: removableAccount.account.displayName } });
+    const removeKey = 'cross-admin-remove';
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${removable.id}/remove`, headers: { cookie: firstCookie.header, 'idempotency-key': removeKey }, payload: {} })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${removable.id}/remove`, headers: { cookie: secondCookie.header, 'idempotency-key': removeKey }, payload: {} })).json()).toEqual({ error: 'MEMBERSHIP_NOT_ACTIVE' });
+
+    const bankAAccount = await createAccount();
+    const bankBAccount = await createAccount();
+    const bankA = await db.roomMembership.create({ data: { roomId: room.id, accountId: bankAAccount.account.id, displayNameSnapshot: bankAAccount.account.displayName } });
+    const bankB = await db.roomMembership.create({ data: { roomId: room.id, accountId: bankBAccount.account.id, displayNameSnapshot: bankBAccount.account.displayName } });
+    const bankKey = 'cross-admin-bank';
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: firstCookie.header, 'idempotency-key': bankKey }, payload: { targetMembershipId: bankA.id } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: secondCookie.header, 'idempotency-key': bankKey }, payload: { targetMembershipId: bankB.id } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: firstCookie.header, 'idempotency-key': bankKey }, payload: { targetMembershipId: bankB.id } })).json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    for (const key of [accountKey, resetKey, configKey, passwordKey, bankKey]) expect(await db.idempotencyRecord.count({ where: { key } }), key).toBe(2);
+  });
+
+  it('paginates accounts and independently updates permissions with idempotent writes', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const first = await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'update-note' }, payload: { note: 'reviewed' } });
+    const second = await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'update-create-room' }, payload: { canCreateRoom: true } });
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ isSuperAdmin: false, canCreateRoom: true });
+
+    const list = await app.inject({ method: 'GET', url: '/api/admin/accounts?status=ACTIVE&permission=canCreateRoom&limit=2&query=Task', headers: { cookie: cookie.header } });
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toMatchObject({ items: expect.any(Array) });
+    expect(list.json().items.length).toBeLessThanOrEqual(2);
+    expectNoSecrets(list.json());
+  });
+
+  it('resets and disables accounts atomically, revokes devices, and never revives old Sessions', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const adminCookie = await loginCookie(admin.account, admin.password);
+    const firstTargetCookie = await loginCookie(target.account, target.password, '10.24.18.99');
+    await loginCookie(target.account, target.password, '172.20.8.44');
+
+    const devices = await app.inject({ method: 'GET', url: `/api/admin/accounts/${target.account.id}/sessions?state=active&limit=10`, headers: { cookie: adminCookie.header } });
+    expect(devices.statusCode).toBe(200);
+    expect(devices.json().items).toHaveLength(2);
+    expectNoSecrets(devices.json());
+
+    const reset = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/reset-password`, headers: { cookie: adminCookie.header, 'idempotency-key': 'reset-key' }, payload: { password: 'Reset-password-1' } });
+    expect(reset.statusCode).toBe(200);
+    expect(await db.accountSession.count({ where: { accountId: target.account.id, revokedAt: null } })).toBe(0);
+    const invalidated = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: firstTargetCookie.header } });
+    expect(invalidated.statusCode).toBe(401);
+
+    const fresh = await loginCookie(target.account, 'Reset-password-1');
+    const disabled = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: adminCookie.header, 'idempotency-key': 'disable-key' } });
+    expect(disabled.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: fresh.header } })).statusCode).toBe(401);
+    const enabled = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/enable`, headers: { cookie: adminCookie.header, 'idempotency-key': 'enable-key' } });
+    expect(enabled.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: fresh.header } })).statusCode).toBe(401);
+  });
+
+  it('force revokes only one target device and emits one post-commit notification', async () => {
+    const notifications: Array<{ roomId: string; event: string; payload?: Record<string, unknown> }> = [];
+    const notifyingApp = await buildApiApp({ database: db, logger: false, accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)), notifier: (roomId, event, payload) => notifications.push({ roomId, event, payload }) });
+    try {
+      const admin = await createAccount({ superAdmin: true });
+      const target = await createAccount();
+      const adminCookie = await loginCookie(admin.account, admin.password);
+      const first = await loginCookie(target.account, target.password, '10.1.2.3');
+      const second = await loginCookie(target.account, target.password, '10.1.2.4');
+      const targetSession = await db.accountSession.findFirstOrThrow({ where: { accountId: target.account.id, sessionTokenHash: { not: '' } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+      const response = await notifyingApp.inject({
+        method: 'POST',
+        url: `/api/admin/accounts/${target.account.id}/sessions/${targetSession.id}/revoke`,
+        headers: { cookie: adminCookie.header, 'idempotency-key': 'force-device-revoke' },
+        payload: { reason: 'device review' },
+      });
+      const replay = await notifyingApp.inject({
+        method: 'POST',
+        url: `/api/admin/accounts/${target.account.id}/sessions/${targetSession.id}/revoke`,
+        headers: { cookie: adminCookie.header, 'idempotency-key': 'force-device-revoke' },
+        payload: { reason: 'device review' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(replay.statusCode).toBe(200);
+      expect(await db.accountSession.count({ where: { accountId: target.account.id, revokedAt: null } })).toBe(1);
+      expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: first.header } })).statusCode).toBe(401);
+      expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: second.header } })).statusCode).toBe(200);
+      expect(notifications.filter((item) => item.event === 'account.session.revoked')).toHaveLength(1);
+      expect(notifications.find((item) => item.event === 'account.session.revoked')?.roomId).toBe(`session:${targetSession.id}`);
+      expect(await db.securityLog.count({ where: { accountId: target.account.id, actorAccountId: admin.account.id, action: 'ACCOUNT_SESSION_REVOKED' } })).toBe(1);
+    } finally {
+      await notifyingApp.close();
+    }
+  });
+
+  it('lists private unjoined rooms safely and enforces configuration/password lifecycle writes', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const lobby = await createRoom(creator.account.id);
+    const playing = await createRoom(creator.account.id, 'PLAYING');
+
+    const list = await app.inject({ method: 'GET', url: '/api/admin/rooms?status=LOBBY&limit=10', headers: { cookie: cookie.header } });
+    const detail = await app.inject({ method: 'GET', url: `/api/admin/rooms/${lobby.id}`, headers: { cookie: cookie.header } });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().items.some((room: { id: string }) => room.id === lobby.id)).toBe(true);
+    expect(list.json().items.find((room: { id: string }) => room.id === lobby.id)).toMatchObject({
+      createdAt: expect.any(String),
+      startedAt: null,
+      settlement: null,
+    });
+    expect(detail.statusCode).toBe(200);
+    expectNoSecrets(detail.json());
+
+    const updated = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${lobby.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'room-config' }, payload: { name: 'Renamed lobby', initialBalance: 7_000, autoSkipTurn: false } });
+    expect(updated.statusCode).toBe(200);
+    const password = await app.inject({ method: 'POST', url: `/api/admin/rooms/${lobby.id}/password`, headers: { cookie: cookie.header, 'idempotency-key': 'room-password' }, payload: { password: 'room-secret' } });
+    expect(password.statusCode).toBe(200);
+    expectNoSecrets(password.json());
+    const forbidden = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${playing.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-config' }, payload: { diceMode: 'PHYSICAL' } });
+    expect(forbidden.statusCode).toBe(409);
+    expect(forbidden.json()).toEqual({ error: 'ROOM_CONFIG_LIFECYCLE_CONFLICT' });
+  });
+
+  it('replays room config and password writes, rejects changed payloads, and stores no password plaintext', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    const configRequest = { method: 'PATCH' as const, url: `/api/admin/rooms/${room.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'room-config-replay' }, payload: { name: 'One room name' } };
+    const config = await app.inject(configRequest);
+    const configReplay = await app.inject(configRequest);
+    const configChanged = await app.inject({ ...configRequest, payload: { name: 'Changed room name' } });
+    expect(configReplay.json()).toEqual(config.json());
+    expect(configChanged.json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    expect(await db.auditLog.count({ where: { roomId: room.id, action: 'ADMIN_ROOM_UPDATED' } })).toBe(1);
+
+    const plaintext = `Room-${randomUUID()}`;
+    const passwordRequest = { method: 'POST' as const, url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: cookie.header, 'idempotency-key': 'room-password-replay' }, payload: { password: plaintext } };
+    const password = await app.inject(passwordRequest);
+    const passwordReplay = await app.inject(passwordRequest);
+    const passwordChanged = await app.inject({ ...passwordRequest, payload: { password: `${plaintext}-changed` } });
+    expect(passwordReplay.json()).toEqual(password.json());
+    expect(passwordChanged.json()).toEqual({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    const records = await db.idempotencyRecord.findMany({ where: { key: { in: ['room-config-replay', 'room-password-replay'] } } });
+    const logs = await db.securityLog.findMany({ where: { actorAccountId: admin.account.id, action: { in: ['ADMIN_ROOM_UPDATED', 'ADMIN_ROOM_PASSWORD_UPDATED'] } } });
+    expect(JSON.stringify([password.json(), passwordReplay.json(), records, logs])).not.toContain(plaintext);
+  });
+
+  it('reassigns bank and removes a LOBBY member without duplicating or deleting retained assets', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const first = await createAccount();
+    const second = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    const initialProperty = await db.propertyDefinition.create({ data: { name: `Property ${randomUUID()}`, displayOrder: Math.floor(Math.random() * 1_000_000), mortgagePrice: 100, purchasePrice: 200, buildCost: 50, buildingSellPrice: 25, tollEmpty: 10, tollLevel1: 20, tollLevel2: 30, tollLevel3: 40, tollLevel4: 50, tollPalace: 60 } });
+    const character = await db.character.create({ data: { id: `character-${randomUUID()}`, name: `Character ${randomUUID()}`, skillCode: `skill-${randomUUID()}`, skillConfig: {}, initialPropertyId: initialProperty.id } });
+    const firstMember = await db.roomMembership.create({ data: { roomId: room.id, accountId: first.account.id, displayNameSnapshot: first.account.displayName, characterId: character.id, isBank: true } });
+    const secondMember = await db.roomMembership.create({ data: { roomId: room.id, accountId: second.account.id, displayNameSnapshot: second.account.displayName } });
+    const player = await db.player.create({ data: { roomId: room.id, memberId: firstMember.id, characterId: character.id, pawnColor: 'red', balance: 6_000, turnOrder: 1 } });
+    await db.roomProperty.create({ data: { roomId: room.id, propertyDefinitionId: initialProperty.id, ownerPlayerId: player.id } });
+
+    const reassigned = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: cookie.header, 'idempotency-key': 'bank-reassign' }, payload: { targetMembershipId: secondMember.id } });
+    expect(reassigned.statusCode).toBe(200);
+    expect(await db.roomMembership.count({ where: { roomId: room.id, status: 'ACTIVE', isBank: true } })).toBe(1);
+    expect((await db.roomMembership.findUniqueOrThrow({ where: { id: firstMember.id } })).characterId).toBe(character.id);
+    expect(await db.player.count({ where: { memberId: firstMember.id } })).toBe(1);
+
+    const removed = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${firstMember.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'member-remove' }, payload: {} });
+    const removedReplay = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${firstMember.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'member-remove' }, payload: {} });
+    expect(removed.statusCode).toBe(200);
+    expect(removedReplay.json()).toEqual(removed.json());
+    expect(await db.player.count({ where: { id: player.id } })).toBe(1);
+    expect(await db.roomProperty.count({ where: { roomId: room.id, ownerPlayerId: null } })).toBe(1);
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: firstMember.id } })).toMatchObject({ status: 'LEFT', characterId: null, isBank: false, activeSessionId: null });
+  });
+
+  it.each(['LOBBY', 'PLAYING'] as const)('permanently blocks an admin-removed membership from joining or selecting in %s', async (status) => {
+    const account = await createAccount();
+    const creator = await createAccount();
+    const cookie = await loginCookie(account.account, account.password);
+    const room = await createRoom(creator.account.id, status);
+    if (status === 'PLAYING') await db.room.update({ where: { id: room.id }, data: { allowMidgameJoin: true } });
+    await db.roomMembership.create({ data: { roomId: room.id, accountId: account.account.id, displayNameSnapshot: account.account.displayName, status: 'LEFT', leftAt: new Date() } });
+
+    const joined = await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/join`, headers: { cookie: cookie.header, 'idempotency-key': `removed-join-${status}` }, payload: {} });
+    const selected = await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/select-character`, headers: { cookie: cookie.header, 'idempotency-key': `removed-select-${status}` }, payload: { characterId: 'irrelevant' } });
+    expect(joined.statusCode).toBe(409);
+    expect(joined.json()).toEqual({ error: 'ROOM_MEMBERSHIP_REMOVED' });
+    expect(selected.statusCode).toBe(409);
+    expect(selected.json()).toEqual({ error: 'ROOM_MEMBERSHIP_REMOVED' });
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: account.account.id } } })).toMatchObject({ status: 'LEFT', characterId: null });
+  });
+
+  it('rejects removal of a current-turn player and terminalizes pending swaps on allowed removal', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const first = await createAccount();
+    const second = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    const definition = await db.propertyDefinition.create({ data: { name: `Removal Property ${randomUUID()}`, displayOrder: Math.floor(Math.random() * 1_000_000), mortgagePrice: 100, purchasePrice: 200, buildCost: 50, buildingSellPrice: 25, tollEmpty: 10, tollLevel1: 20, tollLevel2: 30, tollLevel3: 40, tollLevel4: 50, tollPalace: 60 } });
+    const character = await db.character.create({ data: { id: `removal-${randomUUID()}`, name: `Removal Character ${randomUUID()}`, skillCode: `removal-skill-${randomUUID()}`, skillConfig: {}, initialPropertyId: definition.id } });
+    const member = await db.roomMembership.create({ data: { roomId: room.id, accountId: first.account.id, displayNameSnapshot: first.account.displayName, characterId: character.id } });
+    const target = await db.roomMembership.create({ data: { roomId: room.id, accountId: second.account.id, displayNameSnapshot: second.account.displayName } });
+    const player = await db.player.create({ data: { roomId: room.id, memberId: member.id, characterId: character.id, pawnColor: 'turn-red', balance: 6_000, turnOrder: 1 } });
+    const turn = await db.turn.create({ data: { roomId: room.id, turnNumber: 1, playerId: player.id } });
+    await db.room.update({ where: { id: room.id }, data: { currentTurnPlayerId: player.id, turnNumber: 1 } });
+    const blocked = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'current-turn-remove' }, payload: {} });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toEqual({ error: 'MEMBER_HAS_ACTIVE_TURN' });
+    expect((await db.turn.findUniqueOrThrow({ where: { id: turn.id } })).status).toBe('ACTIVE');
+
+    await db.turn.update({ where: { id: turn.id }, data: { status: 'ENDED', endedAt: new Date() } });
+    await db.room.update({ where: { id: room.id }, data: { currentTurnPlayerId: null, turnNumber: null } });
+    const swap = await db.roleSwapRequest.create({ data: { roomId: room.id, requesterMembershipId: member.id, targetMembershipId: target.id, targetCharacterId: character.id } });
+    const removed = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'pending-swap-remove' }, payload: {} });
+    expect(removed.statusCode).toBe(200);
+    expect(await db.roleSwapRequest.findUniqueOrThrow({ where: { id: swap.id } })).toMatchObject({ status: 'CANCELLED', rejectionReason: 'ADMIN_MEMBER_REMOVED' });
+  });
+
+  it('enforces PLAYING solvent/assets/debt/sole-bank blockers', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const memberAccount = await createAccount();
+    const bankAccount = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id, 'PLAYING');
+    const definition = await db.propertyDefinition.create({ data: { name: `Playing Removal ${randomUUID()}`, displayOrder: Math.floor(Math.random() * 1_000_000), mortgagePrice: 100, purchasePrice: 200, buildCost: 50, buildingSellPrice: 25, tollEmpty: 10, tollLevel1: 20, tollLevel2: 30, tollLevel3: 40, tollLevel4: 50, tollPalace: 60 } });
+    const character = await db.character.create({ data: { id: `playing-removal-${randomUUID()}`, name: `Playing Removal ${randomUUID()}`, skillCode: `playing-removal-${randomUUID()}`, skillConfig: {}, initialPropertyId: definition.id } });
+    const member = await db.roomMembership.create({ data: { roomId: room.id, accountId: memberAccount.account.id, displayNameSnapshot: memberAccount.account.displayName, characterId: character.id } });
+    const bank = await db.roomMembership.create({ data: { roomId: room.id, accountId: bankAccount.account.id, displayNameSnapshot: bankAccount.account.displayName, isBank: true } });
+    const player = await db.player.create({ data: { roomId: room.id, memberId: member.id, characterId: character.id, pawnColor: 'playing-red', balance: 5_000, turnOrder: 1 } });
+    const active = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-active-remove' }, payload: {} });
+    expect(active.json()).toEqual({ error: 'MEMBER_ACTIVE_IN_PLAY' });
+
+    await db.player.update({ where: { id: player.id }, data: { status: 'BANKRUPT', characterId: null } });
+    await db.roomMembership.update({ where: { id: member.id }, data: { characterId: null } });
+    const property = await db.roomProperty.create({ data: { roomId: room.id, propertyDefinitionId: definition.id, ownerPlayerId: player.id } });
+    const assets = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-assets-remove' }, payload: {} });
+    expect(assets.json()).toEqual({ error: 'MEMBER_HAS_ASSETS' });
+    await db.roomProperty.update({ where: { id: property.id }, data: { ownerPlayerId: null } });
+    const debt = await db.debtRecord.create({ data: { roomId: room.id, debtorPlayerId: player.id, creditorType: 'TREASURY', originalAmount: 100, outstandingAmount: 100 } });
+    const debtBlocked = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-debt-remove' }, payload: {} });
+    expect(debtBlocked.json()).toEqual({ error: 'MEMBER_HAS_OPEN_DEBT' });
+    await db.debtRecord.update({ where: { id: debt.id }, data: { status: 'SETTLED', paidAmount: 100, outstandingAmount: 0, settledAt: new Date() } });
+    const soleBank = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${bank.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-bank-remove' }, payload: {} });
+    expect(soleBank.json()).toEqual({ error: 'BANK_REPLACEMENT_REQUIRED' });
+  });
+
+  it.each(['LOBBY', 'PLAYING'] as const)('rejects %s removal with a pending game request without mutating membership, request, lock, or logs', async (status) => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const memberAccount = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    await loginCookie(memberAccount.account, memberAccount.password);
+    const room = await createRoom(creator.account.id, status);
+    const controller = await db.accountSession.findFirstOrThrow({ where: { accountId: memberAccount.account.id, revokedAt: null } });
+    const member = await db.roomMembership.create({ data: {
+      roomId: room.id,
+      accountId: memberAccount.account.id,
+      displayNameSnapshot: memberAccount.account.displayName,
+      activeSessionId: controller.id,
+      controlClaimedAt: new Date(),
+    } });
+    const player = await db.player.create({ data: {
+      roomId: room.id,
+      memberId: member.id,
+      characterId: null,
+      pawnColor: `pending-${status.toLowerCase()}`,
+      balance: 0,
+      status: status === 'PLAYING' ? 'BANKRUPT' : 'ACTIVE',
+      turnOrder: 1,
+    } });
+    const definition = await db.propertyDefinition.create({ data: {
+      name: `Pending removal ${status} ${randomUUID()}`,
+      displayOrder: Math.floor(Math.random() * 1_000_000),
+      mortgagePrice: 100,
+      purchasePrice: 200,
+      buildCost: 50,
+      buildingSellPrice: 25,
+      tollEmpty: 10,
+      tollLevel1: 20,
+      tollLevel2: 30,
+      tollLevel3: 40,
+      tollLevel4: 50,
+      tollPalace: 60,
+    } });
+    const property = await db.roomProperty.create({ data: { roomId: room.id, propertyDefinitionId: definition.id } });
+    const request = await db.gameRequest.create({ data: {
+      roomId: room.id,
+      type: 'BUY_PROPERTY',
+      actorPlayerId: player.id,
+      propertyId: property.id,
+      idempotencyKey: randomUUID(),
+    } });
+    await db.roomProperty.update({ where: { id: property.id }, data: { lockedByRequestId: request.id } });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`,
+      headers: { cookie: cookie.header, 'idempotency-key': `pending-request-remove-${status}` },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: 'MEMBER_HAS_PENDING_REQUEST' });
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: member.id } })).toMatchObject({
+      status: 'ACTIVE',
+      activeSessionId: controller.id,
+      controlClaimedAt: expect.any(Date),
+      leftAt: null,
+    });
+    expect(await db.player.findUniqueOrThrow({ where: { id: player.id } })).toMatchObject({
+      status: status === 'PLAYING' ? 'BANKRUPT' : 'ACTIVE',
+      characterId: null,
+    });
+    expect(await db.gameRequest.findUniqueOrThrow({ where: { id: request.id } })).toMatchObject({
+      status: 'PENDING',
+      rejectionReason: null,
+      resolvedAt: null,
+    });
+    expect(await db.roomProperty.findUniqueOrThrow({ where: { id: property.id } })).toMatchObject({
+      ownerPlayerId: null,
+      lockedByRequestId: request.id,
+      version: 0,
+    });
+    expect(await db.idempotencyRecord.count({ where: { key: `pending-request-remove-${status}` } })).toBe(0);
+    expect(await db.auditLog.count({ where: { roomId: room.id, action: 'ADMIN_MEMBER_REMOVED' } })).toBe(0);
+    expect(await db.securityLog.count({ where: { accountId: memberAccount.account.id, action: 'ADMIN_MEMBER_REMOVED' } })).toBe(0);
+  });
+
+  it('rejects every terminal room mutation without partial state', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const targetAccount = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id, 'FINISHED');
+    const member = await db.roomMembership.create({ data: { roomId: room.id, accountId: targetAccount.account.id, displayNameSnapshot: targetAccount.account.displayName } });
+    const writes = [
+      app.inject({ method: 'PATCH', url: `/api/admin/rooms/${room.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'terminal-config' }, payload: { name: 'No change' } }),
+      app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/password`, headers: { cookie: cookie.header, 'idempotency-key': 'terminal-password' }, payload: { password: null } }),
+      app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/members/${member.id}/remove`, headers: { cookie: cookie.header, 'idempotency-key': 'terminal-remove' }, payload: {} }),
+      app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: cookie.header, 'idempotency-key': 'terminal-bank' }, payload: { targetMembershipId: member.id } }),
+    ];
+    const responses = await Promise.all(writes);
+    expect(responses.map((response) => response.statusCode)).toEqual([409, 409, 409, 409]);
+    expect(responses.map((response) => response.json())).toEqual(Array(4).fill({ error: 'ROOM_TERMINAL' }));
+    expect((await db.room.findUniqueOrThrow({ where: { id: room.id } })).name).toBe(room.name);
+    expect(await db.idempotencyRecord.count({ where: { key: { startsWith: 'terminal-' } } })).toBe(0);
+  });
+
+  it('rolls a room mutation, AuditLog, and idempotency record back when SecurityLog insertion fails', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    executeSql(isolatedUrl, `
+      CREATE OR REPLACE FUNCTION "task6_reject_room_update_log"() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW."action" = 'ADMIN_ROOM_UPDATED' THEN RAISE EXCEPTION 'task6 forced room log failure'; END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER "task6_reject_room_update_log" BEFORE INSERT ON "SecurityLog"
+      FOR EACH ROW EXECUTE FUNCTION "task6_reject_room_update_log"();
+    `);
+    try {
+      const response = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${room.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'atomic-room-update' }, payload: { name: 'Must roll back room' } });
+      expect(response.statusCode).toBe(500);
+      expect((await db.room.findUniqueOrThrow({ where: { id: room.id } })).name).toBe(room.name);
+      expect(await db.auditLog.count({ where: { roomId: room.id, action: 'ADMIN_ROOM_UPDATED' } })).toBe(0);
+      expect(await db.idempotencyRecord.count({ where: { key: 'atomic-room-update' } })).toBe(0);
+    } finally {
+      executeSql(isolatedUrl, 'DROP TRIGGER IF EXISTS "task6_reject_room_update_log" ON "SecurityLog"; DROP FUNCTION IF EXISTS "task6_reject_room_update_log"();');
+    }
+  });
+
+  it('handles vacant, same-target, corrupt, and concurrent bank reassignment states', async () => {
+    const firstAdmin = await createAccount({ superAdmin: true });
+    const secondAdmin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const a = await createAccount();
+    const b = await createAccount();
+    const firstCookie = await loginCookie(firstAdmin.account, firstAdmin.password);
+    const secondCookie = await loginCookie(secondAdmin.account, secondAdmin.password);
+    const room = await createRoom(creator.account.id);
+    const memberA = await db.roomMembership.create({ data: { roomId: room.id, accountId: a.account.id, displayNameSnapshot: a.account.displayName } });
+    const memberB = await db.roomMembership.create({ data: { roomId: room.id, accountId: b.account.id, displayNameSnapshot: b.account.displayName } });
+    const vacant = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: firstCookie.header, 'idempotency-key': 'vacant-bank' }, payload: { targetMembershipId: memberA.id } });
+    expect(vacant.statusCode).toBe(200);
+    const auditCount = await db.auditLog.count({ where: { roomId: room.id, action: 'ADMIN_BANK_REASSIGNED' } });
+    const same = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: firstCookie.header, 'idempotency-key': 'same-bank' }, payload: { targetMembershipId: memberA.id } });
+    expect(same.statusCode).toBe(200);
+    expect(await db.auditLog.count({ where: { roomId: room.id, action: 'ADMIN_BANK_REASSIGNED' } })).toBe(auditCount);
+
+    const currentBankAccount = await createAccount();
+    await db.roomMembership.update({ where: { id: memberA.id }, data: { isBank: false } });
+    await db.roomMembership.create({ data: { roomId: room.id, accountId: currentBankAccount.account.id, displayNameSnapshot: currentBankAccount.account.displayName, isBank: true } });
+
+    const concurrent = await Promise.all([
+      app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: firstCookie.header, 'idempotency-key': 'concurrent-bank-a' }, payload: { targetMembershipId: memberA.id } }),
+      app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: secondCookie.header, 'idempotency-key': 'concurrent-bank-b' }, payload: { targetMembershipId: memberB.id } }),
+    ]);
+    expect(concurrent.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    expect(await db.roomMembership.count({ where: { roomId: room.id, status: 'ACTIVE', isBank: true } })).toBe(1);
+
+    await db.$executeRawUnsafe('DROP INDEX "RoomMember_one_active_bank_per_room";');
+    try {
+      await db.roomMembership.updateMany({ where: { id: { in: [memberA.id, memberB.id] } }, data: { isBank: true } });
+      const corrupt = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: firstCookie.header, 'idempotency-key': 'corrupt-bank' }, payload: { targetMembershipId: memberA.id } });
+      expect(corrupt.statusCode).toBe(409);
+      expect(corrupt.json()).toEqual({ error: 'BANK_STATE_INVALID' });
+    } finally {
+      await db.$executeRawUnsafe('UPDATE "RoomMember" SET "isBank" = false WHERE "roomId" = $1 AND "id" <> $2', room.id, memberA.id);
+      await db.$executeRawUnsafe('CREATE UNIQUE INDEX "RoomMember_one_active_bank_per_room" ON "RoomMember"("roomId") WHERE "isBank" = true AND "status" = \'ACTIVE\';');
+    }
+  });
+
+  it('recovers one exact concurrent same-key bank reassignment winner', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const targetAccount = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    const target = await db.roomMembership.create({ data: { roomId: room.id, accountId: targetAccount.account.id, displayNameSnapshot: targetAccount.account.displayName } });
+    const request = { method: 'POST' as const, url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: cookie.header, 'idempotency-key': 'same-bank-concurrency' }, payload: { targetMembershipId: target.id } };
+    const responses = await Promise.all([app.inject(request), app.inject(request)]);
+    expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+    expect(responses[0]!.json()).toEqual(responses[1]!.json());
+    expect(await db.auditLog.count({ where: { roomId: room.id, action: 'ADMIN_BANK_REASSIGNED' } })).toBe(1);
+    expect(await db.idempotencyRecord.count({ where: { key: 'same-bank-concurrency' } })).toBe(1);
+  });
+
+  it('changes only isBank while preserving both character, Player, asset, and controller identities', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const first = await createAccount();
+    const second = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const firstCookie = await loginCookie(first.account, first.password, '10.10.1.1');
+    const secondCookie = await loginCookie(second.account, second.password, '10.10.1.2');
+    const firstSession = await db.accountSession.findFirstOrThrow({ where: { accountId: first.account.id, revokedAt: null } });
+    const secondSession = await db.accountSession.findFirstOrThrow({ where: { accountId: second.account.id, revokedAt: null } });
+    expect(firstCookie.header).toBeTruthy();
+    expect(secondCookie.header).toBeTruthy();
+    const room = await createRoom(creator.account.id);
+    const definitions = await Promise.all([0, 1].map((index) => db.propertyDefinition.create({ data: { name: `Bank Preserve ${index} ${randomUUID()}`, displayOrder: Math.floor(Math.random() * 1_000_000), mortgagePrice: 100, purchasePrice: 200, buildCost: 50, buildingSellPrice: 25, tollEmpty: 10, tollLevel1: 20, tollLevel2: 30, tollLevel3: 40, tollLevel4: 50, tollPalace: 60 } })));
+    const characters = await Promise.all(definitions.map((definition, index) => db.character.create({ data: { id: `bank-preserve-${randomUUID()}`, name: `Bank Preserve Character ${index} ${randomUUID()}`, skillCode: `bank-preserve-skill-${randomUUID()}`, skillConfig: {}, initialPropertyId: definition.id } })));
+    const firstMember = await db.roomMembership.create({ data: { roomId: room.id, accountId: first.account.id, displayNameSnapshot: first.account.displayName, characterId: characters[0]!.id, isBank: true, activeSessionId: firstSession.id, controlClaimedAt: new Date() } });
+    const secondMember = await db.roomMembership.create({ data: { roomId: room.id, accountId: second.account.id, displayNameSnapshot: second.account.displayName, characterId: characters[1]!.id, activeSessionId: secondSession.id, controlClaimedAt: new Date() } });
+    const firstPlayer = await db.player.create({ data: { roomId: room.id, memberId: firstMember.id, characterId: characters[0]!.id, pawnColor: 'preserve-a', balance: 6_000, turnOrder: 1 } });
+    const secondPlayer = await db.player.create({ data: { roomId: room.id, memberId: secondMember.id, characterId: characters[1]!.id, pawnColor: 'preserve-b', balance: 5_000, turnOrder: 2 } });
+    await db.roomProperty.createMany({ data: [
+      { roomId: room.id, propertyDefinitionId: definitions[0]!.id, ownerPlayerId: firstPlayer.id },
+      { roomId: room.id, propertyDefinitionId: definitions[1]!.id, ownerPlayerId: secondPlayer.id },
+    ] });
+    const beforePlayers = await db.player.findMany({ where: { id: { in: [firstPlayer.id, secondPlayer.id] } }, orderBy: { id: 'asc' } });
+    const beforeProperties = await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } });
+
+    const response = await app.inject({ method: 'POST', url: `/api/admin/rooms/${room.id}/bank/reassign`, headers: { cookie: cookie.header, 'idempotency-key': 'preserve-bank-identities' }, payload: { targetMembershipId: secondMember.id } });
+    expect(response.statusCode).toBe(200);
+    expect(await db.player.findMany({ where: { id: { in: [firstPlayer.id, secondPlayer.id] } }, orderBy: { id: 'asc' } })).toEqual(beforePlayers);
+    expect(await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(beforeProperties);
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: firstMember.id } })).toMatchObject({ characterId: characters[0]!.id, isBank: false, activeSessionId: firstSession.id });
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: secondMember.id } })).toMatchObject({ characterId: characters[1]!.id, isBank: true, activeSessionId: secondSession.id });
+  });
+
+  it('returns reviewed dashboard aggregates and rejects SecurityLog mutation at PostgreSQL', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    await createRoom(creator.account.id, 'LOBBY');
+    await createRoom(creator.account.id, 'PLAYING');
+    const response = await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: { cookie: cookie.header } });
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(response.json()).sort()).toEqual(['accounts', 'characterSelections', 'characterWins', 'games', 'recentGames', 'rooms', 'sessions']);
+    expect(response.json()).toMatchObject({
+      accounts: { total: expect.any(Number), active: expect.any(Number) },
+      sessions: { valid: expect.any(Number) },
+      rooms: { lobby: expect.any(Number), playing: expect.any(Number), finished: expect.any(Number) },
+      games: { settledTotal: expect.any(Number), averageDurationSeconds: expect.any(Number) },
+      characterSelections: expect.any(Array),
+      characterWins: expect.any(Array),
+      recentGames: expect.any(Array),
+    });
+
+    const stored = await db.securityLog.create({ data: { accountId: admin.account.id, actorAccountId: admin.account.id, action: 'TASK6_APPEND_ONLY', detailsJson: { reviewed: true } } });
+    await expect(db.securityLog.update({ where: { id: stored.id }, data: { action: 'MUTATED' } })).rejects.toThrow();
+    await expect(db.securityLog.delete({ where: { id: stored.id } })).rejects.toThrow();
+    expect(await db.securityLog.findUniqueOrThrow({ where: { id: stored.id } })).toMatchObject({ action: 'TASK6_APPEND_ONLY' });
+  });
+
+  it('aggregates durable character selections, tied historical winners, durations, and recent games', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const firstWinner = await createAccount();
+    const secondWinner = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const definition = await db.propertyDefinition.create({ data: { name: `Dashboard Property ${randomUUID()}`, displayOrder: Math.floor(Math.random() * 1_000_000), mortgagePrice: 100, purchasePrice: 200, buildCost: 50, buildingSellPrice: 25, tollEmpty: 10, tollLevel1: 20, tollLevel2: 30, tollLevel3: 40, tollLevel4: 50, tollPalace: 60 } });
+    const character = await db.character.create({ data: { id: `dashboard-${randomUUID()}`, name: 'Current Character Name', skillCode: `dashboard-skill-${randomUUID()}`, skillConfig: {}, initialPropertyId: definition.id } });
+    await db.securityLog.createMany({ data: [
+      { accountId: firstWinner.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: 'historic-room-a', characterId: character.id, characterNameSnapshot: 'Historic Selection Name' } },
+      { accountId: secondWinner.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: 'historic-room-b', characterId: character.id, characterNameSnapshot: 'Historic Selection Name' } },
+    ] });
+
+    const older = await createRoom(admin.account.id, 'PLAYING');
+    const newer = await createRoom(admin.account.id, 'PLAYING');
+    await db.room.update({ where: { id: older.id }, data: { name: 'Older finished game' } });
+    await db.room.update({ where: { id: newer.id }, data: { name: 'Newer finished game' } });
+    const olderEndedAt = new Date('2026-07-25T10:00:00.000Z');
+    const newerEndedAt = new Date('2026-07-26T10:00:00.000Z');
+    for (const [room, endedAt, duration] of [[older, olderEndedAt, 120], [newer, newerEndedAt, 240]] as const) {
+      await db.gameSettlement.create({ data: {
+        roomId: room.id,
+        endedByAccountId: admin.account.id,
+        endedAt,
+        totalTurns: 2,
+        durationSeconds: duration,
+        forced: false,
+        winnersJson: [firstWinner.account.id, secondWinner.account.id],
+        rankingJson: [{ accountId: firstWinner.account.id, rank: 1 }, { accountId: secondWinner.account.id, rank: 1 }],
+        players: { create: [
+          { accountId: firstWinner.account.id, displayNameSnapshot: 'Winner A', characterNameSnapshot: 'Historic Winner', cash: 100, unmortgagedPropertyValue: 0, mortgagedPropertyNetValue: 0, buildingSellValue: 0, totalWealth: 100, rank: 1, isWinner: true, propertyDetailsJson: [] },
+          { accountId: secondWinner.account.id, displayNameSnapshot: 'Winner B', characterNameSnapshot: 'Historic Winner', cash: 100, unmortgagedPropertyValue: 0, mortgagedPropertyNetValue: 0, buildingSellValue: 0, totalWealth: 100, rank: 1, isWinner: true, propertyDetailsJson: [] },
+        ] },
+      } });
+      await db.room.update({ where: { id: room.id }, data: { status: 'FINISHED' } });
+    }
+    await db.character.update({ where: { id: character.id }, data: { name: 'Renamed Current Character' } });
+
+    const response = await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: { cookie: cookie.header } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().games).toMatchObject({ averageDurationSeconds: expect.any(Number) });
+    expect(response.json().characterSelections).toContainEqual({ characterId: character.id, characterNameSnapshot: 'Historic Selection Name', count: 2 });
+    expect(response.json().characterWins).toContainEqual({ characterNameSnapshot: 'Historic Winner', count: 4 });
+    expect(response.json().recentGames.slice(0, 2).map((game: { roomNameSnapshot: string }) => game.roomNameSnapshot)).toEqual(['Newer finished game', 'Older finished game']);
+    expect(response.json().recentGames[0].winners).toHaveLength(2);
+  });
+
+  it('filters and paginates logs while redacting unknown JSON, raw IPs, and Session secrets', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    await db.securityLog.create({ data: { accountId: target.account.id, actorAccountId: admin.account.id, action: 'ACCOUNT_UPDATED', ip: '120.31.22.36', detailsJson: { changedFields: ['displayName'], sessionId: 'must-not-leak', password: 'must-not-leak' } } });
+    await db.securityLog.create({ data: { accountId: target.account.id, actorAccountId: admin.account.id, action: 'UNKNOWN_SECRET_ACTION', ip: '120.31.22.36', detailsJson: { token: 'must-not-leak', nested: { passwordHash: 'must-not-leak' } } } });
+    const response = await app.inject({ method: 'GET', url: `/api/admin/security-logs?actorAccountId=${admin.account.id}&accountId=${target.account.id}&limit=1`, headers: { cookie: cookie.header } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().items).toHaveLength(1);
+    expect(response.json().nextCursor).toEqual(expect.any(String));
+    expectNoSecrets(response.json());
+    expect(JSON.stringify(response.json())).not.toContain('must-not-leak');
+  });
+
+  it('traverses deterministic SecurityLog date/cursor pages without gaps or duplicates', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const target = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const times = ['2026-07-20T10:00:00.000Z', '2026-07-21T10:00:00.000Z', '2026-07-22T10:00:00.000Z'];
+    const rows = [];
+    for (const createdAt of times) rows.push(await db.securityLog.create({ data: { accountId: target.account.id, actorAccountId: admin.account.id, action: 'ACCOUNT_UPDATED', detailsJson: { changedFields: ['displayName'] }, createdAt: new Date(createdAt) } }));
+    const base = `/api/admin/security-logs?action=ACCOUNT_UPDATED&actorAccountId=${admin.account.id}&accountId=${target.account.id}&from=2026-07-20T00:00:00.000Z&to=2026-07-23T00:00:00.000Z&limit=1`;
+    const first = await app.inject({ method: 'GET', url: base, headers: { cookie: cookie.header } });
+    const second = await app.inject({ method: 'GET', url: `${base}&cursor=${encodeURIComponent(first.json().nextCursor)}`, headers: { cookie: cookie.header } });
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect([first.json().items[0].id, second.json().items[0].id]).toEqual([rows[2]!.id, rows[1]!.id]);
+    expect(new Set([first.json().items[0].id, second.json().items[0].id]).size).toBe(2);
+  });
+
+  it('filters and paginates room AuditLogs with reviewed details only', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id);
+    const actor = await db.roomMembership.create({ data: { roomId: room.id, accountId: admin.account.id, displayNameSnapshot: admin.account.displayName } });
+    const known = await db.auditLog.create({ data: { roomId: room.id, actorMemberId: actor.id, actorRole: 'ADMIN', action: 'ADMIN_MEMBER_REMOVED', entityType: 'RoomMembership', entityId: 'member-safe', beforeJson: { status: 'ACTIVE', activeSessionId: 'must-not-leak', passwordHash: 'must-not-leak' }, afterJson: { status: 'LEFT', isBank: false }, createdAt: new Date('2026-07-22T10:00:00.000Z') } });
+    const older = await db.auditLog.create({ data: { roomId: room.id, actorMemberId: actor.id, actorRole: 'ADMIN', action: 'ADMIN_MEMBER_REMOVED', entityType: 'RoomMembership', entityId: 'member-older', beforeJson: { status: 'ACTIVE' }, afterJson: { status: 'LEFT' }, createdAt: new Date('2026-07-21T10:00:00.000Z') } });
+    await db.auditLog.create({ data: { roomId: room.id, actorRole: 'ADMIN', action: 'UNKNOWN_AUDIT_ACTION', entityType: 'Secret', entityId: 'secret', afterJson: { token: 'must-not-leak' } } });
+    const base = `/api/admin/rooms/${room.id}/audit-logs?action=ADMIN_MEMBER_REMOVED&actorMemberId=${actor.id}&from=2026-07-20T00:00:00.000Z&to=2026-07-23T00:00:00.000Z&limit=1`;
+    const filtered = await app.inject({ method: 'GET', url: base, headers: { cookie: cookie.header } });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json().items).toHaveLength(1);
+    expect(filtered.json().items[0]).toMatchObject({ id: known.id, details: { before: { status: 'ACTIVE' }, after: { status: 'LEFT', isBank: false } } });
+    expect(JSON.stringify(filtered.json())).not.toContain('must-not-leak');
+    const page = await app.inject({ method: 'GET', url: `${base}&cursor=${encodeURIComponent(filtered.json().nextCursor)}`, headers: { cookie: cookie.header } });
+    expect(page.json().items).toHaveLength(1);
+    expect(page.json().items[0].id).toBe(older.id);
+    expect(page.json().items[0].id).not.toBe(known.id);
+    expect(JSON.stringify(page.json())).not.toContain('must-not-leak');
+  });
+
+  it('delegates forced finish to Task 5 and emits create-only settlement events with actor reason logging', async () => {
+    const notifications: Array<{ roomId: string; event: string }> = [];
+    const notifyingApp = await buildApiApp({ database: db, logger: false, accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)), notifier: (roomId, event) => notifications.push({ roomId, event }) });
+    try {
+      const admin = await createAccount({ superAdmin: true });
+      const creator = await createAccount();
+      const cookie = await loginCookie(admin.account, admin.password);
+      const room = await createRoom(creator.account.id);
+      const request = { method: 'POST' as const, url: `/api/admin/rooms/${room.id}/finish`, headers: { cookie: cookie.header, 'idempotency-key': 'task6-forced-finish' }, payload: { reason: 'administrative closure' } };
+      const created = await notifyingApp.inject(request);
+      const replay = await notifyingApp.inject(request);
+      expect(created.statusCode).toBe(200);
+      expect(replay.statusCode).toBe(200);
+      expect(created.json()).toMatchObject({ created: true, settlement: { forced: true, forceReason: 'administrative closure' } });
+      expect(replay.json()).toMatchObject({ created: false });
+      expect(await db.gameSettlement.count({ where: { roomId: room.id } })).toBe(1);
+      expect(notifications.filter((item) => item.roomId === room.id)).toEqual([
+        { roomId: room.id, event: 'room.finished' },
+        { roomId: room.id, event: 'settlement.created' },
+      ]);
+      expect(await db.securityLog.count({ where: { actorAccountId: admin.account.id, action: 'ROOM_FORCE_FINISHED', detailsJson: { path: ['forceReason'], equals: 'administrative closure' } } })).toBe(1);
+    } finally {
+      await notifyingApp.close();
+    }
+  });
+
+  it('rejects SecurityLog update, delete, and truncate while retaining every stored row', async () => {
+    const account = await createAccount({ superAdmin: true });
+    const rows = await Promise.all(['UPDATE_GUARD', 'DELETE_GUARD', 'TRUNCATE_GUARD'].map((action) => db.securityLog.create({ data: { accountId: account.account.id, action } })));
+    const update = db.securityLog.update({ where: { id: rows[0]!.id }, data: { action: 'MUTATED' } });
+    const remove = db.securityLog.delete({ where: { id: rows[1]!.id } });
+    const truncate = db.$executeRawUnsafe('TRUNCATE TABLE "SecurityLog"');
+    const outcomes = await Promise.allSettled([update, remove, truncate]);
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['rejected', 'rejected', 'rejected']);
+    expect(await db.securityLog.count({ where: { id: { in: rows.map((row) => row.id) } } })).toBe(3);
+  });
+});
