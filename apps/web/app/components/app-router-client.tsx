@@ -13,6 +13,7 @@ import {
   Building2,
   Check,
   ChevronRight,
+  CircleMinus,
   CircleDollarSign,
   Crown,
   Dices,
@@ -81,6 +82,7 @@ type BankRequest = {
   targetPlayerId?: string | null;
   propertyName?: string;
   quantity?: number;
+  note?: string | null;
   amount: number;
   status: string;
   buyerConfirmed?: boolean;
@@ -140,6 +142,7 @@ type SkipAdjustment = {
 
 type SkipConsumption = {
   playerId: string;
+  count: number;
   reason: string;
 };
 
@@ -1394,7 +1397,7 @@ function PlayerView({
   const current = snapshot.players.find((player) => player.id === snapshot.currentPlayerId);
   const canAct = snapshot.diceMode === 'PHYSICAL' || me?.id === snapshot.currentPlayerId;
   const mine = useMemo(() => snapshot.properties.filter((property) => property.ownerId === me?.id), [snapshot.properties, me?.id]);
-  const [panel, setPanel] = useState<'LANDING' | 'START' | 'PROPERTY' | 'ASSET' | 'TRANSFER' | 'BANK_PAYMENT' | 'EVENT' | 'END' | null>(null);
+  const [panel, setPanel] = useState<'LANDING' | 'START' | 'PROPERTY' | 'ASSET' | 'TRANSFER' | 'BANK_PAYMENT' | 'EVENT' | 'END' | 'SKIP_CONSUME' | null>(null);
   const [tradeConfirmTarget, setTradeConfirmTarget] = useState<BankRequest | null>(null);
   const [landing, setLanding] = useState(snapshot.properties[0]?.name ?? '');
   const [trustedLandings, setTrustedLandings] = useState<{ turnKey: string; propertyId?: string; propertyName?: string; startId?: string }>({ turnKey: '' });
@@ -1411,6 +1414,9 @@ function PlayerView({
   const [transferIsPlotFine, setTransferIsPlotFine] = useState(false);
   const [bankPaymentAmount, setBankPaymentAmount] = useState('');
   const [coldPalaceCount, setColdPalaceCount] = useState('1');
+  const [plotRestCount, setPlotRestCount] = useState('1');
+  const [plotRestReason, setPlotRestReason] = useState('');
+  const [playerSkipConsumeCount, setPlayerSkipConsumeCount] = useState('1');
   const idempotentAction = booleanRoomAction(action);
   const assetProperties = snapshot.properties.filter((property) => {
     if (assetMode === 'PAY_TOLL') return Boolean(property.ownerId && property.ownerId !== playerId && currentPropertyToll(property, snapshot.players) > 0);
@@ -1449,6 +1455,7 @@ function PlayerView({
   const validTransferAmount = transferIsPlotFine
     ? Number.isInteger(rawTransferAmount) && transferAmountAfterPlotFineReduction > 0
     : rawTransferAmount > 0;
+  const playerSkipConsumeTotal = playerSkipConsumeCount === 'ALL' ? me?.remainingSkipTurns ?? 0 : Number(playerSkipConsumeCount);
 
   useEffect(() => {
     setTrustedLandings((current) => current.turnKey === turnKey ? current : { turnKey });
@@ -1601,6 +1608,29 @@ function PlayerView({
     if (ok) { setPanel(null); showNotice(type === 'cold' ? '冷宫事件已提交银行确认' : '伙伴卡事件已提交银行确认'); }
   }
 
+  async function requestPlotRest() {
+    const count = Number(plotRestCount);
+    if (!Number.isInteger(count) || count <= 0 || !plotRestReason.trim()) return;
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/requests`, { playerId, type: 'PLOT_REST_EVENT', count, reason: plotRestReason.trim() });
+    if (ok) {
+      setPlotRestCount('1');
+      setPlotRestReason('');
+      setPanel(null);
+      showNotice('剧情停留已提交银行确认');
+    }
+  }
+
+  async function requestSkipConsumption() {
+    const remainingSkipTurns = me?.remainingSkipTurns ?? 0;
+    if (!Number.isInteger(playerSkipConsumeTotal) || playerSkipConsumeTotal <= 0 || playerSkipConsumeTotal > remainingSkipTurns) return;
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/requests`, { playerId, type: 'CONSUME_SKIP_TURNS', count: playerSkipConsumeTotal });
+    if (ok) {
+      setPlayerSkipConsumeCount('1');
+      setPanel(null);
+      showNotice('减除停轮申请已提交银行确认');
+    }
+  }
+
   return (
     <>
       <section className="identity-band">
@@ -1647,6 +1677,7 @@ function PlayerView({
             <Quick icon={<Banknote />} label="银行付款申请" disabled={busy} onClick={() => setPanel('BANK_PAYMENT')} />
             <Quick icon={<Crown />} label="实体事件" disabled={busy} onClick={() => setPanel('EVENT')} />
             <Quick icon={<Play />} label="结束回合" danger disabled={busy || !canAct || snapshot.diceMode !== 'ELECTRONIC'} onClick={() => setPanel('END')} />
+            <Quick icon={<CircleMinus />} label="停轮次数减除" disabled={busy || snapshot.diceMode !== 'PHYSICAL' || me.remainingSkipTurns <= 0} onClick={() => setPanel('SKIP_CONSUME')} />
           </div>
           <SectionTitle title="我的地产" action={`${mine.length} 块`} />
           <PropertyList properties={mine} players={snapshot.players} />
@@ -1727,7 +1758,26 @@ function PlayerView({
 
       {panel === 'BANK_PAYMENT' && <ActionSheet title="申请银行付款" onClose={() => setPanel(null)}><form onSubmit={(event) => void requestBankPayment(event)}><label>付款金额<input required type="number" min="1" step="1" inputMode="numeric" value={bankPaymentAmount} onChange={(event) => setBankPaymentAmount(event.target.value)} /></label><button className="primary" disabled={busy || !Number.isInteger(Number(bankPaymentAmount)) || Number(bankPaymentAmount) <= 0} type="submit">{busy ? <LoaderCircle className="spin" /> : <Banknote />}提交付款申请</button></form></ActionSheet>}
 
-      {panel === 'EVENT' && <ActionSheet title="实体事件" onClose={() => setPanel(null)}><p className="sheet-copy">只记录现场已真实发生的实体卡牌或冷宫事件。</p><label>冷宫停轮次数<input type="number" min="1" step="1" inputMode="numeric" value={coldPalaceCount} onChange={(event) => setColdPalaceCount(event.target.value)} /></label><div className="event-actions"><button className="quick" disabled={busy || !Number.isInteger(Number(coldPalaceCount)) || Number(coldPalaceCount) <= 0} onClick={() => void triggerEvent('cold')}><Crown /><span>提交冷宫事件</span></button><button className="quick" disabled={busy} onClick={() => void triggerEvent('companion')}><Users /><span>获得伙伴卡</span></button></div></ActionSheet>}
+      {panel === 'EVENT' && (
+        <ActionSheet title="实体事件" onClose={() => setPanel(null)}>
+          <p className="sheet-copy">只记录现场已真实发生的实体卡牌或冷宫事件。</p>
+          <label>冷宫停轮次数<input type="number" min="1" step="1" inputMode="numeric" value={coldPalaceCount} onChange={(event) => setColdPalaceCount(event.target.value)} /></label>
+          <label>剧情停留次数<input type="number" min="1" step="1" inputMode="numeric" value={plotRestCount} onChange={(event) => setPlotRestCount(event.target.value)} /></label>
+          <label>剧情说明<textarea required rows={2} value={plotRestReason} onChange={(event) => setPlotRestReason(event.target.value)} placeholder="填写剧情停留原因" /></label>
+          <div className="event-actions">
+            <button className="quick" disabled={busy || !Number.isInteger(Number(coldPalaceCount)) || Number(coldPalaceCount) <= 0} onClick={() => void triggerEvent('cold')}><Crown /><span>提交冷宫事件</span></button>
+            <button className="quick" disabled={busy || !Number.isInteger(Number(plotRestCount)) || Number(plotRestCount) <= 0 || !plotRestReason.trim()} onClick={() => void requestPlotRest()}><CircleMinus /><span>提交剧情停留</span></button>
+            <button className="quick" disabled={busy} onClick={() => void triggerEvent('companion')}><Users /><span>获得伙伴卡</span></button>
+          </div>
+        </ActionSheet>
+      )}
+
+      {panel === 'SKIP_CONSUME' && (
+        <ActionSheet title="停轮次数减除" onClose={() => setPanel(null)}>
+          <label>减除次数<select value={playerSkipConsumeCount} onChange={(event) => setPlayerSkipConsumeCount(event.target.value)}>{Array.from({ length: me.remainingSkipTurns }, (_, index) => index + 1).map((count) => <option value={count} key={count}>{count} 次</option>)}<option value="ALL">全部（{me.remainingSkipTurns} 次）</option></select></label>
+          <button className="primary" disabled={busy || !Number.isInteger(playerSkipConsumeTotal) || playerSkipConsumeTotal <= 0 || playerSkipConsumeTotal > me.remainingSkipTurns} onClick={() => void requestSkipConsumption()}>{busy ? <LoaderCircle className="spin" /> : <CircleMinus />}提交减除申请</button>
+        </ActionSheet>
+      )}
     </>
   );
 }
@@ -1769,6 +1819,7 @@ function BankView({
   const [skipSource, setSkipSource] = useState('PLOT_REST');
   const [skipReason, setSkipReason] = useState('');
   const [skipConsumeReason, setSkipConsumeReason] = useState('');
+  const [skipConsumeCount, setSkipConsumeCount] = useState('1');
   const [skipAdjustment, setSkipAdjustment] = useState<SkipAdjustment | null>(null);
   const [skipConsumption, setSkipConsumption] = useState<SkipConsumption | null>(null);
   const [plotFinePlayerId, setPlotFinePlayerId] = useState(snapshot.players[0]?.id ?? '');
@@ -1910,8 +1961,10 @@ function BankView({
   }
 
   function prepareSkipConsumption() {
-    if (!skipConsumeReason.trim()) return;
-    setSkipConsumption({ playerId: skipPlayerId, reason: skipConsumeReason.trim() });
+    const player = snapshot.players.find((item) => item.id === skipPlayerId);
+    const count = skipConsumeCount === 'ALL' ? player?.remainingSkipTurns ?? 0 : Number(skipConsumeCount);
+    if (!skipConsumeReason.trim() || !Number.isInteger(count) || count <= 0 || count > (player?.remainingSkipTurns ?? 0)) return;
+    setSkipConsumption({ playerId: skipPlayerId, count, reason: skipConsumeReason.trim() });
   }
 
   async function executeSkipConsumption() {
@@ -1919,8 +1972,9 @@ function BankView({
     const ok = await idempotentAction(`/api/rooms/${snapshot.id}/bank/consume-skip-turn`, skipConsumption);
     if (ok) {
       setSkipConsumeReason('');
+      setSkipConsumeCount('1');
       setSkipConsumption(null);
-      showNotice('已扣减 1 次停轮');
+      showNotice(`已扣减 ${skipConsumption.count} 次停轮`);
     }
   }
 
@@ -1964,6 +2018,8 @@ function BankView({
   const actualSkipCount = skipAdjustment ? Math.max(0, skipAdjustment.count - coldPalaceReduction) : 0;
   const coldPalaceCashReward = skipAdjustment?.source === 'COLD_PALACE' ? Math.max(0, skipAdjustmentPlayer?.coldPalaceCashReward ?? 0) : 0;
   const skipConsumptionPlayer = skipConsumption ? snapshot.players.find((player) => player.id === skipConsumption.playerId) : undefined;
+  const selectedSkipConsumptionPlayer = snapshot.players.find((player) => player.id === skipPlayerId);
+  const selectedSkipConsumptionCount = skipConsumeCount === 'ALL' ? selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0 : Number(skipConsumeCount);
 
   return (
     <>
@@ -2024,9 +2080,9 @@ function BankView({
               <label>停轮来源<select value={skipSource} onChange={(event) => setSkipSource(event.target.value)}><option value="PLOT_REST">剧情原地停留</option><option value="COLD_PALACE">冷宫</option><option value="MANUAL">现场裁定</option></select></label>
             </div>
             <label>停轮说明<input required value={skipReason} onChange={(event) => setSkipReason(event.target.value)} placeholder="例：剧情卡原地停留" /></label>
-            {snapshot.diceMode === 'PHYSICAL' && <label>扣减原因<input required value={skipConsumeReason} onChange={(event) => setSkipConsumeReason(event.target.value)} placeholder="填写本次实体回合确认依据" /></label>}
+            {snapshot.diceMode === 'PHYSICAL' && <><label>扣减次数<select value={skipConsumeCount} onChange={(event) => setSkipConsumeCount(event.target.value)}>{Array.from({ length: selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0 }, (_, index) => index + 1).map((count) => <option value={count} key={count}>{count} 次</option>)}<option value="ALL">全部（{selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0} 次）</option></select></label><label>扣减原因<input required value={skipConsumeReason} onChange={(event) => setSkipConsumeReason(event.target.value)} placeholder="填写本次实体回合确认依据" /></label></>}
             <div className={`split-actions ${snapshot.diceMode === 'PHYSICAL' ? '' : 'single'}`}>
-              {snapshot.diceMode === 'PHYSICAL' && <button type="button" className="secondary danger-text" disabled={busy || !skipPlayerId || !skipConsumeReason.trim() || (snapshot.players.find((player) => player.id === skipPlayerId)?.remainingSkipTurns ?? 0) <= 0} onClick={prepareSkipConsumption}>扣减 1 次</button>}
+              {snapshot.diceMode === 'PHYSICAL' && <button type="button" className="secondary danger-text" disabled={busy || !skipPlayerId || !skipConsumeReason.trim() || !Number.isInteger(selectedSkipConsumptionCount) || selectedSkipConsumptionCount <= 0 || selectedSkipConsumptionCount > (selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0)} onClick={prepareSkipConsumption}>扣减停轮</button>}
               <button className="primary" type="submit" disabled={busy || !skipPlayerId || Number(skipCount) <= 0 || !skipReason.trim()}>增加停轮</button>
             </div>
           </form>
@@ -2086,8 +2142,8 @@ function BankView({
       {skipConsumption && (
         <ConfirmDialog title="确认扣减停轮" confirmLabel="确认扣减停轮" busy={busy} onCancel={() => setSkipConsumption(null)} onConfirm={() => void executeSkipConsumption()}>
           <p>目标玩家：{skipConsumptionPlayer?.name ?? '未知玩家'}</p>
-          <p>停轮：{skipConsumptionPlayer?.remainingSkipTurns ?? 0} 次 → {Math.max(0, (skipConsumptionPlayer?.remainingSkipTurns ?? 0) - 1)} 次</p>
-          <p>变更：扣减 1 次停轮</p>
+          <p>停轮：{skipConsumptionPlayer?.remainingSkipTurns ?? 0} 次 → {Math.max(0, (skipConsumptionPlayer?.remainingSkipTurns ?? 0) - skipConsumption.count)} 次</p>
+          <p>变更：扣减 {skipConsumption.count} 次停轮</p>
           <p>原因：{skipConsumption.reason}</p>
         </ConfirmDialog>
       )}
@@ -2199,6 +2255,11 @@ function approvalDetails(request: BankRequest, players: Player[]) {
     details.push(`出售 ${request.quantity ?? 0} 栋 · 结算 ${formatMoney(request.amount)} 两`);
   } else if (request.type === 'COLD_PALACE_EVENT') {
     details.push(`停轮 ${request.quantity ?? 0} 次`);
+  } else if (request.type === 'PLOT_REST_EVENT') {
+    details.push(`停轮 ${request.quantity ?? 0} 次`);
+    if (request.note) details.push(request.note);
+  } else if (request.type === 'CONSUME_SKIP_TURNS') {
+    details.push(`减除停轮 ${request.quantity ?? 0} 次`);
   } else if (request.type !== 'COMPANION_EVENT') {
     details.push(`结算 ${formatMoney(request.amount)} 两`);
   }
@@ -2217,12 +2278,14 @@ function requestLabel(type: string) {
     SELL_PROPERTY_TO_BANK: '卖给银行',
     TRADE_PROPERTY: '玩家间交易',
     COLD_PALACE_EVENT: '冷宫事件',
-    COMPANION_EVENT: '获得伙伴卡'
+    COMPANION_EVENT: '获得伙伴卡',
+    PLOT_REST_EVENT: '剧情停留',
+    CONSUME_SKIP_TURNS: '减除停轮'
   } as Record<string, string>)[type] ?? type;
 }
 
 function requestActionLabel(action: '批准' | '拒绝', request: BankRequest) {
-  if (request.type === 'COLD_PALACE_EVENT' || request.type === 'COMPANION_EVENT') return `${action}事件`;
+  if (request.type === 'COLD_PALACE_EVENT' || request.type === 'COMPANION_EVENT' || request.type === 'PLOT_REST_EVENT' || request.type === 'CONSUME_SKIP_TURNS') return `${action}事件`;
   return `${action} ${formatMoney(request.amount)} 两`;
 }
 

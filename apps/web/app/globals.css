@@ -535,6 +535,8 @@ label textarea { display: block; margin-top: 7px; }
 .quick svg { width: 21px; color: var(--gold); }
 .quick span { font-size: 12px; line-height: 1.25; }
 .quick.danger svg { color: var(--red); }
+.event-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.event-actions .quick { width: 100%; min-height: 112px; border-radius: 6px; }
 
 .section-title { margin: 24px 16px 10px; display: flex; align-items: end; justify-content: space-between; gap: 12px; }
 .section-title h2 { margin: 0; font: 19px STSong, SimSun, serif; }
@@ -837,6 +839,7 @@ nav span { font-size: 10px; white-space: nowrap; }
   .request-actions { grid-column: 1 / -1; width: 100%; grid-template-columns: 1fr 1fr; }
   .audit-list article { grid-template-columns: 1fr; gap: 5px; }
   .control-actions { grid-template-columns: 1fr; }
+  .event-actions { grid-template-columns: 1fr; }
 }
 
 @media (min-width: 700px) {

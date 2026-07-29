@@ -503,14 +503,16 @@ export class PrismaGameService {
           break;
         }
         case 'PLOT_REST_EVENT': {
-          if (!actorId || !request.actor || !Number.isInteger(request.quantity) || (request.quantity ?? 0) <= 0 || !request.note?.trim()) fail('INVALID_PLOT_REST');
-          const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version }, data: { remainingSkipTurns: { increment: request.quantity }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
-          await tx.skipTurnEntry.create({ data: { roomId, playerId: actorId, sourceType: 'PLOT_REST', sourceDescription: request.note.trim(), originalCount: request.quantity, remainingCount: request.quantity, blocksTollCollection: false, createdBy: request.actor.memberId, approvedBy: bank.id } });
+          const count = request.quantity;
+          if (!actorId || !request.actor || !Number.isInteger(count) || !count || !request.note?.trim()) fail('INVALID_PLOT_REST');
+          const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version }, data: { remainingSkipTurns: { increment: count }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
+          await tx.skipTurnEntry.create({ data: { roomId, playerId: actorId, sourceType: 'PLOT_REST', sourceDescription: request.note.trim(), originalCount: count, remainingCount: count, blocksTollCollection: false, createdBy: request.actor.memberId, approvedBy: bank.id } });
           break;
         }
         case 'CONSUME_SKIP_TURNS': {
-          if (!actorId || request.room.diceMode !== 'PHYSICAL' || !Number.isInteger(request.quantity) || (request.quantity ?? 0) <= 0) fail('INSUFFICIENT_SKIP_TURNS');
-          await this.consumeSkipTurns(tx, roomId, actorId, request.quantity);
+          const count = request.quantity;
+          if (!actorId || request.room.diceMode !== 'PHYSICAL' || !Number.isInteger(count) || !count) fail('INSUFFICIENT_SKIP_TURNS');
+          await this.consumeSkipTurns(tx, roomId, actorId, count);
           break;
         }
         default: fail('UNSUPPORTED_REQUEST_TYPE');
