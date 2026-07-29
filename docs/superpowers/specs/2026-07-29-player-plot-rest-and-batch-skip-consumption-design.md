@@ -34,7 +34,7 @@
 
 ## 批量减除停轮
 
-玩家申请和银行直接操作共用同一批量消耗事务。事务按 `SkipTurnEntry` 创建顺序依次扣减来源记录，直至扣满请求次数；每笔被影响记录的 `consumedCount`、`remainingCount`，玩家的 `remainingSkipTurns` 和审计日志一并更新。
+玩家申请和银行直接操作共用同一批量消耗事务。事务按 `SkipTurnEntry` 创建顺序依次扣减来源记录，直至扣满请求次数；每笔被影响记录的 `remainingCount`、玩家的 `remainingSkipTurns` 和审计日志一并更新。既有数据模型以 `originalCount - remainingCount` 表示已消耗次数，不新增重复字段。
 
 提交玩家申请时，申请次数不得大于当时的剩余停轮次数。银行审批或直接操作执行时再次校验可用次数：不足则整个操作失败，不执行部分扣减。银行可拒绝这类待审批请求，之后由玩家按最新剩余次数重新申请。
 
