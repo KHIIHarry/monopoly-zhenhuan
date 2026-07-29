@@ -14,13 +14,15 @@ export type TransferInput = {
   isPlotFine: boolean;
 };
 type RequestAction = {
-  type: 'BUY_PROPERTY' | 'BUILD_PROPERTY' | 'SELL_BUILDING' | 'MORTGAGE_PROPERTY' | 'REDEEM_PROPERTY' | 'SELL_PROPERTY_TO_BANK' | 'TRADE_PROPERTY' | 'START_REWARD' | 'COLD_PALACE_EVENT' | 'COMPANION_EVENT' | 'PLOT_REST_EVENT' | 'CONSUME_SKIP_TURNS';
+  type: 'BUY_PROPERTY' | 'BUILD_PROPERTY' | 'SELL_BUILDING' | 'MORTGAGE_PROPERTY' | 'REDEEM_PROPERTY' | 'SELL_PROPERTY_TO_BANK' | 'TRADE_PROPERTY' | 'START_REWARD' | 'COLD_PALACE_EVENT' | 'COMPANION_EVENT' | 'RETURN_COMPANION_EVENT' | 'PLOT_REST_EVENT' | 'CONSUME_SKIP_TURNS';
   propertyName?: string; targetPlayerId?: string; amount?: number; count?: number; landingId?: string; reason?: string;
 };
 
 const lockedPropertyTypes = new Set(['BUY_PROPERTY', 'BUILD_PROPERTY', 'SELL_BUILDING', 'MORTGAGE_PROPERTY', 'REDEEM_PROPERTY', 'SELL_PROPERTY_TO_BANK', 'TRADE_PROPERTY']);
 const turnBoundPropertyTypes = new Set(['BUY_PROPERTY', 'BUILD_PROPERTY']);
 const skipTurnSources = new Set(['PLOT_REST', 'COLD_PALACE', 'MANUAL']);
+const RETURN_COMPANION_REWARD = 500;
+const nonReversibleRequestTypes = new Set(['COMPANION_EVENT', 'COLD_PALACE_EVENT', 'RETURN_COMPANION_EVENT']);
 function fail(code: string): never { throw new RuleError(code); }
 function isSerializationConflict(error: unknown) {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
@@ -318,6 +320,10 @@ export class PrismaGameService {
       if (existing) { this.assertRequestHash(existing.requestHash, expectedHash); return this.requestWithStateVersion(existing); }
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
       const player = await tx.player.findUnique({ where: { id: playerId }, include: { character: true } }); if (!player || player.roomId !== roomId) fail('PLAYER_NOT_FOUND');
+      if (action.type === 'RETURN_COMPANION_EVENT' && (
+        action.propertyName !== undefined || action.targetPlayerId !== undefined || action.amount !== undefined ||
+        action.count !== undefined || action.landingId !== undefined || action.reason !== undefined
+      )) fail('INVALID_RETURN_COMPANION_PAYLOAD');
       if (!lockedPropertyTypes.has(action.type) && action.propertyName) fail('PROPERTY_NOT_ALLOWED');
       if (lockedPropertyTypes.has(action.type) && room.diceMode === 'ELECTRONIC' && room.currentTurnPlayerId !== playerId) fail('NOT_CURRENT_PLAYER');
       const property = action.propertyName ? await tx.roomProperty.findFirst({ where: { roomId, definition: { name: action.propertyName } }, include: { definition: true } }) : null;
@@ -352,7 +358,7 @@ export class PrismaGameService {
         } });
         if (priorLandingAction) fail('LANDING_ACTION_ALREADY_USED');
       }
-      let computedAmount = action.amount ?? 0;
+      let computedAmount = action.type === 'RETURN_COMPANION_EVENT' ? RETURN_COMPANION_REWARD : action.amount ?? 0;
       if (action.type === 'START_REWARD') computedAmount = room.startReward;
       if (property) {
         if (action.type === 'BUY_PROPERTY') { if (property.ownerPlayerId) fail('PROPERTY_OWNED'); computedAmount = property.definition.purchasePrice; }
@@ -376,7 +382,7 @@ export class PrismaGameService {
       }
       if (['BUY_PROPERTY', 'BUILD_PROPERTY', 'REDEEM_PROPERTY'].includes(action.type) && player.balance < computedAmount) fail('INSUFFICIENT_BALANCE');
       if (action.type === 'TRADE_PROPERTY') { const buyer = tradeBuyer ?? fail('PLAYER_NOT_FOUND'); if (buyer.balance < computedAmount) fail('INSUFFICIENT_BALANCE'); }
-      const request = await tx.gameRequest.create({ data: { roomId, type: action.type, actorPlayerId: playerId, targetPlayerId: action.targetPlayerId, propertyId: property?.id, landingEventId: landing?.id, turnId: turn?.id, amount: computedAmount, quantity: action.count, note: action.type === 'PLOT_REST_EVENT' ? action.reason?.trim() : null, payload: { propertyVersion: property?.version ?? null, playerVersion: player.version, ...(action.type === 'TRADE_PROPERTY' ? { buyerConfirmed: false } : {}) }, idempotencyKey: storedKey, requestHash: expectedHash } });
+      const request = await tx.gameRequest.create({ data: { roomId, type: action.type, actorPlayerId: playerId, targetPlayerId: action.targetPlayerId, propertyId: property?.id, landingEventId: landing?.id, turnId: turn?.id, amount: computedAmount, quantity: action.type === 'RETURN_COMPANION_EVENT' ? 1 : action.count, note: action.type === 'PLOT_REST_EVENT' ? action.reason?.trim() : null, payload: { propertyVersion: property?.version ?? null, playerVersion: player.version, ...(action.type === 'TRADE_PROPERTY' ? { buyerConfirmed: false } : {}) }, idempotencyKey: storedKey, requestHash: expectedHash } });
       if (property) { const locked = await tx.roomProperty.updateMany({ where: { id: property.id, lockedByRequestId: null, version: property.version }, data: { lockedByRequestId: request.id } }); if (locked.count !== 1) fail('PROPERTY_LOCKED'); }
       const versionedRoom = await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } });
       const versioned = await tx.gameRequest.update({ where: { id: request.id }, data: { payload: { ...asObject(request.payload), stateVersion: versionedRoom.stateVersion } } });
@@ -463,6 +469,7 @@ export class PrismaGameService {
       let propertyAfter: typeof propertyBefore = propertyBefore;
       let transactionType = request.type;
       let transactionMetadata: Prisma.InputJsonObject = {};
+      let approvalAudit: { beforeJson: Prisma.InputJsonObject; afterJson: Prisma.InputJsonObject } | null = null;
       const actorId = request.actorPlayerId; const targetId = request.targetPlayerId;
       const addEffect = async (playerId: string, delta: number, type: string, description: string) => { const changed = await this.changeBalance(tx, playerId, delta); effects.push({ playerId, amount: delta, ...changed, type, description }); };
       switch (request.type) {
@@ -533,10 +540,24 @@ export class PrismaGameService {
         }
         case 'COMPANION_EVENT': {
           if (!actorId || !request.actor) fail('PLAYER_NOT_FOUND'); if (request.actor.partnerCardCount >= 3) fail('PARTNER_LIMIT');
-          const config = asObject(request.actor.character?.skillConfig); const reward = request.room.skillEnabled && request.actor.character?.skillCode === 'COMPANION_REWARD' ? int(config.cashReward) : 0;
-          if (reward) await addEffect(actorId, reward, 'SKILL_REWARD', '甄嬛伙伴卡奖励');
-          const expectedVersion = request.actor.version + (reward ? 1 : 0);
-          const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: expectedVersion, partnerCardCount: { lt: 3 } }, data: { partnerCardCount: { increment: 1 }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
+          const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version, partnerCardCount: { lt: 3 } }, data: { partnerCardCount: { increment: 1 }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
+          break;
+        }
+        case 'RETURN_COMPANION_EVENT': {
+          if (!actorId || !request.actor || request.amount !== RETURN_COMPANION_REWARD || request.quantity !== 1) fail('INVALID_RETURN_COMPANION_REQUEST');
+          const companionCardCountBefore = request.actor.partnerCardCount;
+          const untrackedPhysicalReturn = companionCardCountBefore === 0;
+          const companionCardCountAfter = Math.max(0, companionCardCountBefore - 1);
+          await addEffect(actorId, RETURN_COMPANION_REWARD, 'RETURN_COMPANION_EVENT', '放回实体伙伴卡奖励');
+          if (!untrackedPhysicalReturn) {
+            const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version + 1, partnerCardCount: companionCardCountBefore }, data: { partnerCardCount: { decrement: 1 }, version: { increment: 1 } } });
+            if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
+          }
+          transactionMetadata = { companionCardCountBefore, companionCardCountAfter, returnedCount: 1, rewardAmount: RETURN_COMPANION_REWARD, untrackedPhysicalReturn };
+          approvalAudit = {
+            beforeJson: { balance: request.actor.balance, partnerCardCount: companionCardCountBefore },
+            afterJson: { balance: request.actor.balance + RETURN_COMPANION_REWARD, partnerCardCount: companionCardCountAfter, returnedCount: 1, rewardAmount: RETURN_COMPANION_REWARD, untrackedPhysicalReturn },
+          };
           break;
         }
         case 'COLD_PALACE_EVENT': {
@@ -564,8 +585,9 @@ export class PrismaGameService {
         }
         default: fail('UNSUPPORTED_REQUEST_TYPE');
       }
-      const transaction = await tx.gameTransaction.create({ data: { roomId, type: transactionType, requestId: request.id, reversible: request.type !== 'COMPANION_EVENT' && request.type !== 'COLD_PALACE_EVENT', metadata: { effects, propertyId: request.propertyId, propertyBefore, propertyAfter, ...transactionMetadata } } });
+      const transaction = await tx.gameTransaction.create({ data: { roomId, type: transactionType, requestId: request.id, reversible: !nonReversibleRequestTypes.has(request.type), metadata: { effects, propertyId: request.propertyId, propertyBefore, propertyAfter, ...transactionMetadata } } });
       if (effects.length) await tx.ledgerEntry.createMany({ data: effects.map((effect) => ({ roomId, transactionId: transaction.id, playerId: effect.playerId, amount: effect.amount, balanceBefore: effect.before, balanceAfter: effect.after, type: effect.type, description: effect.description, createdBy: bank.id })) });
+      if (approvalAudit) await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'RETURN_COMPANION_EVENT', entityType: 'Player', entityId: actorId ?? '', beforeJson: approvalAudit.beforeJson, afterJson: approvalAudit.afterJson } });
       const executed = await tx.gameRequest.update({ where: { id: request.id }, data: { status: 'EXECUTED', resolvedAt: new Date() } });
       mutationCreated = true;
       return { id: executed.id, status: executed.status, transactionId: transaction.id };

@@ -1620,12 +1620,98 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     const companion = await first.createRequest(room.id, a.playerId, { type: 'COMPANION_EVENT' }, 'companion-event');
     expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 0 });
     await first.approve(room.id, companion.id, bank.token, 'approve-companion-event');
-    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance + 500, partnerCardCount: 1 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 1 });
+    const companionTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: companion.id } });
+    expect(await firstDb.ledgerEntry.count({ where: { transactionId: companionTransaction.id, type: 'SKILL_REWARD' } })).toBe(0);
 
     const cold = await first.createRequest(room.id, a.playerId, { type: 'COLD_PALACE_EVENT', count: 2 }, 'cold-event');
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(0);
     await first.approve(room.id, cold.id, bank.token, 'approve-cold-event');
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(2);
+  });
+
+  it('settles tracked and untracked physical companion returns exactly once at approval time', async () => {
+    const { room, a, bank } = await physicalRoom();
+    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 1 } });
+    const before = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+
+    await expect(first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT', amount: 1 }, 'return-client-amount')).rejects.toThrow('INVALID_RETURN_COMPANION_PAYLOAD');
+    await expect(first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT', landingId: 'not-a-landing' }, 'return-client-landing')).rejects.toThrow('INVALID_RETURN_COMPANION_PAYLOAD');
+
+    const tracked = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-tracked-companion');
+    expect(tracked).toMatchObject({ type: 'RETURN_COMPANION_EVENT', amount: 500, quantity: 1, landingEventId: null, turnId: null, status: 'PENDING' });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 1 });
+
+    const approval = await first.approve(room.id, tracked.id, bank.token, 'approve-return-tracked-companion');
+    const replay = await second.approve(room.id, tracked.id, bank.token, 'approve-return-tracked-companion-again');
+    expect(replay).toEqual(approval);
+
+    const afterTracked = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+    const trackedTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: tracked.id } });
+    expect(afterTracked).toMatchObject({ balance: before.balance + 500, partnerCardCount: 0 });
+    expect(trackedTransaction).toMatchObject({ type: 'RETURN_COMPANION_EVENT', reversible: false });
+    expect(trackedTransaction.metadata).toMatchObject({ companionCardCountBefore: 1, companionCardCountAfter: 0, returnedCount: 1, rewardAmount: 500, untrackedPhysicalReturn: false });
+    expect(await firstDb.ledgerEntry.count({ where: { transactionId: trackedTransaction.id, type: 'RETURN_COMPANION_EVENT' } })).toBe(1);
+    expect(await firstDb.auditLog.findFirstOrThrow({ where: { roomId: room.id, action: 'RETURN_COMPANION_EVENT', entityId: a.playerId } })).toMatchObject({
+      actorRole: 'BANK',
+      beforeJson: { balance: before.balance, partnerCardCount: 1 },
+      afterJson: { balance: before.balance + 500, partnerCardCount: 0, returnedCount: 1, rewardAmount: 500, untrackedPhysicalReturn: false },
+    });
+
+    const untracked = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-untracked-companion');
+    await first.approve(room.id, untracked.id, bank.token, 'approve-return-untracked-companion');
+    const afterUntracked = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+    const untrackedTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: untracked.id } });
+    expect(afterUntracked).toMatchObject({ balance: before.balance + 1000, partnerCardCount: 0 });
+    expect(untrackedTransaction.metadata).toMatchObject({ companionCardCountBefore: 0, companionCardCountAfter: 0, untrackedPhysicalReturn: true });
+    expect((await firstDb.auditLog.findFirstOrThrow({ where: { roomId: room.id, action: 'RETURN_COMPANION_EVENT', entityId: a.playerId, afterJson: { path: ['untrackedPhysicalReturn'], equals: true } } })).afterJson).toMatchObject({ untrackedPhysicalReturn: true });
+    expect(await firstDb.gameTransaction.count({ where: { requestId: tracked.id } })).toBe(1);
+    const reconnectedSnapshot = await second.snapshot(room.id);
+    expect(reconnectedSnapshot.players.find((player) => player.id === a.playerId)).toMatchObject({ balance: before.balance + 1000, partnerCardCount: 0 });
+    expect(reconnectedSnapshot.requests.find((item) => item.id === untracked.id)).toMatchObject({ type: 'RETURN_COMPANION_EVENT', quantity: 1, amount: 500, status: 'EXECUTED' });
+    expect(reconnectedSnapshot.ledger.filter((entry) => entry.transactionId === untrackedTransaction.id)).toHaveLength(1);
+    expect(reconnectedSnapshot.audit.some((entry) => entry.action === 'RETURN_COMPANION_EVENT' && entry.entityId === a.playerId)).toBe(true);
+
+    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 1 } });
+    const queuedFirst = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'queued-companion-return-first');
+    const queuedSecond = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'queued-companion-return-second');
+    expect(await firstDb.gameRequest.count({ where: { id: { in: [queuedFirst.id, queuedSecond.id] }, status: 'PENDING' } })).toBe(2);
+    await first.approve(room.id, queuedFirst.id, bank.token, 'approve-queued-companion-return-first');
+    await first.approve(room.id, queuedSecond.id, bank.token, 'approve-queued-companion-return-second');
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance + 2000, partnerCardCount: 0 });
+    expect((await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: queuedSecond.id } })).metadata).toMatchObject({ untrackedPhysicalReturn: true });
+  });
+
+  it('rolls back a companion return when its audit entry cannot be written', async () => {
+    const { room, a, bank } = await physicalRoom();
+    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 1 } });
+    const request = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-with-audit-failure');
+    const before = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+    await firstDb.$executeRawUnsafe(`
+      CREATE FUNCTION "fail_return_companion_audit"() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'injected return companion audit failure';
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await firstDb.$executeRawUnsafe(`
+      CREATE TRIGGER "fail_return_companion_audit_trigger"
+      BEFORE INSERT ON "AuditLog"
+      FOR EACH ROW WHEN (NEW."action" = 'RETURN_COMPANION_EVENT')
+      EXECUTE FUNCTION "fail_return_companion_audit"()
+    `);
+    try {
+      await expect(first.approve(room.id, request.id, bank.token, 'approve-return-with-audit-failure')).rejects.toThrow(/injected return companion audit failure/);
+    } finally {
+      await firstDb.$executeRawUnsafe('DROP TRIGGER IF EXISTS "fail_return_companion_audit_trigger" ON "AuditLog"');
+      await firstDb.$executeRawUnsafe('DROP FUNCTION IF EXISTS "fail_return_companion_audit"()');
+    }
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 1 });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: request.id } })).toMatchObject({ status: 'PENDING', approvedAt: null, approvedByMemberId: null });
+    expect(await firstDb.gameTransaction.count({ where: { requestId: request.id } })).toBe(0);
+    expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, playerId: a.playerId, type: 'RETURN_COMPANION_EVENT' } })).toBe(0);
+    expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'RETURN_COMPANION_EVENT' } })).toBe(0);
+    expect(await firstDb.idempotencyRecord.count({ where: { scope: `request:${request.id}:approve`, key: 'approve-return-with-audit-failure' } })).toBe(0);
   });
 
   it('keeps a valid balance ledger chain under concurrent credits', async () => {
@@ -1929,7 +2015,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await first.snapshot(room.id)).players.find((player) => player.id === meizhuang.playerId)?.plotFineReduction).toBe(0);
   });
 
-  it('applies every seeded character skill through the Prisma production path', async () => {
+  it('applies online character skills while companion-card rewards remain physical-only', async () => {
     const room = await first.createRoom({ name: '人物技能生产路径', initialBalance: 10000, diceMode: 'PHYSICAL' });
     const yixiu = await first.joinPlayer(room.code, '宜修', 'yixiu');
     const huashifei = await first.joinPlayer(room.code, '年世兰', 'huashifei');
@@ -1949,7 +2035,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
 
     const companion = await first.createRequest(room.id, zhenhuan.playerId, { type: 'COMPANION_EVENT' }, 'zhenhuan-companion');
     await first.approve(room.id, companion.id, bank.token, 'approve-zhenhuan-companion');
-    expect((await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).balance).toBe(10500);
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).balance).toBe(10000);
 
     await firstDb.roomProperty.updateMany({ where: { roomId: room.id, definition: { name: '甘露寺' } }, data: { ownerPlayerId: huashifei.playerId } });
     const tollLanding = await first.declareLanding(room.id, zhenhuan.playerId, '甘露寺', zhenhuan.token, 'zhenhuan-toll-landing');
@@ -2025,15 +2111,17 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await expect(confirmTrade(second, b.playerId, 'confirm-trade-once')).rejects.toThrow('ROOM_FINISHED');
   });
 
-  it('marks companion and cold-palace transactions non-reversible', async () => {
+  it('marks companion, companion return, and cold-palace transactions non-reversible', async () => {
     const { room, a, bank } = await physicalRoom();
     const companion = await first.createRequest(room.id, a.playerId, { type: 'COMPANION_EVENT' }, 'non-reversible-companion');
     await first.approve(room.id, companion.id, bank.token, 'approve-non-reversible-companion');
+    const returned = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'non-reversible-companion-return');
+    await first.approve(room.id, returned.id, bank.token, 'approve-non-reversible-companion-return');
     const cold = await first.createRequest(room.id, a.playerId, { type: 'COLD_PALACE_EVENT', count: 2 }, 'non-reversible-cold');
     await first.approve(room.id, cold.id, bank.token, 'approve-non-reversible-cold');
 
-    const transactions = await firstDb.gameTransaction.findMany({ where: { requestId: { in: [companion.id, cold.id] } } });
-    expect(transactions).toHaveLength(2);
+    const transactions = await firstDb.gameTransaction.findMany({ where: { requestId: { in: [companion.id, returned.id, cold.id] } } });
+    expect(transactions).toHaveLength(3);
     expect(transactions.every((transaction) => !transaction.reversible)).toBe(true);
     await expect(first.reverseLatest(room.id, transactions[0]!.id, bank.token, '事件不可撤销', 'reverse-event')).rejects.toThrow('NO_REVERSIBLE_TRANSACTION');
   });

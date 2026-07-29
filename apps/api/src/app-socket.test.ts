@@ -582,6 +582,12 @@ describe('Socket.IO room subscription ownership', () => {
       headers: { cookie: `${sessionCookieName}=cookie-token`, 'idempotency-key': 'request-version' },
       payload: { playerId: 'player-1', type: 'COMPANION_EVENT' },
     });
+    const returned = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-a/requests',
+      headers: { cookie: `${sessionCookieName}=cookie-token`, 'idempotency-key': 'return-companion-version' },
+      payload: { playerId: 'player-1', type: 'RETURN_COMPANION_EVENT' },
+    });
     await app.inject({
       method: 'POST',
       url: '/api/rooms/room-a/requests/bank-payment',
@@ -601,11 +607,14 @@ describe('Socket.IO room subscription ownership', () => {
       payload: { playerId: 'player-1', count: 3, reason: '实体回合已跳过' },
     });
 
+    expect(returned.statusCode).toBe(200);
     expect(notifier).toHaveBeenNthCalledWith(1, 'room-a', 'room.updated', { stateVersion: 8 });
-    expect(notifier).toHaveBeenNthCalledWith(2, 'room-a', 'room.updated', { stateVersion: 9 });
+    expect(games.createRequest).toHaveBeenCalledWith(expect.anything(), 'room-a', 'player-1', { type: 'RETURN_COMPANION_EVENT' }, 'return-companion-version');
+    expect(notifier).toHaveBeenNthCalledWith(2, 'room-a', 'room.updated', { stateVersion: 8 });
     expect(games.createRequest).toHaveBeenCalledWith(expect.anything(), 'room-a', 'player-1', { type: 'PLOT_REST_EVENT', count: 3, reason: '养病留宫' }, 'plot-rest-version');
     expect(games.consumeSkip).toHaveBeenCalledWith(expect.anything(), 'room-a', 'player-1', 3, 'consume-three-version', '实体回合已跳过');
-    expect(notifier).toHaveBeenNthCalledWith(3, 'room-a', 'room.updated', { stateVersion: 8 });
-    expect(notifier).toHaveBeenNthCalledWith(4, 'room-a', 'room.updated', { stateVersion: 10 });
+    expect(notifier).toHaveBeenNthCalledWith(3, 'room-a', 'room.updated', { stateVersion: 9 });
+    expect(notifier).toHaveBeenNthCalledWith(4, 'room-a', 'room.updated', { stateVersion: 8 });
+    expect(notifier).toHaveBeenNthCalledWith(5, 'room-a', 'room.updated', { stateVersion: 10 });
   });
 });
