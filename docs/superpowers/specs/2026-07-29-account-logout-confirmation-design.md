@@ -13,7 +13,7 @@ confirmation, consistent with the existing "return to room list" action.
    fresh login before returning to the game.
 3. "取消" closes the dialog without changing session, account, rooms, or route.
 4. "确认退出" calls the existing logout callback. The existing successful logout
-   flow clears local session-related state and navigates to the home page.
+   flow clears local session-related state and routes to the login page.
 5. While the logout request is pending, both dialog actions follow the existing
    busy state behavior to prevent duplicate submission.
 

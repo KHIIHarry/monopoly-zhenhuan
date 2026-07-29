@@ -82,6 +82,35 @@ test('账号登录后进入房间大厅，昵称来自账号', async ({ page }) 
   expect(loginBody).toEqual({ username: 'zhenhuan', password: 'StrongPassword42' });
 });
 
+test('退出账号需要确认后才结束当前会话', async ({ page }) => {
+  await authenticated(page);
+  let loggedOut = false;
+  await page.route('**/api/auth/me', (route) => route.fulfill(loggedOut
+    ? { status: 401, json: { error: 'AUTH_REQUIRED' } }
+    : { json: { account, sessions: [] } }));
+  let logoutRequests = 0;
+  await page.route('**/api/auth/logout', async (route) => {
+    logoutRequests += 1;
+    loggedOut = true;
+    await route.fulfill({ json: {} });
+  });
+
+  await page.goto('/rooms');
+  await page.getByRole('button', { name: '退出', exact: true }).click();
+
+  await expect(page.getByRole('dialog', { name: '确认退出账号' })).toBeVisible();
+  expect(logoutRequests).toBe(0);
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '确认退出账号' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '甄嬛' })).toBeVisible();
+  expect(logoutRequests).toBe(0);
+
+  await page.getByRole('button', { name: '退出', exact: true }).click();
+  await page.getByRole('button', { name: '确认退出', exact: true }).click();
+  await expect.poll(() => logoutRequests).toBe(1);
+  await expect(page).toHaveURL('/login?next=%2Frooms');
+});
+
 test('登录页只有用户名、密码和登录操作', async ({ page }) => {
   await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
   await page.goto('/');
