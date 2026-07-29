@@ -735,13 +735,14 @@ test('meizhuang landlord plot fine transfer deducts 200 from the entered amount'
   await openRoom(page);
   await page.getByRole('button', { name: '玩家转账' }).click();
   await expect(page.getByText('金额填写实际罚款金额，系统会自动计算扣减-200，请不要填写减后的金额')).toBeVisible();
-  await page.getByLabel('剧情罚俸或损失时勾选').check();
+  await expect(page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）')).toBeVisible();
+  await page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）').check();
   await page.getByLabel('转账金额').fill('500');
   await page.getByRole('button', { name: '确认转账' }).click();
   await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-2', toPlayerId: 'player-1', amount: 300 }]);
 
   await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('剧情罚俸或损失时勾选').check();
+  await page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）').check();
   await page.getByLabel('转账金额').fill('200');
   await expect(page.getByRole('button', { name: '确认转账' })).toBeDisabled();
 });
@@ -765,7 +766,7 @@ test('non-meizhuang transfer keeps the entered amount without a plot fine contro
 
   await openRoom(page);
   await page.getByRole('button', { name: '玩家转账' }).click();
-  await expect(page.getByLabel('剧情罚俸或损失时勾选')).toHaveCount(0);
+  await expect(page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）')).toHaveCount(0);
   await page.getByLabel('转账金额').fill('500');
   await page.getByRole('button', { name: '确认转账' }).click();
   await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-1', toPlayerId: 'player-2', amount: 500 }]);
