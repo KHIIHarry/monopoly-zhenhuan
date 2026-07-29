@@ -1409,8 +1409,6 @@ function PlayerView({
   const [landing, setLanding] = useState(snapshot.properties[0]?.name ?? '');
   const [trustedLandings, setTrustedLandings] = useState<{ turnKey: string; propertyId?: string; propertyName?: string; startId?: string }>({ turnKey: '' });
   const [propertyMode, setPropertyMode] = useState<'BUY' | 'BUILD'>('BUY');
-  const availableProperties = snapshot.properties.filter((property) => propertyMode === 'BUY' ? !property.ownerId : property.ownerId === me?.id && property.level < 5 && !property.mortgaged);
-  const [targetProperty, setTargetProperty] = useState(snapshot.properties.find((property) => !property.ownerId)?.name ?? '');
   const [assetMode, setAssetMode] = useState<'SELL_BUILDING' | 'MORTGAGE_PROPERTY' | 'REDEEM_PROPERTY' | 'SELL_PROPERTY_TO_BANK' | 'TRADE_PROPERTY' | 'PAY_TOLL'>('SELL_BUILDING');
   const [assetProperty, setAssetProperty] = useState('');
   const [targetPlayerId, setTargetPlayerId] = useState(snapshot.players.find((player) => player.id !== playerId)?.id ?? '');
@@ -1456,6 +1454,14 @@ function PlayerView({
   const turnKey = snapshot.turn?.id ?? (snapshot.diceMode === 'PHYSICAL' ? 'PHYSICAL' : 'NO_ACTIVE_TURN');
   const currentLanding = snapshot.landings?.find((item) => item.playerId === playerId && item.spaceType === 'PROPERTY' && !item.propertyActionsCancelled && (item.turnId ? item.turnId === snapshot.turn?.id : item.id === trustedLandings.propertyId && trustedLandings.turnKey === turnKey));
   const landingConfirmed = currentLanding?.status === 'CONFIRMED' && currentLanding.plotResolved;
+  const landingProperty = snapshot.properties.find((property) => property.name === currentLanding?.propertyName);
+  const canSubmitPropertyAction = Boolean(
+    landingConfirmed
+    && landingProperty
+    && (propertyMode === 'BUY'
+      ? !landingProperty.ownerId
+      : landingProperty.ownerId === me?.id && !landingProperty.mortgaged && landingProperty.level < 5)
+  );
   const startLanding = snapshot.landings?.find((item) => item.playerId === playerId && item.spaceType === 'START' && (item.turnId ? item.turnId === snapshot.turn?.id : item.id === trustedLandings.startId && trustedLandings.turnKey === turnKey));
   const startLandingConfirmed = startLanding?.status === 'CONFIRMED';
   const pendingTradeConfirmations = snapshot.requests.filter((request) => request.type === 'TRADE_PROPERTY' && request.targetPlayerId === playerId && request.status === 'PENDING' && !request.buyerConfirmed);
@@ -1484,10 +1490,6 @@ function PlayerView({
     const next = { ...trustedLandings, turnKey, propertyId: undefined, propertyName: undefined };
     setTrustedLandings(next);
   }
-
-  useEffect(() => {
-    if (!availableProperties.some((property) => property.name === targetProperty)) setTargetProperty(availableProperties[0]?.name ?? '');
-  }, [availableProperties, targetProperty]);
 
   useEffect(() => { if (!assetProperties.some((property) => property.name === assetProperty)) setAssetProperty(assetProperties[0]?.name ?? ''); }, [assetMode, assetProperties, assetProperty]);
 
@@ -1566,8 +1568,9 @@ function PlayerView({
   }
 
   async function propertyAction() {
+    if (!landingProperty || !canSubmitPropertyAction) return;
     const route = propertyMode === 'BUY' ? 'buy' : 'build';
-    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/properties/${encodeURIComponent(targetProperty)}/${route}`, { playerId });
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/properties/${encodeURIComponent(landingProperty.name)}/${route}`, { playerId });
     if (ok) {
       clearTrustedProperty();
       setPanel(null);
@@ -1732,14 +1735,14 @@ function PlayerView({
             <button className={propertyMode === 'BUY' ? 'active' : ''} onClick={() => setPropertyMode('BUY')}>购买地产</button>
             <button className={propertyMode === 'BUILD' ? 'active' : ''} onClick={() => setPropertyMode('BUILD')}>建造升级</button>
           </div>
-          {availableProperties.length ? (
+          {landingProperty ? (
             <>
-              <label>目标地产<select value={targetProperty} onChange={(event) => setTargetProperty(event.target.value)}>{availableProperties.map((property) => <option key={property.name}>{property.name}</option>)}</select></label>
-              <PropertyCost property={availableProperties.find((property) => property.name === targetProperty)} mode={propertyMode} buildDiscount={me.buildDiscount ?? 0} />
-              {!landingConfirmed && <p className="error">请先声明该地产落点，并由银行确认剧情已结算。</p>}
-              <button className="primary" disabled={busy || !targetProperty || !landingConfirmed || currentLanding?.propertyName !== targetProperty} onClick={() => void propertyAction()}>{busy ? <LoaderCircle className="spin" /> : <Building2 />}{propertyMode === 'BUY' ? '提交购买申请' : '提交建造申请'}</button>
+              <p className="cost-line"><span>目标地产</span><strong>{landingProperty.name}</strong></p>
+              <PropertyCost property={landingProperty} mode={propertyMode} buildDiscount={me.buildDiscount ?? 0} />
+              {!canSubmitPropertyAction && <p className="error">{propertyMode === 'BUY' ? '仅可购买当前确认落点的无主地产。' : '仅可建造当前确认且归自己的未抵押地产。'}</p>}
+              <button className="primary" disabled={busy || !canSubmitPropertyAction} onClick={() => void propertyAction()}>{busy ? <LoaderCircle className="spin" /> : <Building2 />}{propertyMode === 'BUY' ? '提交购买申请' : '提交建造申请'}</button>
             </>
-          ) : <div className="empty no-margin">暂无可{propertyMode === 'BUY' ? '购买' : '升级'}地产</div>}
+          ) : <div className="empty no-margin">请先声明该地产落点，并由银行确认剧情已结算。</div>}
         </ActionSheet>
       )}
 

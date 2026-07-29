@@ -228,6 +228,55 @@ test('landing cards search, select a purchased property, and preserve the declar
   expect(await page.evaluate(() => [...Object.entries(localStorage), ...Object.entries(sessionStorage)].filter(([key, value]) => /auth|token|identity|membership|playerId|roomId|zhenhuan-landings|room-1|player-1/i.test(`${key}:${value}`)))).toEqual([]);
 });
 
+test('property actions use only the confirmed landing and never offer another property as a target', async ({ page }) => {
+  const purchaseProperties = [
+    { name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800, purchasePrice: 1600, build: 1000, buildingSell: 600, tolls: [300, 700, 1800, 5000, 7000, 9000] },
+    { name: '景仁宫', ownerId: null, level: 0, mortgaged: false, mortgage: 1500, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800, 2000, 3900, 9000, 11000, 13000] },
+  ];
+  const buildProperties = [
+    { ...purchaseProperties[0], ownerId: 'player-1', level: 1 },
+    { ...purchaseProperties[1], ownerId: 'player-1', level: 1 },
+  ];
+  let mode: 'BUY' | 'BUILD' = 'BUY';
+  const requests: string[] = [];
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: {
+    ...snapshot,
+    diceMode: 'ELECTRONIC',
+    turn: { id: 'turn-1', total: 7 },
+    properties: mode === 'BUY' ? purchaseProperties : buildProperties,
+    landings: [{ id: 'landing-1', turnId: 'turn-1', playerId: 'player-1', propertyName: '碎玉轩', spaceType: 'PROPERTY', status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false }],
+  } }));
+  await page.route('**/api/rooms/room-1/properties/**', (route) => {
+    requests.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ json: { id: `request-${requests.length}` } });
+  });
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '购买 / 建造' }).click();
+  const purchaseSheet = page.getByRole('dialog', { name: '购买或建造' });
+  await expect(purchaseSheet.getByLabel('目标地产')).toHaveCount(0);
+  await expect(purchaseSheet.getByText('碎玉轩', { exact: true })).toBeVisible();
+  await expect(purchaseSheet.getByText('景仁宫', { exact: true })).toHaveCount(0);
+  await purchaseSheet.getByRole('button', { name: '提交购买申请' }).click();
+  expect(requests).toEqual(['/api/rooms/room-1/properties/%E7%A2%8E%E7%8E%89%E8%BD%A9/buy']);
+
+  mode = 'BUILD';
+  await page.reload();
+  await page.getByRole('button', { name: '购买 / 建造' }).click();
+  const buildSheet = page.getByRole('dialog', { name: '购买或建造' });
+  await buildSheet.getByRole('button', { name: '建造升级' }).click();
+  await expect(buildSheet.getByLabel('目标地产')).toHaveCount(0);
+  await expect(buildSheet.getByText('碎玉轩', { exact: true })).toBeVisible();
+  await expect(buildSheet.getByText('景仁宫', { exact: true })).toHaveCount(0);
+  await buildSheet.getByRole('button', { name: '提交建造申请' }).click();
+  expect(requests).toEqual([
+    '/api/rooms/room-1/properties/%E7%A2%8E%E7%8E%89%E8%BD%A9/buy',
+    '/api/rooms/room-1/properties/%E7%A2%8E%E7%8E%89%E8%BD%A9/build',
+  ]);
+});
+
 test('ROOM_CONTROL_LOST from a write refetches seats and routes to takeover', async ({ page }) => {
   let activeHere = true;
   let seatReads = 0;
