@@ -52,6 +52,7 @@ type Player = {
   tollBonus?: number;
   coldPalaceSkipReduction?: number;
   coldPalaceCashReward?: number;
+  plotFineReduction?: number;
   tollCollectionBlocked?: boolean;
 };
 
@@ -86,6 +87,11 @@ type BankRequest = {
   amount: number;
   status: string;
   buyerConfirmed?: boolean;
+  recipientType?: 'PLAYER' | 'BANK';
+  originalAmount?: number;
+  reduction?: number;
+  actualAmount?: number;
+  isPlotFine?: boolean;
 };
 
 type AuditEntry = { id: string; action: string; reason?: string | null; actorRole?: string; createdAt?: string };
@@ -205,8 +211,8 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   INVALID_REQUEST: '提交内容不完整，请检查后重试',
   INVALID_AMOUNT: '金额必须是有效整数，请检查输入',
   INSUFFICIENT_BALANCE: '余额不足，请先处理资产或调整金额',
-  INVALID_TRANSFER: '转账信息无效，请检查玩家和金额',
-  SAME_PLAYER_TRANSFER: '不能向自己转账，请选择其他玩家',
+  INVALID_TRANSFER: '转帐信息无效，请检查收款对象和金额',
+  SAME_PLAYER_TRANSFER: '不能向自己转帐，请选择其他玩家',
   NOT_CURRENT_PLAYER: '现在不是你的回合，请等待轮到你',
   PLAYER_MUST_SKIP_TURN: '该玩家本轮需要停轮，不能执行此操作',
   ALREADY_ROLLED: '本轮已经掷过骰子，不能重复掷骰',
@@ -392,7 +398,8 @@ const currentPropertyToll = (property: Property, players: Player[]) => {
 };
 const transactionName = (type: string) => ({
   MANUAL_BALANCE_CHANGE: '余额人工修正',
-  PLAYER_TRANSFER: '玩家转账',
+  PLAYER_TRANSFER: '转帐',
+  PLAYER_BANK_PAYMENT: '支付银行',
   BUY_PROPERTY: '购买地产',
   BUILD_PROPERTY: '建造升级',
   SELL_BUILDING: '出售建筑',
@@ -1097,8 +1104,8 @@ function CreateRoom({ busy, error, onBack, onCreate }: { busy: boolean; error: s
   const update = <K extends keyof typeof value>(key: K, next: typeof value[K]) => setValue((current) => ({ ...current, [key]: next }));
   const payload = { ...value, password: value.password || undefined, initialBalance: Number(value.initialBalance), startReward: Number(value.startReward) };
   const toggle = (key: 'skillEnabled' | 'allowMidgameJoin' | 'transferApprovalRequired' | 'autoSkipTurn', label: string) => <label className="toggle-row"><span>{label}</span><input type="checkbox" role="switch" checked={value[key]} onChange={(event) => update(key, event.target.checked)} /></label>;
-  if (review) return <main className="v2-page"><section className="review-band"><button className="text-back" onClick={() => setReview(false)}>返回修改</button><h1>确认房间设置</h1><dl><div><dt>房间</dt><dd>{value.name}</dd></div><div><dt>密码</dt><dd>{value.password ? '已设置' : '无'}</dd></div><div><dt>资金 / 起点</dt><dd>{formatMoney(Number(value.initialBalance))} / {formatMoney(Number(value.startReward))} 两</dd></div><div><dt>骰子</dt><dd>{value.diceMode === 'ELECTRONIC' ? '电子骰子' : '实体骰子'}</dd></div><div><dt>人物技能</dt><dd>{value.skillEnabled ? '启用' : '停用'}</dd></div><div><dt>中途加入</dt><dd>{value.allowMidgameJoin ? '允许' : '不允许'}</dd></div><div><dt>可见性</dt><dd>{value.visibility === 'PUBLIC' ? '公开' : '私密'}</dd></div><div><dt>转账审批</dt><dd>{value.transferApprovalRequired ? '需要' : '不需要'}</dd></div><div><dt>自动跳过</dt><dd>{value.autoSkipTurn ? '启用' : '停用'}</dd></div></dl>{error && <p className="error" role="alert">{error}</p>}<button className="primary" disabled={busy} onClick={() => void onCreate(payload)}><Check />确认创建</button></section></main>;
-  return <main className="v2-page"><form className="v2-form create-form" onSubmit={(event) => { event.preventDefault(); setReview(true); }}><button type="button" className="text-back room-list-back" onClick={onBack}>🔙 房间列表</button><h1>创建房间</h1><label>房间名称<input required pattern={'.*\\S.*'} maxLength={40} placeholder="例：翊坤宫夜局" value={value.name} onChange={(event) => update('name', event.target.value)} /></label><label>房间密码（可选）<input type="password" maxLength={100} value={value.password} onChange={(event) => update('password', event.target.value)} /></label><div className="form-grid"><label>初始资金<input required type="number" min="0" step="1" value={value.initialBalance} onChange={(event) => update('initialBalance', event.target.value)} /></label><label>起点奖励<input required type="number" min="0" step="1" value={value.startReward} onChange={(event) => update('startReward', event.target.value)} /></label></div><fieldset><legend>骰子模式</legend><div className="segment"><button type="button" aria-pressed={value.diceMode === 'ELECTRONIC'} onClick={() => update('diceMode', 'ELECTRONIC')}>电子骰子</button><button type="button" aria-pressed={value.diceMode === 'PHYSICAL'} onClick={() => update('diceMode', 'PHYSICAL')}>实体骰子</button></div></fieldset><label>房间可见性<select value={value.visibility} onChange={(event) => update('visibility', event.target.value)}><option value="PUBLIC">公开房间</option><option value="PRIVATE">私密房间</option></select></label><div className="create-form-toggles">{toggle('skillEnabled', '启用人物技能')}{toggle('allowMidgameJoin', '允许中途加入')}{toggle('transferApprovalRequired', '玩家转账需要审批')}{toggle('autoSkipTurn', '自动跳过停轮玩家')}</div>{error && <p className="error" role="alert">{error}</p>}<button className="primary" disabled={busy}>检查设置</button></form></main>;
+  if (review) return <main className="v2-page"><section className="review-band"><button className="text-back" onClick={() => setReview(false)}>返回修改</button><h1>确认房间设置</h1><dl><div><dt>房间</dt><dd>{value.name}</dd></div><div><dt>密码</dt><dd>{value.password ? '已设置' : '无'}</dd></div><div><dt>资金 / 起点</dt><dd>{formatMoney(Number(value.initialBalance))} / {formatMoney(Number(value.startReward))} 两</dd></div><div><dt>骰子</dt><dd>{value.diceMode === 'ELECTRONIC' ? '电子骰子' : '实体骰子'}</dd></div><div><dt>人物技能</dt><dd>{value.skillEnabled ? '启用' : '停用'}</dd></div><div><dt>中途加入</dt><dd>{value.allowMidgameJoin ? '允许' : '不允许'}</dd></div><div><dt>可见性</dt><dd>{value.visibility === 'PUBLIC' ? '公开' : '私密'}</dd></div><div><dt>转帐审批</dt><dd>{value.transferApprovalRequired ? '需要' : '不需要'}</dd></div><div><dt>自动跳过</dt><dd>{value.autoSkipTurn ? '启用' : '停用'}</dd></div></dl>{error && <p className="error" role="alert">{error}</p>}<button className="primary" disabled={busy} onClick={() => void onCreate(payload)}><Check />确认创建</button></section></main>;
+  return <main className="v2-page"><form className="v2-form create-form" onSubmit={(event) => { event.preventDefault(); setReview(true); }}><button type="button" className="text-back room-list-back" onClick={onBack}>🔙 房间列表</button><h1>创建房间</h1><label>房间名称<input required pattern={'.*\\S.*'} maxLength={40} placeholder="例：翊坤宫夜局" value={value.name} onChange={(event) => update('name', event.target.value)} /></label><label>房间密码（可选）<input type="password" maxLength={100} value={value.password} onChange={(event) => update('password', event.target.value)} /></label><div className="form-grid"><label>初始资金<input required type="number" min="0" step="1" value={value.initialBalance} onChange={(event) => update('initialBalance', event.target.value)} /></label><label>起点奖励<input required type="number" min="0" step="1" value={value.startReward} onChange={(event) => update('startReward', event.target.value)} /></label></div><fieldset><legend>骰子模式</legend><div className="segment"><button type="button" aria-pressed={value.diceMode === 'ELECTRONIC'} onClick={() => update('diceMode', 'ELECTRONIC')}>电子骰子</button><button type="button" aria-pressed={value.diceMode === 'PHYSICAL'} onClick={() => update('diceMode', 'PHYSICAL')}>实体骰子</button></div></fieldset><label>房间可见性<select value={value.visibility} onChange={(event) => update('visibility', event.target.value)}><option value="PUBLIC">公开房间</option><option value="PRIVATE">私密房间</option></select></label><div className="create-form-toggles">{toggle('skillEnabled', '启用人物技能')}{toggle('allowMidgameJoin', '允许中途加入')}{toggle('transferApprovalRequired', '玩家转帐需要审批')}{toggle('autoSkipTurn', '自动跳过停轮玩家')}</div>{error && <p className="error" role="alert">{error}</p>}<button className="primary" disabled={busy}>检查设置</button></form></main>;
 }
 
 function SeatsView({ seats, busy, error, onChoose, onSwap, onSwapAction, onRefresh, onBack }: { seats: SeatSnapshot; busy: boolean; error: string; onChoose: (kind: 'BANK' | 'PLAYER', characterId?: string) => void; onSwap: (characterId: string) => void; onSwapAction: (request: RoleSwapView, action: 'accept' | 'reject' | 'approve-bank' | 'cancel', reason?: string) => void; onRefresh: () => void; onBack: () => void }) {
@@ -1252,7 +1259,7 @@ function AdminView({ account, data, busy, error, onBack, onReload, runAction, wr
     {tab === 'DASHBOARD' && dashboard && <div className="admin-workspace" role="tabpanel" id="admin-panel-dashboard" aria-labelledby="admin-tab-dashboard"><section className="dashboard-strip" aria-label="核心指标"><div><span>账号</span><strong>{dashboard.accounts.active}/{dashboard.accounts.total}</strong></div><div><span>有效会话</span><strong>{dashboard.sessions.valid}</strong></div><div><span>进行中</span><strong>{dashboard.rooms.playing}</strong></div><div><span>已结算</span><strong>{dashboard.rooms.finished}</strong></div><div><span>总对局</span><strong>{dashboard.games.settledTotal}</strong></div><div><span>平均时长</span><strong>{Math.round(dashboard.games.averageDurationSeconds / 60)} 分</strong></div></section><section className="admin-band"><h2>人物选择 / 获胜</h2><div className="aggregate-grid"><div>{dashboard.characterSelections.map((item) => <p key={item.characterId}><span>{item.characterNameSnapshot}</span><b>{item.count} 次选择</b></p>)}</div><div>{dashboard.characterWins.map((item) => <p key={item.characterNameSnapshot}><span>{item.characterNameSnapshot}</span><b>{item.count} 次获胜</b></p>)}</div></div></section><section className="admin-band"><h2>最近结束对局</h2>{dashboard.recentGames.map((game) => <article className="admin-row" key={`${game.roomId}-${game.endedAt}`}><div><strong>{game.roomNameSnapshot}</strong><span>{new Date(game.endedAt).toLocaleString('zh-CN')} · {Math.round(game.durationSeconds / 60)} 分钟</span></div><small>{game.forced ? '强制结束' : '正常结束'} · {game.winners.map((winner) => winner.displayNameSnapshot).join('、')}</small></article>)}</section></div>}
     {tab !== 'DASHBOARD' && <div role="tabpanel" id={`admin-panel-${tab.toLowerCase()}`} aria-labelledby={`admin-tab-${tab.toLowerCase()}`}>
     {tab === 'ACCOUNTS' && <div className="admin-workspace"><form className="admin-create" onSubmit={(event) => { event.preventDefault(); void mutateAndReload('/api/admin/accounts', newAccount); }}><h2>新增账号</h2><input aria-label="新用户名" required minLength={3} placeholder="用户名" value={newAccount.username} onChange={(event) => setNewAccount({ ...newAccount, username: event.target.value })} /><input aria-label="新用户昵称" required placeholder="用户昵称" value={newAccount.displayName} onChange={(event) => setNewAccount({ ...newAccount, displayName: event.target.value })} /><input aria-label="初始密码" required minLength={8} type="password" placeholder="初始密码" value={newAccount.password} onChange={(event) => setNewAccount({ ...newAccount, password: event.target.value })} /><input aria-label="账号备注" placeholder="备注" value={newAccount.note} onChange={(event) => setNewAccount({ ...newAccount, note: event.target.value })} /><label className="toggle-row"><span>允许创建房间</span><input type="checkbox" checked={newAccount.canCreateRoom} onChange={(event) => setNewAccount({ ...newAccount, canCreateRoom: event.target.checked })} /></label><button className="primary" disabled={busy}>创建账号</button></form><section className="admin-band"><h2>账号管理</h2>{data.accounts.map((item) => <article className="admin-row" key={item.id}><div><strong>{item.displayName}</strong><span>@{item.username} · {item.status === 'ACTIVE' ? '启用' : '禁用'}</span></div><small>{item.isSuperAdmin ? '超管' : '普通'} · {item.canCreateRoom ? '可建房' : '不可建房'}</small><button onClick={() => void refreshAccount(item)}>管理</button></article>)}</section>{selectedAccount && <section className="admin-detail"><header><div><small>@{selectedAccount.username}</small><h2>管理 {selectedAccount.displayName}</h2></div><button className="close-icon" aria-label="关闭" title="关闭" onClick={() => setSelectedAccount(null)}><X /></button></header><label>昵称<input value={accountDraft.displayName} onChange={(event) => setAccountDraft({ ...accountDraft, displayName: event.target.value })} /></label><label>备注<textarea value={accountDraft.note} onChange={(event) => setAccountDraft({ ...accountDraft, note: event.target.value })} /></label><label className="toggle-row"><span>创建房间权限</span><input type="checkbox" checked={accountDraft.canCreateRoom} onChange={(event) => setAccountDraft({ ...accountDraft, canCreateRoom: event.target.checked })} /></label><div className="room-save-controls"><button className={`primary ${accountSaveState === "SUCCESS" ? "saved" : ""}`} disabled={busy || accountSaveState === "SAVING"} onClick={() => void saveAccountConfiguration()}>{accountSaveState === "SAVING" ? <><LoaderCircle className="spin" />正在保存</> : accountSaveState === "SUCCESS" ? <><Check />已保存并生效</> : "保存账号"}</button>{accountSaveState === "SAVING" && <p className="room-save-status" role="status">正在保存账号信息</p>}{accountSaveState === "SUCCESS" && <p className="room-save-status success" role="status"><Check />已保存并生效</p>}{accountSaveState === "ERROR" && <p className="room-save-status error" role="alert">保存后未能确认账号信息，请刷新后重试。</p>}</div><div className="inline-form"><input aria-label="重置后的密码" type="password" minLength={8} placeholder="新密码" value={accountDraft.password} onChange={(event) => setAccountDraft({ ...accountDraft, password: event.target.value })} /><button disabled={accountDraft.password.length < 8} onClick={() => setConfirm({ title: '重置账号密码', copy: `${selectedAccount.displayName} 的全部现有登录会立即失效。`, run: async () => { await mutateAndReload(`/api/admin/accounts/${selectedAccount.id}/reset-password`, { password: accountDraft.password }); } })}>重置密码</button></div><button className="danger-button" onClick={() => setConfirm({ title: selectedAccount.status === 'ACTIVE' ? '禁用账号' : '启用账号', copy: selectedAccount.status === 'ACTIVE' ? `${selectedAccount.displayName} 将无法登录，全部会话立即失效。` : `${selectedAccount.displayName} 可重新登录，旧会话不会恢复。`, run: async () => { await mutateAndReload(`/api/admin/accounts/${selectedAccount.id}/${selectedAccount.status === 'ACTIVE' ? 'disable' : 'enable'}`); } })}>{selectedAccount.status === 'ACTIVE' ? '禁用账号' : '启用账号'}</button><button className="danger-button" onClick={() => { setConfirmName(''); setConfirm({ title: '删除账号', fieldLabel: '确认删除账号', expectedValues: [selectedAccount.username, selectedAccount.displayName], confirmationHint: `请输入用户名或昵称：${selectedAccount.username} / ${selectedAccount.displayName}`, copy: `${selectedAccount.displayName} 的全部房间数据将被永久清除，且无法恢复。`, run: async () => { const deleted = await mutateAndReload(`/api/admin/accounts/${selectedAccount.id}`, {}, 'DELETE'); if (deleted) { setSelectedAccount(null); setAccountDevices([]); } return deleted; } }); }}>删除账号</button><h3>目标账号设备</h3>{accountDevices.map((device) => <article className="device-admin-row" key={device.id}><div><strong>{device.deviceName}</strong><span>{device.operatingSystem} · {device.browser} · {device.loginIp}</span><small>{device.active ? '有效' : `已注销：${device.revokeReason ?? '未知原因'}`} · 活跃 {new Date(device.lastActiveAt).toLocaleString('zh-CN')}</small></div>{device.active && <button onClick={() => { const reason = '管理员注销设备'; setConfirm({ title: '注销目标设备', copy: `${device.deviceName} 将立即失去登录状态，原因：${reason}`, run: async () => { await mutateAndReload(`/api/admin/accounts/${selectedAccount.id}/sessions/${device.id}/revoke`, { reason }); } }); }}>注销</button>}</article>)}</section>}</div>}
-    {tab === 'ROOMS' && <div className="admin-workspace"><section className="admin-band"><h2>全部房间</h2>{data.rooms.map((room) => <article className="admin-row" key={room.id}><div><strong>{room.name}</strong><span>{localizedRoomStatus(room.status)} · {room.memberCount} 成员 · {room.playerCount} 人物</span><div className="room-lifecycle"><span>{`创建时间：${formatRoomLifecycleTime(room.createdAt, '')}`}</span><span>{`开始时间：${formatRoomLifecycleTime(room.startedAt, '未开始')}`}</span><span>{`结束时间：${formatRoomLifecycleTime(room.settlement?.endedAt ?? null, '未结束')}`}</span></div></div><small>{room.visibility === 'PUBLIC' ? '公开' : '私密'} · {room.hasPassword ? '有密码' : '无密码'} · {room.hasBank ? '有银行' : '无银行'}</small><button onClick={() => void refreshRoom(room.id)}>管理</button></article>)}</section>{selectedRoom && <section className="admin-detail"><header><div><small>{selectedRoom.code} · {localizedRoomStatus(selectedRoom.status)}</small><h2>{selectedRoom.name}</h2></div><button className="close-icon" aria-label="关闭" title="关闭" onClick={() => setSelectedRoom(null)}><X /></button></header><div className="dashboard-strip"><div><span>待审批</span><strong>{selectedRoom.blockers.pendingRequests}</strong></div><div><span>待交换</span><strong>{selectedRoom.blockers.pendingSwaps}</strong></div><div><span>债务</span><strong>{selectedRoom.blockers.openDebts}</strong></div><div><span>进行回合</span><strong>{selectedRoom.blockers.activeTurns}</strong></div></div><div className="form-grid"><label>房间名称<input value={roomDraft.name} onChange={(event) => setRoomDraft({ ...roomDraft, name: event.target.value })} /></label><label>可见性<select value={roomDraft.visibility} onChange={(event) => setRoomDraft({ ...roomDraft, visibility: event.target.value })}><option value="PUBLIC">公开</option><option value="PRIVATE">私密</option></select></label><label>骰子<select value={roomDraft.diceMode} onChange={(event) => setRoomDraft({ ...roomDraft, diceMode: event.target.value })}><option value="ELECTRONIC">电子骰子</option><option value="PHYSICAL">实体骰子</option></select></label><label>初始资金<input type="number" min="0" value={roomDraft.initialBalance} onChange={(event) => setRoomDraft({ ...roomDraft, initialBalance: event.target.value })} /></label><label>起点奖励<input type="number" min="0" value={roomDraft.startReward} onChange={(event) => setRoomDraft({ ...roomDraft, startReward: event.target.value })} /></label></div>{(['skillEnabled', 'allowMidgameJoin', 'transferApprovalRequired', 'autoSkipTurn'] as const).map((key) => <label className="toggle-row" key={key}><span>{{ skillEnabled: '人物技能', allowMidgameJoin: '中途加入', transferApprovalRequired: '转账审批', autoSkipTurn: '自动跳过' }[key]}</span><input type="checkbox" checked={roomDraft[key]} onChange={(event) => setRoomDraft({ ...roomDraft, [key]: event.target.checked })} /></label>)}<div className="room-save-controls"><button className={`primary ${roomSaveState === "SUCCESS" ? "saved" : ""}`} disabled={busy || roomSaveState === "SAVING"} onClick={() => void saveRoomConfiguration()}>{roomSaveState === "SAVING" ? <><LoaderCircle className="spin" />正在保存</> : roomSaveState === "SUCCESS" ? <><Check />已保存并生效</> : "保存房间配置"}</button>{roomSaveState === "SAVING" && <p className="room-save-status" role="status">正在保存房间配置</p>}{roomSaveState === "SUCCESS" && <p className="room-save-status success" role="status"><Check />已保存并生效</p>}{roomSaveState === "ERROR" && <p className="room-save-status error" role="alert">保存后未能确认配置，请刷新后重试。</p>}</div><div className="inline-form"><input aria-label="新房间密码" placeholder="留空表示清除密码" value={roomDraft.password} onChange={(event) => setRoomDraft({ ...roomDraft, password: event.target.value })} /><button onClick={() => setConfirm({ title: '修改房间密码', copy: `${selectedRoom.name} 的新加入成员将使用${roomDraft.password ? '新密码' : '无密码'}，已加入成员不受影响。`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/password`, { password: roomDraft.password || null }, 'POST', selectedRoom.id); } })}>更新密码</button></div><h3>成员与银行</h3>{selectedRoom.members.map((member) => <article className="admin-row" key={member.id}><div><strong>{member.displayNameSnapshot}</strong><span>{member.characterName ?? '未选人物'} · {member.isBank ? '银行' : '非银行'} · {member.controllerActive ? '控制中' : '无有效控制'}</span></div><small>{member.player ? `余额 ${formatMoney(member.player.balance)} · ${member.player.ownedPropertyCount} 地产` : '无 Player 资产'}</small><button className="danger-text" onClick={() => setConfirm({ title: '移除房间成员', copy: `${member.displayNameSnapshot} 将失去当前席位与操作权，历史和资产记录保留。`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/members/${member.id}/remove`, {}, 'POST', selectedRoom.id); } })}>移除成员</button></article>)}<label>更换银行<select value={roomDraft.bankMembershipId} onChange={(event) => setRoomDraft({ ...roomDraft, bankMembershipId: event.target.value })}><option value="">选择成员</option>{selectedRoom.members.map((member) => <option key={member.id} value={member.id}>{member.displayNameSnapshot}</option>)}</select></label><button disabled={!roomDraft.bankMembershipId} onClick={() => setConfirm({ title: '更换银行', copy: `银行能力将转移给所选成员，人物与资产保持不变。`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/bank/reassign`, { targetMembershipId: roomDraft.bankMembershipId }, 'POST', selectedRoom.id); } })}>确认更换银行</button><label>强制结束原因<textarea value={roomDraft.forceReason} onChange={(event) => setRoomDraft({ ...roomDraft, forceReason: event.target.value })} /></label><button className="danger-button" disabled={!roomDraft.forceReason.trim() || terminalRoom(selectedRoom.status)} onClick={() => setConfirm({ title: '强制结束房间', copy: `${selectedRoom.name} 将生成不可变结算并停止全部游戏操作。原因：${roomDraft.forceReason.trim()}`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/finish`, { reason: roomDraft.forceReason.trim() }, 'POST', selectedRoom.id); } })}>强制结束</button><button className="danger-button" onClick={() => { setConfirmName(''); setConfirm({ title: '删除房间', fieldLabel: '确认删除房间', expectedValues: [selectedRoom.name], confirmationHint: `请输入房间名称：${selectedRoom.name}`, copy: `${selectedRoom.name} 的全部房间数据将被永久清除，且无法恢复。`, run: async () => { const deleted = await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}`, {}, 'DELETE'); if (deleted) { setSelectedRoom(null); setRoomLogs([]); } return deleted; } }); }}>删除房间</button><h3>房间审计日志</h3>{roomLogs.map((log) => <article className="log-row" key={log.id}><strong>{log.action}</strong><span>{log.actorRole ?? 'SYSTEM'} · {new Date(log.createdAt).toLocaleString('zh-CN')}</span><small>{log.reason ?? '无附加原因'}</small></article>)}</section>}</div>}
+    {tab === 'ROOMS' && <div className="admin-workspace"><section className="admin-band"><h2>全部房间</h2>{data.rooms.map((room) => <article className="admin-row" key={room.id}><div><strong>{room.name}</strong><span>{localizedRoomStatus(room.status)} · {room.memberCount} 成员 · {room.playerCount} 人物</span><div className="room-lifecycle"><span>{`创建时间：${formatRoomLifecycleTime(room.createdAt, '')}`}</span><span>{`开始时间：${formatRoomLifecycleTime(room.startedAt, '未开始')}`}</span><span>{`结束时间：${formatRoomLifecycleTime(room.settlement?.endedAt ?? null, '未结束')}`}</span></div></div><small>{room.visibility === 'PUBLIC' ? '公开' : '私密'} · {room.hasPassword ? '有密码' : '无密码'} · {room.hasBank ? '有银行' : '无银行'}</small><button onClick={() => void refreshRoom(room.id)}>管理</button></article>)}</section>{selectedRoom && <section className="admin-detail"><header><div><small>{selectedRoom.code} · {localizedRoomStatus(selectedRoom.status)}</small><h2>{selectedRoom.name}</h2></div><button className="close-icon" aria-label="关闭" title="关闭" onClick={() => setSelectedRoom(null)}><X /></button></header><div className="dashboard-strip"><div><span>待审批</span><strong>{selectedRoom.blockers.pendingRequests}</strong></div><div><span>待交换</span><strong>{selectedRoom.blockers.pendingSwaps}</strong></div><div><span>债务</span><strong>{selectedRoom.blockers.openDebts}</strong></div><div><span>进行回合</span><strong>{selectedRoom.blockers.activeTurns}</strong></div></div><div className="form-grid"><label>房间名称<input value={roomDraft.name} onChange={(event) => setRoomDraft({ ...roomDraft, name: event.target.value })} /></label><label>可见性<select value={roomDraft.visibility} onChange={(event) => setRoomDraft({ ...roomDraft, visibility: event.target.value })}><option value="PUBLIC">公开</option><option value="PRIVATE">私密</option></select></label><label>骰子<select value={roomDraft.diceMode} onChange={(event) => setRoomDraft({ ...roomDraft, diceMode: event.target.value })}><option value="ELECTRONIC">电子骰子</option><option value="PHYSICAL">实体骰子</option></select></label><label>初始资金<input type="number" min="0" value={roomDraft.initialBalance} onChange={(event) => setRoomDraft({ ...roomDraft, initialBalance: event.target.value })} /></label><label>起点奖励<input type="number" min="0" value={roomDraft.startReward} onChange={(event) => setRoomDraft({ ...roomDraft, startReward: event.target.value })} /></label></div>{(['skillEnabled', 'allowMidgameJoin', 'transferApprovalRequired', 'autoSkipTurn'] as const).map((key) => <label className="toggle-row" key={key}><span>{{ skillEnabled: '人物技能', allowMidgameJoin: '中途加入', transferApprovalRequired: '转帐审批', autoSkipTurn: '自动跳过' }[key]}</span><input type="checkbox" checked={roomDraft[key]} onChange={(event) => setRoomDraft({ ...roomDraft, [key]: event.target.checked })} /></label>)}<div className="room-save-controls"><button className={`primary ${roomSaveState === "SUCCESS" ? "saved" : ""}`} disabled={busy || roomSaveState === "SAVING"} onClick={() => void saveRoomConfiguration()}>{roomSaveState === "SAVING" ? <><LoaderCircle className="spin" />正在保存</> : roomSaveState === "SUCCESS" ? <><Check />已保存并生效</> : "保存房间配置"}</button>{roomSaveState === "SAVING" && <p className="room-save-status" role="status">正在保存房间配置</p>}{roomSaveState === "SUCCESS" && <p className="room-save-status success" role="status"><Check />已保存并生效</p>}{roomSaveState === "ERROR" && <p className="room-save-status error" role="alert">保存后未能确认配置，请刷新后重试。</p>}</div><div className="inline-form"><input aria-label="新房间密码" placeholder="留空表示清除密码" value={roomDraft.password} onChange={(event) => setRoomDraft({ ...roomDraft, password: event.target.value })} /><button onClick={() => setConfirm({ title: '修改房间密码', copy: `${selectedRoom.name} 的新加入成员将使用${roomDraft.password ? '新密码' : '无密码'}，已加入成员不受影响。`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/password`, { password: roomDraft.password || null }, 'POST', selectedRoom.id); } })}>更新密码</button></div><h3>成员与银行</h3>{selectedRoom.members.map((member) => <article className="admin-row" key={member.id}><div><strong>{member.displayNameSnapshot}</strong><span>{member.characterName ?? '未选人物'} · {member.isBank ? '银行' : '非银行'} · {member.controllerActive ? '控制中' : '无有效控制'}</span></div><small>{member.player ? `余额 ${formatMoney(member.player.balance)} · ${member.player.ownedPropertyCount} 地产` : '无 Player 资产'}</small><button className="danger-text" onClick={() => setConfirm({ title: '移除房间成员', copy: `${member.displayNameSnapshot} 将失去当前席位与操作权，历史和资产记录保留。`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/members/${member.id}/remove`, {}, 'POST', selectedRoom.id); } })}>移除成员</button></article>)}<label>更换银行<select value={roomDraft.bankMembershipId} onChange={(event) => setRoomDraft({ ...roomDraft, bankMembershipId: event.target.value })}><option value="">选择成员</option>{selectedRoom.members.map((member) => <option key={member.id} value={member.id}>{member.displayNameSnapshot}</option>)}</select></label><button disabled={!roomDraft.bankMembershipId} onClick={() => setConfirm({ title: '更换银行', copy: `银行能力将转移给所选成员，人物与资产保持不变。`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/bank/reassign`, { targetMembershipId: roomDraft.bankMembershipId }, 'POST', selectedRoom.id); } })}>确认更换银行</button><label>强制结束原因<textarea value={roomDraft.forceReason} onChange={(event) => setRoomDraft({ ...roomDraft, forceReason: event.target.value })} /></label><button className="danger-button" disabled={!roomDraft.forceReason.trim() || terminalRoom(selectedRoom.status)} onClick={() => setConfirm({ title: '强制结束房间', copy: `${selectedRoom.name} 将生成不可变结算并停止全部游戏操作。原因：${roomDraft.forceReason.trim()}`, run: async () => { await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}/finish`, { reason: roomDraft.forceReason.trim() }, 'POST', selectedRoom.id); } })}>强制结束</button><button className="danger-button" onClick={() => { setConfirmName(''); setConfirm({ title: '删除房间', fieldLabel: '确认删除房间', expectedValues: [selectedRoom.name], confirmationHint: `请输入房间名称：${selectedRoom.name}`, copy: `${selectedRoom.name} 的全部房间数据将被永久清除，且无法恢复。`, run: async () => { const deleted = await mutateAndReload(`/api/admin/rooms/${selectedRoom.id}`, {}, 'DELETE'); if (deleted) { setSelectedRoom(null); setRoomLogs([]); } return deleted; } }); }}>删除房间</button><h3>房间审计日志</h3>{roomLogs.map((log) => <article className="log-row" key={log.id}><strong>{log.action}</strong><span>{log.actorRole ?? 'SYSTEM'} · {new Date(log.createdAt).toLocaleString('zh-CN')}</span><small>{log.reason ?? '无附加原因'}</small></article>)}</section>}</div>}
     {tab === 'LOGS' && <section className="admin-band log-list"><h2>安全日志</h2>{data.logs.map((log) => <article className="log-row" key={log.id}><strong>{log.action}</strong><span>{new Date(log.createdAt).toLocaleString('zh-CN')} · {log.ip ?? '无 IP'}</span><small>账号 {log.accountId ?? '-'} · 操作者 {log.actorAccountId ?? 'SYSTEM'}</small>{log.details && <code>{JSON.stringify(log.details)}</code>}</article>)}</section>}
     </div>}
     {confirm && <ConfirmDialog title={confirm.title} confirmLabel={confirm.expectedValues ? '确认删除' : '确认执行'} busy={busy} disabled={Boolean(confirm.expectedValues && !confirm.expectedValues.includes(confirmName.trim()))} onCancel={() => { setConfirm(null); setConfirmName(''); }} onConfirm={() => { void confirm.run().then((succeeded) => { if (succeeded !== false) { setConfirm(null); setConfirmName(''); } }); }}><p>{confirm.copy}</p>{confirm.expectedValues && confirm.fieldLabel && <label>{confirm.fieldLabel}<input aria-label={confirm.fieldLabel} value={confirmName} onChange={(event) => setConfirmName(event.target.value)} />{confirm.confirmationHint && <small>{confirm.confirmationHint}</small>}</label>}</ConfirmDialog>}
@@ -1409,7 +1416,10 @@ function PlayerView({
   const [targetPlayerId, setTargetPlayerId] = useState(snapshot.players.find((player) => player.id !== playerId)?.id ?? '');
   const [operationAmount, setOperationAmount] = useState('');
   const [buildingCount, setBuildingCount] = useState('1');
-  const [transferPlayerId, setTransferPlayerId] = useState(snapshot.players.find((player) => player.id !== playerId)?.id ?? '');
+  const [transferRecipient, setTransferRecipient] = useState<{ type: 'PLAYER'; playerId: string } | { type: 'BANK' }>(() => {
+    const firstPlayerId = snapshot.players.find((player) => player.id !== playerId)?.id;
+    return firstPlayerId ? { type: 'PLAYER', playerId: firstPlayerId } : { type: 'BANK' };
+  });
   const [transferAmount, setTransferAmount] = useState('');
   const [transferIsPlotFine, setTransferIsPlotFine] = useState(false);
   const [bankPaymentAmount, setBankPaymentAmount] = useState('');
@@ -1451,10 +1461,9 @@ function PlayerView({
   const pendingTradeConfirmations = snapshot.requests.filter((request) => request.type === 'TRADE_PROPERTY' && request.targetPlayerId === playerId && request.status === 'PENDING' && !request.buyerConfirmed);
   const isMeizhuang = me?.characterId === 'meizhuang';
   const rawTransferAmount = Number(transferAmount);
-  const transferAmountAfterPlotFineReduction = isMeizhuang && transferIsPlotFine ? rawTransferAmount - 200 : rawTransferAmount;
-  const validTransferAmount = transferIsPlotFine
-    ? Number.isInteger(rawTransferAmount) && transferAmountAfterPlotFineReduction > 0
-    : rawTransferAmount > 0;
+  const plotFineReduction = isMeizhuang ? me.plotFineReduction ?? 0 : 0;
+  const estimatedTransferAmount = Math.max(0, rawTransferAmount - (transferIsPlotFine ? plotFineReduction : 0));
+  const validTransferAmount = Number.isInteger(rawTransferAmount) && rawTransferAmount > 0;
   const playerSkipConsumeTotal = playerSkipConsumeCount === 'ALL' ? me?.remainingSkipTurns ?? 0 : Number(playerSkipConsumeCount);
 
   useEffect(() => {
@@ -1500,8 +1509,10 @@ function PlayerView({
     const others = snapshot.players.filter((player) => player.id !== playerId);
     const firstPlayerId = others[0]?.id ?? '';
     if (!others.some((player) => player.id === targetPlayerId) && targetPlayerId !== firstPlayerId) setTargetPlayerId(firstPlayerId);
-    if (!others.some((player) => player.id === transferPlayerId) && transferPlayerId !== firstPlayerId) setTransferPlayerId(firstPlayerId);
-  }, [playerId, snapshot.players, targetPlayerId, transferPlayerId]);
+    if (transferRecipient.type === 'PLAYER' && !others.some((player) => player.id === transferRecipient.playerId)) {
+      setTransferRecipient(firstPlayerId ? { type: 'PLAYER', playerId: firstPlayerId } : { type: 'BANK' });
+    }
+  }, [playerId, snapshot.players, targetPlayerId, transferRecipient]);
 
   if (!me) return <div className="empty page-empty">未找到当前玩家身份</div>;
 
@@ -1584,8 +1595,11 @@ function PlayerView({
   async function submitTransfer(event: FormEvent) {
     event.preventDefault();
     if (!validTransferAmount) return;
-    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/transfers`, { fromPlayerId: playerId, toPlayerId: transferPlayerId, amount: transferAmountAfterPlotFineReduction });
-    if (ok) { setTransferAmount(''); setTransferIsPlotFine(false); setPanel(null); showNotice('转账已完成并写入双方账本'); }
+    const body = transferRecipient.type === 'PLAYER'
+      ? { fromPlayerId: playerId, recipientType: 'PLAYER', toPlayerId: transferRecipient.playerId, amount: rawTransferAmount, isPlotFine: isMeizhuang && transferIsPlotFine }
+      : { fromPlayerId: playerId, recipientType: 'BANK', amount: rawTransferAmount, isPlotFine: isMeizhuang && transferIsPlotFine };
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/transfers`, body);
+    if (ok) { setTransferAmount(''); setTransferIsPlotFine(false); setPanel(null); showNotice('转帐已提交，结果已同步至账本或审批队列'); }
   }
 
   async function requestBankPayment(event: FormEvent) {
@@ -1673,7 +1687,7 @@ function PlayerView({
             <Quick icon={<Banknote />} label="起点奖励" disabled={busy || !canAct} onClick={() => setPanel('START')} />
             <Quick icon={<Building2 />} label="购买 / 建造" disabled={busy || !canAct || !landingConfirmed} onClick={() => setPanel('PROPERTY')} />
             <Quick icon={<Landmark />} label="资产操作" disabled={busy || !canAct} onClick={() => setPanel('ASSET')} />
-            <Quick icon={<ArrowLeftRight />} label="玩家转账" disabled={busy} onClick={() => setPanel('TRANSFER')} />
+            <Quick icon={<ArrowLeftRight />} label="转帐" disabled={busy} onClick={() => setPanel('TRANSFER')} />
             <Quick icon={<Banknote />} label="银行付款申请" disabled={busy} onClick={() => setPanel('BANK_PAYMENT')} />
             <Quick icon={<Crown />} label="实体事件" disabled={busy} onClick={() => setPanel('EVENT')} />
             <Quick icon={<CircleMinus />} label="停轮次数减除" disabled={busy || snapshot.diceMode !== 'PHYSICAL' || me.remainingSkipTurns <= 0} onClick={() => setPanel('SKIP_CONSUME')} />
@@ -1754,7 +1768,52 @@ function PlayerView({
           <button className="primary" disabled={busy || !validSellBuildingCount || !validTradeAmount || (assetMode === 'TRADE_PROPERTY' && !targetPlayerId) || (assetMode === 'PAY_TOLL' && (!landingConfirmed || currentLanding?.propertyName !== assetProperty))} onClick={() => void submitAssetAction()}>{busy ? <LoaderCircle className="spin" /> : <Landmark />}确认提交</button></> : <><div className="empty no-margin">当前没有符合条件的地产</div><button className="primary" disabled><Landmark />确认提交</button></>}
       </ActionSheet>}
 
-      {panel === 'TRANSFER' && <ActionSheet title="玩家转账" onClose={() => setPanel(null)}><form onSubmit={(event) => void submitTransfer(event)}><label>收款玩家<select value={transferPlayerId} onChange={(event) => setTransferPlayerId(event.target.value)}>{snapshot.players.filter((player) => player.id !== playerId).map((player) => <option value={player.id} key={player.id}>{player.name}</option>)}</select></label><label>转账金额<input type="number" min="1" step="1" value={transferAmount} onChange={(event) => setTransferAmount(event.target.value)} /></label>{isMeizhuang && <><label className="check-field"><input type="checkbox" checked={transferIsPlotFine} onChange={(event) => setTransferIsPlotFine(event.target.checked)} /><span>剧情罚俸或损失时勾选（沈眉庄专属技能）</span></label><p className="sheet-copy">金额填写实际罚款金额，系统会自动计算扣减-200，请不要填写减后的金额</p></>}<button className="primary" disabled={busy || !transferPlayerId || !validTransferAmount} type="submit">{busy ? <LoaderCircle className="spin" /> : <ArrowLeftRight />}确认转账</button></form></ActionSheet>}
+      {panel === 'TRANSFER' && (
+        <ActionSheet title="转帐" onClose={() => setPanel(null)}>
+          <form className="transfer-form" onSubmit={(event) => void submitTransfer(event)}>
+            <fieldset>
+              <legend>选择收款对象</legend>
+              <div className="transfer-recipient-grid">
+                {snapshot.players.filter((player) => player.id !== playerId).map((player) => {
+                  const selected = transferRecipient.type === 'PLAYER' && transferRecipient.playerId === player.id;
+                  const skill = player.characterId ? formatCharacterSkill(player.characterId, player as unknown as Record<string, unknown>, true) : '人物技能由房间配置决定';
+                  return (
+                    <button
+                      type="button"
+                      className={`transfer-recipient-card ${player.characterId ? `character-${player.characterId}` : ''} ${selected ? 'selected' : ''}`}
+                      aria-label={`${player.characterId ? characterName(player.characterId) : '未选人物'}，${player.name}，${skill}`}
+                      aria-pressed={selected}
+                      key={player.id}
+                      onClick={() => setTransferRecipient({ type: 'PLAYER', playerId: player.id })}
+                    >
+                      <strong>{player.characterId ? characterName(player.characterId) : '未选人物'}</strong>
+                      <span className="character-divider" aria-hidden="true" />
+                      <span>{player.name}</span>
+                      <small>{skill}</small>
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  className={`transfer-recipient-card transfer-bank-card ${transferRecipient.type === 'BANK' ? 'selected' : ''}`}
+                  aria-label="银行，管理审批、轮次与结算"
+                  aria-pressed={transferRecipient.type === 'BANK'}
+                  onClick={() => setTransferRecipient({ type: 'BANK' })}
+                >
+                  <Landmark />
+                  <strong>银行</strong>
+                  <span className="character-divider" aria-hidden="true" />
+                  <small>管理审批、轮次与结算</small>
+                </button>
+              </div>
+            </fieldset>
+            <label>转帐金额<input type="number" min="1" step="1" inputMode="numeric" value={transferAmount} onChange={(event) => setTransferAmount(event.target.value)} /></label>
+            {isMeizhuang && <label className="check-field"><input type="checkbox" checked={transferIsPlotFine} onChange={(event) => setTransferIsPlotFine(event.target.checked)} /><span>剧情罚俸或损失时勾选（沈眉庄专属技能）</span></label>}
+            {isMeizhuang && transferIsPlotFine && validTransferAmount && <div className="transfer-fine-preview" role="status"><span>原始金额 {formatMoney(rawTransferAmount)} 两</span><span>沈眉庄减免 {formatMoney(plotFineReduction)} 两</span><strong>预计支付 {formatMoney(estimatedTransferAmount)} 两</strong></div>}
+            <button className="primary" disabled={busy || !validTransferAmount} type="submit">{busy ? <LoaderCircle className="spin" /> : <ArrowLeftRight />}确认转帐</button>
+          </form>
+        </ActionSheet>
+      )}
 
       {panel === 'BANK_PAYMENT' && <ActionSheet title="申请银行付款" onClose={() => setPanel(null)}><form onSubmit={(event) => void requestBankPayment(event)}><label>付款金额<input required type="number" min="1" step="1" inputMode="numeric" value={bankPaymentAmount} onChange={(event) => setBankPaymentAmount(event.target.value)} /></label><button className="primary" disabled={busy || !Number.isInteger(Number(bankPaymentAmount)) || Number(bankPaymentAmount) <= 0} type="submit">{busy ? <LoaderCircle className="spin" /> : <Banknote />}提交付款申请</button></form></ActionSheet>}
 
@@ -2020,6 +2079,10 @@ function BankView({
   const skipConsumptionPlayer = skipConsumption ? snapshot.players.find((player) => player.id === skipConsumption.playerId) : undefined;
   const selectedSkipConsumptionPlayer = snapshot.players.find((player) => player.id === skipPlayerId);
   const selectedSkipConsumptionCount = skipConsumeCount === 'ALL' ? selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0 : Number(skipConsumeCount);
+  const plotFinePlayer = snapshot.players.find((player) => player.id === plotFinePlayerId);
+  const plotFineOriginalAmount = Number(plotFineAmount);
+  const plotFineReduction = Math.max(0, plotFinePlayer?.plotFineReduction ?? 0);
+  const plotFineActualAmount = Math.max(0, plotFineOriginalAmount - plotFineReduction);
 
   return (
     <>
@@ -2176,8 +2239,11 @@ function BankView({
 
       {plotFineOpen && (
         <ConfirmDialog title="确认剧情罚款" confirmLabel="确认罚款" busy={busy} onCancel={() => setPlotFineOpen(false)} onConfirm={() => void executePlotFine()}>
-          <p>服务器会自动识别沈眉庄，并应用 200 两剧情罚款减免；这里填写的是剧情卡原始罚款金额。</p>
-          <p>将向{snapshot.players.find((player) => player.id === plotFinePlayerId)?.name ?? '玩家'}执行 {formatMoney(Number(plotFineAmount))} 两剧情罚款。</p>
+          <p>罚款玩家：{plotFinePlayer?.name ?? '未知玩家'}</p>
+          <p>原始金额 {formatMoney(plotFineOriginalAmount)} 两</p>
+          <p>沈眉庄减免 {formatMoney(plotFineReduction)} 两</p>
+          <p>实际扣款 {formatMoney(plotFineActualAmount)} 两</p>
+          <small>最终金额由服务器按当前房间人物技能配置重新计算。</small>
         </ConfirmDialog>
       )}
 
@@ -2248,7 +2314,15 @@ function ApprovalList({ requests, players, busy, approve, reject }: { requests: 
 
 function approvalDetails(request: BankRequest, players: Player[]) {
   const details = request.propertyName ? [request.propertyName] : [];
-  if (request.type === 'TRADE_PROPERTY') {
+  if (request.type === 'PLAYER_TRANSFER') {
+    const recipient = players.find((player) => player.id === request.targetPlayerId);
+    details.push(request.recipientType === 'BANK'
+      ? '收款：银行'
+      : `收款：${recipient?.name ?? '未知玩家'}（${recipient?.characterId ? characterName(recipient.characterId) : '未选人物'}）`);
+    details.push(`原始金额 ${formatMoney(request.originalAmount ?? request.amount)} 两`);
+    if ((request.reduction ?? 0) > 0) details.push(`沈眉庄减免 ${formatMoney(request.reduction ?? 0)} 两`);
+    details.push(`实际金额 ${formatMoney(request.actualAmount ?? request.amount)} 两`);
+  } else if (request.type === 'TRADE_PROPERTY') {
     const buyer = players.find((player) => player.id === request.targetPlayerId);
     details.push(`买家：${buyer?.name ?? '未知玩家'} · 成交价 ${formatMoney(request.amount)} 两`);
   } else if (request.type === 'SELL_BUILDING') {
@@ -2277,6 +2351,7 @@ function requestLabel(type: string) {
     REDEEM_PROPERTY: '赎回地产',
     SELL_PROPERTY_TO_BANK: '卖给银行',
     TRADE_PROPERTY: '玩家间交易',
+    PLAYER_TRANSFER: '转帐',
     COLD_PALACE_EVENT: '冷宫事件',
     COMPANION_EVENT: '获得伙伴卡',
     PLOT_REST_EVENT: '剧情停留',

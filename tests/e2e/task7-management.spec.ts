@@ -36,7 +36,7 @@ test('room creation submits every supported setting after scannable confirmation
   await page.getByLabel('房间可见性').selectOption('PRIVATE');
   await page.getByLabel('启用人物技能').uncheck();
   await page.getByLabel('允许中途加入').check();
-  await page.getByLabel('玩家转账需要审批').check();
+  await page.getByLabel('玩家转帐需要审批').check();
   await page.getByLabel('自动跳过停轮玩家').uncheck();
   await page.getByRole('button', { name: '检查设置' }).click();
   await expect(page.getByRole('heading', { name: '确认房间设置' })).toBeVisible();

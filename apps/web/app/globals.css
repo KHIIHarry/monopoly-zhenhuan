@@ -663,6 +663,43 @@ label textarea { display: block; margin-top: 7px; }
 }
 .check-field input { width: 24px; height: 24px; min-height: 24px; margin: 0; accent-color: var(--red); }
 .check-field span { color: var(--ink); }
+.transfer-form { display: grid; gap: 14px; }
+.transfer-form fieldset { display: grid; gap: 7px; }
+.transfer-recipient-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; }
+.transfer-recipient-card {
+  --character-divider: var(--gold);
+  position: relative;
+  min-width: 0;
+  min-height: 132px;
+  border: 1px solid #cdb990;
+  border-radius: 6px;
+  background: #fffdf7;
+  color: var(--ink);
+  padding: 13px 12px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: hidden;
+  text-align: left;
+}
+.transfer-recipient-card:hover:not(:disabled) { border-color: var(--gold); background: #fff8ec; }
+.transfer-recipient-card:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+.transfer-recipient-card.selected { border: 2px solid var(--red); background: #fff6f6; box-shadow: inset 0 0 0 1px #fff; }
+.transfer-recipient-card strong { font: 18px STSong, SimSun, serif; line-height: 1.25; }
+.transfer-recipient-card > span:not(.character-divider) { color: var(--ink); font-size: 13px; font-weight: 700; }
+.transfer-recipient-card small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.transfer-recipient-card .character-divider { width: calc(100% + 24px); margin: 0 -12px; }
+.transfer-bank-card { --character-divider: var(--jade); border-color: #7da294; background: #f0f7f3; }
+.transfer-bank-card > svg { position: absolute; top: 12px; right: 12px; width: 21px; height: 21px; color: var(--jade); }
+.transfer-fine-preview { min-height: 52px; padding: 11px 13px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: center; background: #eee4d3; color: var(--muted); font-size: 12px; }
+.transfer-fine-preview strong { color: var(--red); text-align: right; }
+
+@media (max-width: 420px) {
+  .transfer-recipient-grid { grid-template-columns: 1fr; }
+  .transfer-recipient-card { min-height: 118px; }
+  .transfer-fine-preview { grid-template-columns: 1fr; }
+  .transfer-fine-preview strong { text-align: left; }
+}
 
 .danger-zone { margin: 0 16px; padding: 14px; border: 1px solid #d8adb0; background: #fff7f6; }
 .danger-zone > div { display: flex; gap: 10px; align-items: center; }

@@ -243,9 +243,9 @@ test('ROOM_CONTROL_LOST from a write refetches seats and routes to takeover', as
   });
 
   await openRoom(page);
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect(page.getByRole('heading', { name: '该房间已在另一台设备打开' })).toBeVisible();
   expect(seatReads).toBeGreaterThan(1);
   await expect(page.getByText('余额')).toHaveCount(0);
@@ -286,9 +286,9 @@ test('ROOM_CONTROL_LOST routes a freshly finished room to settlement', async ({ 
   }));
 
   await openRoom(page);
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect(page.getByRole('heading', { name: '对局结算' })).toBeVisible();
   await expect(page.getByText('不可变结算快照')).toBeVisible();
   await expect(page.getByRole('heading', { name: '该房间已在另一台设备打开' })).toHaveCount(0);

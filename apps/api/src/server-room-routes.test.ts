@@ -70,20 +70,24 @@ async function routeHarness() {
     }),
     deleteAccount: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, revokedSessionIds: ['target-session'] })),
     deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, stateVersion: 13 })),
+    authorizeRoomSession: vi.fn(async () => ({ player: { id: 'player-1' } })),
     getSettlement: vi.fn(async (_auth: AuthenticatedSession, _roomId: string, access?: 'ADMIN') => ({
       ...settlement,
       forced: access === 'ADMIN',
     })),
   };
+  const games = {
+    transfer: vi.fn(async () => ({ id: 'transfer-1', status: 'EXECUTED', stateVersion: 22 })),
+  };
   const app = await buildApiApp({
     accounts: accounts as unknown as AccountRoomService,
-    games: {} as PrismaGameService,
+    games: games as unknown as PrismaGameService,
     logger: false,
     notifier: (roomId, event, payload = {}) => notifications.push({ roomId, event, payload }),
   });
   openApps.push(app);
   const headers = { cookie: `${sessionCookieName}=cookie-token` };
-  return { accounts, app, headers, notifications };
+  return { accounts, app, games, headers, notifications };
 }
 
 describe('room write route idempotency contract', () => {
@@ -123,6 +127,57 @@ describe('room write route idempotency contract', () => {
     const source = await readFile(new URL('./app.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/games\.[A-Za-z]+\([^;\n]*auth\.rawToken/);
     expect(source).not.toMatch(/rawToken:\s*string/);
+  });
+});
+
+describe('unified transfer route contract', () => {
+  it('accepts player and bank recipient discriminants and forwards the unified command', async () => {
+    const { accounts, app, games, headers, notifications } = await routeHarness();
+    const playerTransfer = { fromPlayerId: 'player-1', recipientType: 'PLAYER', toPlayerId: 'player-2', amount: 400, isPlotFine: false } as const;
+    const bankTransfer = { fromPlayerId: 'player-1', recipientType: 'BANK', amount: 500, isPlotFine: true } as const;
+
+    const playerResponse = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/transfers',
+      headers: { ...headers, 'idempotency-key': 'player-transfer-key' },
+      payload: playerTransfer,
+    });
+    const bankResponse = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/transfers',
+      headers: { ...headers, 'idempotency-key': 'bank-transfer-key' },
+      payload: bankTransfer,
+    });
+
+    expect(playerResponse.statusCode).toBe(200);
+    expect(bankResponse.statusCode).toBe(200);
+    expect(accounts.authorizeRoomSession).toHaveBeenCalledTimes(2);
+    expect(games.transfer).toHaveBeenNthCalledWith(1, { accountId: 'account-1', sessionId: 'session-1' }, 'room-1', playerTransfer, 'player-transfer-key');
+    expect(games.transfer).toHaveBeenNthCalledWith(2, { accountId: 'account-1', sessionId: 'session-1' }, 'room-1', bankTransfer, 'bank-transfer-key');
+    expect(notifications).toEqual([
+      { roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 22 } },
+      { roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 22 } },
+    ]);
+  });
+
+  it('rejects inconsistent unified transfer recipient fields before calling the service', async () => {
+    const { app, games, headers } = await routeHarness();
+    const invalidBank = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/transfers',
+      headers: { ...headers, 'idempotency-key': 'invalid-bank' },
+      payload: { fromPlayerId: 'player-1', recipientType: 'BANK', toPlayerId: 'player-2', amount: 100, isPlotFine: false },
+    });
+    const invalidPlayer = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/transfers',
+      headers: { ...headers, 'idempotency-key': 'invalid-player' },
+      payload: { fromPlayerId: 'player-1', recipientType: 'PLAYER', amount: 100, isPlotFine: false },
+    });
+
+    expect(invalidBank.statusCode).toBe(400);
+    expect(invalidPlayer.statusCode).toBe(400);
+    expect(games.transfer).not.toHaveBeenCalled();
   });
 });
 

@@ -33,6 +33,14 @@ PostgreSQL 是唯一持久化状态来源。资金、产权、审批、回合、
 - 人物能力和银行能力可由同一成员兼任，但人物 Player、资金和资产只有一份。
 - 离线不会释放人物或银行席位。
 
+## 统一转帐
+
+- 玩家端“转帐”可选择其他人物玩家或银行作为收款对象；收款人使用人物卡片选择，付款人本人不会出现在列表中。
+- 建房时的“玩家转帐需要审批”决定两类收款对象是否进入银行审批。未勾选时事务立即结算；勾选时先生成待审批请求，批准后才结算，拒绝不改变余额。
+- 银行是独立身份，不拥有余额账户。玩家向银行转帐时只扣减玩家余额，并写入不可删除账本；不会虚构银行余额或给银行 Player 账户加款。
+- 沈眉庄勾选剧情罚款后，前端提交剧情卡原始金额。服务端按当前房间的人物技能配置计算减免和实际金额，玩家转给银行、玩家转给其他人物以及银行端录入剧情罚款共用同一计算逻辑。
+- 转帐提交和审批都使用 `Idempotency-Key`；余额校验、付款、收款、请求状态和账本记录在同一 PostgreSQL 事务中提交。
+
 ## Session 与 Cookie
 
 登录使用服务端 Session，数据库只保存随机令牌的哈希。Cookie 名为 `zhenhuan_session`，默认 30 天，并始终设置：
@@ -292,9 +300,11 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml e
 | 房间 | `GET/POST /api/rooms`、`POST /api/rooms/:id/join`、`GET /api/rooms/:id/seats` |
 | 席位 | `POST /api/rooms/:id/select-character`、`select-bank`、`take-control`、角色交换路由 |
 | 快照 | `GET /api/rooms/:id/snapshot?view=PLAYER|BANK`、`GET /api/rooms/:id/settlement` |
-| 游戏 | 现有落点、请求、审批、转账、地产、骰子、回合、银行修正和补偿撤销路由 |
+| 游戏 | 现有落点、请求、审批、转帐、地产、骰子、回合、银行修正和补偿撤销路由 |
 | 结算 | `POST /api/rooms/:id/settlement/preview`、`POST /api/rooms/:id/finish` |
 | 超管 | `/api/admin/accounts`、设备撤销、房间管理、强制结算、看板和安全日志 |
+
+统一转帐使用 `POST /api/rooms/:id/transfers`。玩家收款请求体为 `{ fromPlayerId, recipientType: "PLAYER", toPlayerId, amount, isPlotFine }`；银行收款请求体为 `{ fromPlayerId, recipientType: "BANK", amount, isPlotFine }`。`amount` 始终是正整数原始金额，服务端返回或在银行快照中提供 `originalAmount`、`reduction` 和 `actualAmount`。
 
 错误统一为 `{ "error": "RULE_CODE" }`。客户端按错误码显示明确提示；未知内部异常不向浏览器泄露堆栈或数据库信息。
 
