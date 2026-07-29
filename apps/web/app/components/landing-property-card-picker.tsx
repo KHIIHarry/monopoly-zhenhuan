@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { filterLandingProperties, landingOwnership, landingPropertyToll, type LandingPlayer, type LandingProperty } from './landing-property-picker';
 
@@ -54,8 +54,8 @@ export function LandingPropertyCardPicker({ properties, players, value, onChange
                 <span className={`landing-property-badge ${ownership.label === '已购' ? 'owned' : 'unowned'}`}>{ownership.label}</span>
                 <span className="landing-property-card-title">
                   {property.name}
-                  {selected && <><Check aria-hidden="true" /><span className="landing-property-selected-label">已选</span></>}
                 </span>
+                {selected && <span className="landing-property-selected-label" aria-hidden="true">✅</span>}
                 <span className="landing-property-card-meta">
                   <span>购买价<strong>{formatAmount(property.purchasePrice)} 两</strong></span>
                   <span>当前过路费<strong>{formatAmount(toll)} 两</strong></span>

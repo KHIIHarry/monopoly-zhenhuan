@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 
 const stylesheet = await readFile(new URL('../apps/web/app/globals.css', import.meta.url), 'utf8');
 const appRouter = await readFile(new URL('../apps/web/app/components/app-router-client.tsx', import.meta.url), 'utf8');
+const appLayout = await readFile(new URL('../apps/web/app/layout.tsx', import.meta.url), 'utf8');
+const landingPicker = await readFile(new URL('../apps/web/app/components/landing-property-card-picker.tsx', import.meta.url), 'utf8');
 
 assert.match(
   stylesheet,
@@ -86,4 +88,76 @@ assert.match(
   stylesheet,
   /\.workbench-scroll\s*>\s*\.workbench-segment:not\(\.toast\)\s*\{[^}]*width:\s*calc\(100%\s*\+\s*var\(--workbench-inline-padding\)\s*\+\s*var\(--workbench-inline-padding\)\);/s,
   'The desktop workbench view switcher must extend to the same edges as the surrounding information bands.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.admin-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);[^}]*overflow-x:\s*clip;/s,
+  'Mobile admin navigation must keep all four tabs in a fixed non-scrollable row.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.admin-tabs\s*\{[^}]*width:\s*calc\(100%\s*\+\s*32px\);[^}]*margin-inline:\s*-16px;/s,
+  'Mobile admin navigation must extend to both viewport edges.',
+);
+
+assert.match(
+  appRouter,
+  /<ActionSheet\s+title="声明实体落点"\s+onClose=\{\(\)\s*=>\s*setPanel\(null\)\}/,
+  'The landing declaration must retain the standard sheet position.',
+);
+
+assert.match(
+  appLayout,
+  /themeColor:\s*['"]#ffffff['"]/,
+  'The mobile browser toolbar must use a white theme color.',
+);
+
+assert.match(
+  appRouter,
+  /className="primary landing-confirm"[\s\S]*?确认落点/,
+  'The landing confirmation must have a dedicated mobile layout hook.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.landing-confirm\s*\{[^}]*width:\s*calc\(100%\s*\+\s*36px\);[^}]*margin:\s*0\s+-18px;/s,
+  'The mobile landing confirmation must meet the property picker without gaps and extend to its edges.',
+);
+
+assert.match(
+  landingPicker,
+  /\{selected\s*&&\s*<span\s+className="landing-property-selected-label"\s+aria-hidden="true">✅<\/span>\}/,
+  'Selected landing cards must use a compact check-mark emoji.',
+);
+
+assert.match(
+  stylesheet,
+  /\.landing-property-selected-label\s*\{[^}]*position:\s*absolute;[^}]*width:\s*22px;[^}]*height:\s*22px;[^}]*font-size:\s*18px;/s,
+  'The selected landing marker must not consume card-title layout space.',
+);
+
+assert.match(
+  stylesheet,
+  /\.landing-property-card:hover:not\(:disabled\):not\(\.selected\)\s*\{[^}]*border-color:\s*var\(--gold\);/s,
+  'Hover styling must not override the persistent selected landing-card border.',
+);
+
+assert.match(
+  appRouter,
+  /data\.accounts\.map\([\s\S]*?admin-account-detail-host-\$\{item\.id\}/,
+  'Account management must mount directly below the selected account row.',
+);
+
+assert.match(
+  appRouter,
+  /data\.rooms\.map\([\s\S]*?admin-room-detail-host-\$\{room\.id\}/,
+  'Room management must mount directly below the selected room row.',
+);
+
+assert.match(
+  stylesheet,
+  /\.admin-row\s*>\s*\.danger-text\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;[^}]*width:\s*100%;/s,
+  'Room-member removal actions must span the full member row regardless of asset text length.',
 );

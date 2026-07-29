@@ -38,4 +38,18 @@ describe('mobile editable controls', () => {
 
     expect(stylesheet).toMatch(/@media\s*\(max-width:\s*600px\)[\s\S]*?input,\s*select,\s*textarea\s*\{[^}]*font-size:\s*16px;/);
   });
+
+  test('overrides the login form inherited control font size', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*600px\)[\s\S]*?\.v2-form input,\s*\.v2-form select,\s*\.v2-panel input\s*\{[^}]*font-size:\s*16px;/);
+  });
+});
+
+describe('admin room configuration controls', () => {
+  test('aligns select controls with text inputs', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.admin-detail \.form-grid :is\(input, select\)\s*\{[^}]*height:\s*48px;[^}]*min-height:\s*48px;[^}]*box-sizing:\s*border-box;/s);
+  });
 });

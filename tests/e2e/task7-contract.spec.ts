@@ -859,8 +859,9 @@ test('bank approval presents unified player and bank transfer details', async ({
   await expect(playerTransfer).toContainText('实际金额 400 两');
 });
 
-test('player submits plot rest and an all-skip-consumption request without a cold-palace reason', async ({ page }) => {
+test('实体事件 shares one count, resets after success, and sends distinct cold and plot requests', async ({ page }, testInfo) => {
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const coldBodies: Record<string, unknown>[] = [];
   const requests: Record<string, unknown>[] = [];
   const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 3 }] };
 
@@ -868,6 +869,10 @@ test('player submits plot rest and an all-skip-consumption request without a col
   await mockLobby(page);
   await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
   await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+  await page.route('**/api/rooms/room-1/events/cold-palace', async (route) => {
+    coldBodies.push(await postBody(route));
+    await route.fulfill({ json: { id: 'cold-request', stateVersion: 2 } });
+  });
   await page.route('**/api/rooms/room-1/requests', async (route) => {
     requests.push(await postBody(route));
     await route.fulfill({ json: { id: `request-${requests.length}`, stateVersion: requests.length + 1 } });
@@ -875,18 +880,140 @@ test('player submits plot rest and an all-skip-consumption request without a col
 
   await openRoom(page);
   await page.getByRole('button', { name: '实体事件' }).click();
-  await page.getByLabel('剧情停留次数').fill('2');
+  await expect(page.getByLabel('停轮次数')).toHaveCount(1);
+  await expect(page.getByLabel('冷宫停轮次数')).toHaveCount(0);
+  await expect(page.getByLabel('剧情停留次数')).toHaveCount(0);
+  const eventLayout = await page.locator('.event-actions').evaluate((element) => {
+    const grid = element.getBoundingClientRect();
+    const buttons = [...element.querySelectorAll('button')].map((button) => {
+      const rect = button.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+    });
+    const overlaps = buttons.some((left, index) => buttons.slice(index + 1).some((right) => (
+      left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top
+    )));
+    return {
+      viewportWidth: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      columns: getComputedStyle(element).gridTemplateColumns.split(' ').length,
+      grid: { left: grid.left, right: grid.right },
+      buttons,
+      overlaps,
+    };
+  });
+  expect(eventLayout.columns).toBe(2);
+  if (testInfo.project.name === 'android-chromium') {
+    expect(eventLayout.viewportWidth).toBe(360);
+    expect(eventLayout.documentWidth).toBeLessThanOrEqual(360);
+    expect(eventLayout.grid.left).toBeGreaterThanOrEqual(0);
+    expect(eventLayout.grid.right).toBeLessThanOrEqual(360);
+    expect(eventLayout.buttons.every((button) => button.left >= 0 && button.right <= 360)).toBe(true);
+    expect(eventLayout.overlaps).toBe(false);
+  }
+  await page.getByLabel('剧情说明').fill('有效剧情说明');
+  for (const invalidCount of ['0', '-1', '1.5']) {
+    await page.getByLabel('停轮次数').fill(invalidCount);
+    await expect(page.getByRole('button', { name: '冷宫事件', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '剧情停轮', exact: true })).toBeDisabled();
+  }
+  expect(coldBodies).toEqual([]);
+  expect(requests).toEqual([]);
+  await page.getByLabel('剧情说明').fill('');
+  await page.getByLabel('停轮次数').fill('2');
+  await expect(page.getByRole('button', { name: '冷宫事件', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '剧情停轮', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '冷宫事件', exact: true }).click();
+
+  await expect.poll(() => coldBodies).toEqual([{ playerId: 'player-1', count: 2 }]);
+  await expect(page.getByRole('dialog', { name: '实体事件' })).toHaveCount(0);
+  await page.getByRole('button', { name: '实体事件' }).click();
+  await expect(page.getByLabel('停轮次数')).toHaveValue('1');
+  await expect(page.getByPlaceholder('填写剧情停轮原因')).toHaveValue('');
+  await page.getByLabel('停轮次数').fill('3');
   await page.getByLabel('剧情说明').fill('养病留宫');
-  await page.getByRole('button', { name: '提交剧情停留' }).click();
+  await page.getByRole('button', { name: '剧情停轮', exact: true }).click();
   await expect(page.getByLabel('冷宫原因')).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: '实体事件' })).toHaveCount(0);
+  await page.getByRole('button', { name: '实体事件' }).click();
+  await expect(page.getByLabel('停轮次数')).toHaveValue('1');
+  await expect(page.getByPlaceholder('填写剧情停轮原因')).toHaveValue('');
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
   await page.getByRole('button', { name: '停轮次数减除' }).click();
   await page.getByLabel('减除次数').selectOption('ALL');
   await page.getByRole('button', { name: '提交减除申请' }).click();
 
-  expect(requests).toEqual([
-    { playerId: 'player-1', type: 'PLOT_REST_EVENT', count: 2, reason: '养病留宫' },
-    { playerId: 'player-1', type: 'CONSUME_SKIP_TURNS', count: 3 },
+  expect(coldBodies).toEqual([{ playerId: 'player-1', count: 2 }]);
+  expect(requests[0]).toEqual({ playerId: 'player-1', type: 'PLOT_REST_EVENT', count: 3, reason: '养病留宫' });
+  expect(requests[1]).toEqual({ playerId: 'player-1', type: 'CONSUME_SKIP_TURNS', count: 3 });
+});
+
+test('伙伴卡放回 confirms a zero-card physical return and sends only the request type', async ({ page }) => {
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const requests: Record<string, unknown>[] = [];
+  const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], partnerCardCount: 0 }] };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+  await page.route('**/api/rooms/room-1/requests', async (route) => {
+    requests.push(await postBody(route));
+    await route.fulfill({ json: { id: 'return-companion-request', stateVersion: 2 } });
+  });
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '实体事件' }).click();
+  await page.getByRole('button', { name: '放回伙伴卡', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '确认放回一张实体伙伴卡', exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('银行批准后获得 500 两', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('该操作不关联落点，批准后不可撤销', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('H5 当前未记录伙伴卡，请确认玩家已在线下实际放回实体卡。', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '确认放回', exact: true })).toBeEnabled();
+
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '实体事件', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '放回伙伴卡', exact: true }).click();
+  await page.getByRole('button', { name: '确认放回', exact: true }).click();
+
+  await expect.poll(() => requests).toEqual([
+    { playerId: 'player-1', type: 'RETURN_COMPANION_EVENT' },
   ]);
+});
+
+test('伙伴卡放回 bank approval repeats the authoritative reward and untracked-card warning', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+  const snapshot = {
+    ...gameSnapshot,
+    players: [{ ...gameSnapshot.players[0], partnerCardCount: 0 }],
+    requests: [{
+      id: 'return-companion-request', type: 'RETURN_COMPANION_EVENT', playerId: 'player-1',
+      amount: 500, quantity: 1, status: 'PENDING',
+    }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: /审批/ }).click();
+  const approval = page.locator('.approval-list article').filter({ hasText: '甄嬛' });
+  await expect(approval).toContainText('放回伙伴卡');
+  await expect(approval).toContainText('放回 1 张');
+  await expect(approval).toContainText('奖励 500 两');
+  await expect(approval).toContainText('未记录实体卡放回：是');
+  await expect(approval).toContainText('批准后不可撤销');
+  await approval.getByRole('button', { name: '批准事件', exact: true }).click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('玩家：甄嬛');
+  await expect(dialog).toContainText('放回 1 张');
+  await expect(dialog).toContainText('奖励 500 两');
+  await expect(dialog).toContainText('未记录实体卡放回：是');
+  await expect(dialog).toContainText('批准后不可撤销');
+  await expect(dialog).not.toContainText('地产：无');
 });
 
 test('places skip consumption between physical events and end turn', async ({ page }) => {
