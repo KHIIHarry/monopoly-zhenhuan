@@ -210,7 +210,6 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
         allowMidgameJoin: false,
         visibility: 'PUBLIC',
         transferApprovalRequired: false,
-        autoSkipTurn: true,
       }, `create-primary-${runId}`);
       const isolationRoom = await postJson<RoomReference>(bankContext, config.apiUrl, '/api/rooms', {
         name: isolationRoomName,
@@ -221,7 +220,6 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
         allowMidgameJoin: false,
         visibility: 'PUBLIC',
         transferApprovalRequired: false,
-        autoSkipTurn: true,
       }, `create-isolation-${runId}`);
 
       await Promise.all([

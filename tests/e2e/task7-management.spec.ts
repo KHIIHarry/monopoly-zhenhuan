@@ -37,7 +37,6 @@ test('room creation submits every supported setting after scannable confirmation
   await page.getByLabel('启用人物技能').uncheck();
   await page.getByLabel('允许中途加入').check();
   await page.getByLabel('玩家转帐需要审批').check();
-  await page.getByLabel('自动跳过停轮玩家').uncheck();
   await page.getByRole('button', { name: '检查设置' }).click();
   await expect(page.getByRole('heading', { name: '确认房间设置' })).toBeVisible();
   await expect(page.getByText('6,800 / 1,200 两')).toBeVisible();
@@ -45,7 +44,7 @@ test('room creation submits every supported setting after scannable confirmation
   await expect.poll(() => attempts).toBe(1);
   await page.getByRole('button', { name: '确认创建' }).click();
   await expect.poll(() => attempts).toBe(2);
-  expect(submitted).toEqual({ name: '翊坤宫超长夜局名称', password: 'palace-secret', initialBalance: 6800, diceMode: 'PHYSICAL', skillEnabled: false, startReward: 1200, allowMidgameJoin: true, visibility: 'PRIVATE', transferApprovalRequired: true, autoSkipTurn: false });
+  expect(submitted).toEqual({ name: '翊坤宫超长夜局名称', password: 'palace-secret', initialBalance: 6800, diceMode: 'PHYSICAL', skillEnabled: false, startReward: 1200, allowMidgameJoin: true, visibility: 'PRIVATE', transferApprovalRequired: true });
   expect(keys[0]).toBeTruthy();
   expect(keys[1]).toBe(keys[0]);
 });
@@ -115,7 +114,7 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   ];
   const pagedAccount = { id: 'account-paged', username: 'fuchaguiren', displayName: '富察贵人', note: null, status: 'ACTIVE', isSuperAdmin: false, canCreateRoom: false, lastLoginAt: null, createdAt: now, updatedAt: now };
   const adminRooms = [{ id: 'room-1', name: room.name, status: 'LOBBY', visibility: 'PUBLIC', creator: { id: 'account-1', displayName: '甄嬛' }, memberCount: 2, playerCount: 1, hasBank: true, hasPassword: false, createdAt: now, updatedAt: now, settlement: null }];
-  const detail = { id: 'room-1', code: 'SYX', name: room.name, status: 'LOBBY', creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration: { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, autoSkipTurn: true, playerLimit: 5, hasPassword: false }, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [{ id: 'membership-1', accountId: 'account-active', displayNameSnapshot: '沈眉庄', status: 'ACTIVE', characterId: 'meizhuang', characterName: '沈眉庄', isBank: true, controllerActive: true, joinedAt: now, player: { id: 'player-1', balance: 5000, status: 'ACTIVE', ownedPropertyCount: 1 } }, { id: 'membership-2', accountId: 'account-disabled', displayNameSnapshot: '安陵容', status: 'ACTIVE', characterId: null, characterName: null, isBank: false, controllerActive: false, joinedAt: now, player: null }], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null };
+  const detail = { id: 'room-1', code: 'SYX', name: room.name, status: 'LOBBY', creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration: { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, playerLimit: 5, hasPassword: false }, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [{ id: 'membership-1', accountId: 'account-active', displayNameSnapshot: '沈眉庄', status: 'ACTIVE', characterId: 'meizhuang', characterName: '沈眉庄', isBank: true, controllerActive: true, joinedAt: now, player: { id: 'player-1', balance: 5000, status: 'ACTIVE', ownedPropertyCount: 1 } }, { id: 'membership-2', accountId: 'account-disabled', displayNameSnapshot: '安陵容', status: 'ACTIVE', characterId: null, characterName: null, isBank: false, controllerActive: false, joinedAt: now, player: null }], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null };
   const dashboard = { accounts: { total: 3, active: 2 }, sessions: { valid: 2 }, rooms: { lobby: 1, playing: 0, finished: 1 }, games: { settledTotal: 1, averageDurationSeconds: 3600 }, characterSelections: [{ characterId: 'zhenhuan', characterNameSnapshot: '钮祜禄·甄嬛', count: 2 }], characterWins: [{ characterNameSnapshot: '钮祜禄·甄嬛', count: 1 }], recentGames: [{ roomId: 'history-1', roomNameSnapshot: '永寿宫旧局', endedAt: now, durationSeconds: 3600, forced: false, winners: [{ displayNameSnapshot: '甄嬛', characterNameSnapshot: '钮祜禄·甄嬛' }] }] };
   const writes: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
   let roomDetailReads = 0;
@@ -186,7 +185,7 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
 test('管理员房间配置在回读后确认保存', async ({ page }) => {
   await lobbyRoutes(page);
   const adminRooms = [{ id: 'room-1', name: room.name, status: 'LOBBY', visibility: 'PUBLIC', creator: { id: 'account-1', displayName: '甄嬛' }, memberCount: 2, playerCount: 1, hasBank: true, hasPassword: false, createdAt: now, updatedAt: now, settlement: null }];
-  const configuration = { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, autoSkipTurn: true, playerLimit: 5, hasPassword: false };
+  const configuration = { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, playerLimit: 5, hasPassword: false };
   const dashboard = { accounts: { total: 1, active: 1 }, sessions: { valid: 1 }, rooms: { lobby: 1, playing: 0, finished: 0 }, games: { settledTotal: 0, averageDurationSeconds: 0 }, characterSelections: [], characterWins: [], recentGames: [] };
   const detail = () => ({ id: 'room-1', code: 'SYX', name: room.name, status: 'LOBBY', creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null });
   let writes = 0;

@@ -210,11 +210,10 @@ integration('AccountRoomService PostgreSQL authentication', () => {
       allowMidgameJoin: false,
       visibility: 'PRIVATE',
       transferApprovalRequired: true,
-      autoSkipTurn: false,
     }, 'task-2-create-room');
 
     expect(Object.keys(created).sort()).toEqual([
-      'allowMidgameJoin', 'autoSkipTurn', 'code', 'createdAt', 'diceMode',
+      'allowMidgameJoin', 'code', 'createdAt', 'diceMode',
       'expiresAt', 'hasPassword', 'id', 'initialBalance', 'name', 'skillEnabled',
       'startReward', 'status', 'transferApprovalRequired', 'visibility',
     ]);
@@ -226,6 +225,7 @@ integration('AccountRoomService PostgreSQL authentication', () => {
       diceMode: 'PHYSICAL',
       visibility: 'PRIVATE',
     });
+    expect(JSON.stringify(created)).not.toContain('autoSkipTurn');
     expect(JSON.stringify(created)).not.toContain('passwordHash');
     const stored = await db.room.findUniqueOrThrow({ where: { id: created.id } });
     expect(stored.passwordHash).toMatch(/^scrypt\$/);
@@ -457,7 +457,6 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     allowMidgameJoin: boolean;
     visibility: 'PUBLIC' | 'PRIVATE';
     transferApprovalRequired: boolean;
-    autoSkipTurn: boolean;
   }> = {}) => ({
     name,
     initialBalance: 6_000,
@@ -467,7 +466,6 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     allowMidgameJoin: false,
     visibility: 'PUBLIC' as const,
     transferApprovalRequired: false,
-    autoSkipTurn: true,
     ...overrides,
   });
 

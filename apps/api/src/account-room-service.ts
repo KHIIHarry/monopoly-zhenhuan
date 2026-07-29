@@ -164,7 +164,6 @@ function roomCreationSummary(room: {
   allowMidgameJoin: boolean;
   visibility: string;
   transferApprovalRequired: boolean;
-  autoSkipTurn: boolean;
   passwordHash: string | null;
   createdAt: Date;
   expiresAt: Date;
@@ -181,7 +180,6 @@ function roomCreationSummary(room: {
     allowMidgameJoin: room.allowMidgameJoin,
     visibility: room.visibility,
     transferApprovalRequired: room.transferApprovalRequired,
-    autoSkipTurn: room.autoSkipTurn,
     hasPassword: room.passwordHash !== null,
     createdAt: room.createdAt,
     expiresAt: room.expiresAt,
@@ -965,7 +963,6 @@ export class AccountRoomService {
         allowMidgameJoin: room.allowMidgameJoin,
         visibility: room.visibility,
         transferApprovalRequired: room.transferApprovalRequired,
-        autoSkipTurn: room.autoSkipTurn,
         playerLimit: room.playerLimit,
         hasPassword: room.passwordHash !== null,
       },
@@ -996,7 +993,7 @@ export class AccountRoomService {
 
   async updateAdminRoom(auth: AuthenticatedSession, roomId: string, input: {
     name?: string; visibility?: string; diceMode?: 'ELECTRONIC' | 'PHYSICAL'; skillEnabled?: boolean;
-    startReward?: number; allowMidgameJoin?: boolean; transferApprovalRequired?: boolean; autoSkipTurn?: boolean; initialBalance?: number;
+    startReward?: number; allowMidgameJoin?: boolean; transferApprovalRequired?: boolean; initialBalance?: number;
   }, key: string) {
     const result = await this.executeAdminWrite({
       auth,
@@ -1013,7 +1010,7 @@ export class AccountRoomService {
       mutate: async (tx) => {
         const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
         const keys = Object.keys(input);
-        const lobbyOnly = ['diceMode', 'skillEnabled', 'startReward', 'allowMidgameJoin', 'transferApprovalRequired', 'autoSkipTurn', 'initialBalance'];
+        const lobbyOnly = ['diceMode', 'skillEnabled', 'startReward', 'initialBalance'];
         if (room.status !== 'LOBBY' && keys.some((field) => lobbyOnly.includes(field))) fail('ROOM_CONFIG_LIFECYCLE_CONFLICT');
         if (input.initialBalance !== undefined) {
           const [players, initialLedgers] = await Promise.all([
@@ -1174,7 +1171,7 @@ export class AccountRoomService {
     return result.value;
   }
 
-  async createRoom(auth: AuthenticatedSession, input: { name: string; password?: string; initialBalance: number; diceMode: 'ELECTRONIC' | 'PHYSICAL'; skillEnabled: boolean; startReward: number; allowMidgameJoin: boolean; visibility: 'PUBLIC' | 'PRIVATE'; transferApprovalRequired: boolean; autoSkipTurn: boolean }, key: string) {
+  async createRoom(auth: AuthenticatedSession, input: { name: string; password?: string; initialBalance: number; diceMode: 'ELECTRONIC' | 'PHYSICAL'; skillEnabled: boolean; startReward: number; allowMidgameJoin: boolean; visibility: 'PUBLIC' | 'PRIVATE'; transferApprovalRequired: boolean }, key: string) {
     if (!auth.account.canCreateRoom) fail('ROOM_CREATE_FORBIDDEN');
     const passwordHash = input.password ? await hashPassword(input.password) : null;
     return this.executeIdempotent(`account:${auth.account.id}:rooms:create`, key, input, async (tx) => {
@@ -1183,7 +1180,7 @@ export class AccountRoomService {
       const room = await tx.room.create({ data: {
         code: randomBytes(4).toString('hex').toUpperCase(), name: input.name, status: 'LOBBY', ruleProfile: 'CUSTOM', difficulty: 'CUSTOM', participantCount: 5, playerLimit: 5,
         bankMode: 'DEDICATED_MODERATOR', characterAssignmentMode: 'PLAYER_SELECT', initialBalance: input.initialBalance, diceMode: input.diceMode, skillEnabled: input.skillEnabled,
-        storyMoneyCounterpartyMode: 'TREASURY', transferApprovalRequired: input.transferApprovalRequired, autoSkipTurn: input.autoSkipTurn, startReward: input.startReward,
+        storyMoneyCounterpartyMode: 'TREASURY', transferApprovalRequired: input.transferApprovalRequired, startReward: input.startReward,
         victoryMode: 'LAST_SOLVENT', createdBy: auth.account.username, createdByAccountId: auth.account.id, passwordHash, visibility: input.visibility,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), allowMidgameJoin: input.allowMidgameJoin,
       } });
