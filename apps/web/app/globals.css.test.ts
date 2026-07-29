@@ -24,3 +24,11 @@ describe('reference landing page', () => {
     expect(stylesheet).not.toContain('/assets/landing/');
   });
 });
+
+describe('mobile editable controls', () => {
+  test('keeps editable control text at the iOS zoom threshold', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*600px\)[\s\S]*?input,\s*select,\s*textarea\s*\{[^}]*font-size:\s*16px;/);
+  });
+});
