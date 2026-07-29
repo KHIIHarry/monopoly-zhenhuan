@@ -772,6 +772,66 @@ test('non-meizhuang transfer keeps the entered amount without a plot fine contro
   await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-1', toPlayerId: 'player-2', amount: 500 }]);
 });
 
+test('player submits plot rest and an all-skip-consumption request without a cold-palace reason', async ({ page }) => {
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const requests: Record<string, unknown>[] = [];
+  const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 3 }] };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+  await page.route('**/api/rooms/room-1/requests', async (route) => {
+    requests.push(await postBody(route));
+    await route.fulfill({ json: { id: `request-${requests.length}`, stateVersion: requests.length + 1 } });
+  });
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '实体事件' }).click();
+  await page.getByLabel('剧情停留次数').fill('2');
+  await page.getByLabel('剧情说明').fill('养病留宫');
+  await page.getByRole('button', { name: '提交剧情停留' }).click();
+  await expect(page.getByLabel('冷宫原因')).toHaveCount(0);
+  await page.getByRole('button', { name: '停轮次数减除' }).click();
+  await page.getByLabel('减除次数').selectOption('ALL');
+  await page.getByRole('button', { name: '提交减除申请' }).click();
+
+  expect(requests).toEqual([
+    { playerId: 'player-1', type: 'PLOT_REST_EVENT', count: 2, reason: '养病留宫' },
+    { playerId: 'player-1', type: 'CONSUME_SKIP_TURNS', count: 3 },
+  ]);
+});
+
+test('bank displays plot-rest details and submits all remaining skip turns', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+  const directConsumptions: Record<string, unknown>[] = [];
+  const snapshot = {
+    ...gameSnapshot,
+    players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 3 }],
+    requests: [{ id: 'plot-rest-request', type: 'PLOT_REST_EVENT', playerId: 'player-1', amount: 0, quantity: 2, note: '养病留宫', status: 'PENDING' }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+  await page.route('**/api/rooms/room-1/bank/consume-skip-turn', async (route) => {
+    directConsumptions.push(await postBody(route));
+    await route.fulfill({ json: { remainingSkipTurns: 0, stateVersion: 2 } });
+  });
+
+  await openRoom(page);
+  await expect(page.getByText('剧情停留')).toBeVisible();
+  await expect(page.getByText('养病留宫')).toBeVisible();
+  await page.getByRole('button', { name: '事务' }).click();
+  await page.getByLabel('扣减次数').selectOption('ALL');
+  await page.getByLabel('扣减原因').fill('实体回合已跳过');
+  await page.getByRole('button', { name: '扣减停轮' }).click();
+  await page.getByRole('button', { name: '确认扣减停轮' }).click();
+
+  expect(directConsumptions).toEqual([{ playerId: 'player-1', count: 3, reason: '实体回合已跳过' }]);
+});
+
 test('generated start-landing intent survives room child unmount with the same key and landing id', async ({ page }) => {
   const roomA = room({ id: 'room-a', name: '起点待确认的碎玉轩', status: 'PLAYING' });
   const roomB = room({ id: 'room-b', name: '临时打开的翊坤宫', status: 'LOBBY', characterId: null, myCharacter: null, playerCount: 0 });
