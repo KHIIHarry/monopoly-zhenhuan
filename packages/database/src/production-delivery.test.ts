@@ -74,4 +74,20 @@ describe('production delivery contract', () => {
     expect(environment).toContain('APP_ORIGIN="http://localhost:3000"');
     expect(readme).toContain('APP_ORIGIN=https://game.example.com');
   });
+
+  it('ships one-command trusted LAN HTTP development instructions', () => {
+    const rootPackage = readJson('../../../package.json');
+    const environment = readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8');
+    const readme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
+
+    expect(rootPackage.scripts['dev:lan']).toBe('node scripts/start-lan.mjs');
+    expect(environment).toContain('LAN_HOST=');
+    expect(environment).toContain('LAN_HTTP_ORIGIN=');
+    expect(readme).toContain('npm run dev:lan');
+    expect(readme).toContain('LAN_HOST=192.168.31.196 npm run dev:lan');
+    expect(readme).toContain('http://192.168.31.196:3000');
+    expect(readme).toContain('macOS 防火墙');
+    expect(readme).toContain('IP 地址变化');
+    expect(readme).toContain('不得将 `3000`、`4000` 或 `5432` 映射到公网');
+  });
 });

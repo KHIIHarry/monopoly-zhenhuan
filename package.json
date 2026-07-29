@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "dev": "npm run build:packages && concurrently -n web,api 'npm run dev -w @zhenhuan/web' 'npm run dev -w @zhenhuan/api'",
+    "dev:lan": "node scripts/start-lan.mjs",
     "start": "concurrently -n web,api 'npm run start -w @zhenhuan/web' 'npm run start -w @zhenhuan/api'",
     "build": "npm run build -ws --if-present",
     "build:production": "node scripts/require-production-web-env.mjs && npm run build",

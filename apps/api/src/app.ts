@@ -6,6 +6,7 @@ import { prisma } from '@zhenhuan/database';
 import { AccountRoomService, type AuthenticatedSession } from './account-room-service.js';
 import { authMeResponse, clearSessionCookie, loginBodySchema, sessionCookie, sessionCookieName } from './auth-domain.js';
 import { mapApiError, RuleError } from './api-error.js';
+import { loadOriginPolicy } from './origin-policy.js';
 import { parseRoomSubscriptionPayload, PrismaGameService } from './prisma-game-service.js';
 import { loadSecurityConfig } from './security-config.js';
 
@@ -49,21 +50,7 @@ const accounts = options.accounts ?? (() => {
 })();
 const games = options.games ?? new PrismaGameService(database);
 const app = Fastify({ logger: options.logger ?? true });
-const production = process.env.NODE_ENV === 'production';
-const configuredOrigin = process.env.APP_ORIGIN?.trim();
-if (production) {
-  try {
-    const parsed = new URL(configuredOrigin ?? '');
-    if (!configuredOrigin || parsed.origin !== configuredOrigin || parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('invalid');
-  } catch {
-    throw new Error('APP_ORIGIN must be one exact HTTPS origin in production');
-  }
-}
-const originAllowed = (origin?: string) => {
-  if (!origin) return true;
-  if (production) return origin === configuredOrigin;
-  return /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(origin);
-};
+const { originAllowed, secureCookie } = loadOriginPolicy(process.env);
 app.addHook('onRequest', async (request, reply) => {
   if (request.headers.origin && !originAllowed(request.headers.origin)) return reply.code(403).send({ error: 'ORIGIN_NOT_ALLOWED' });
 });
@@ -72,7 +59,6 @@ const io = new Server(app.server, {
   cors: { origin: (origin, done) => done(null, originAllowed(origin)), credentials: true },
   allowRequest: (request, done) => done(null, originAllowed(request.headers.origin)),
 });
-const secureCookie = true;
 
 function cookieToken(header?: string) {
   const cookie = header?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${sessionCookieName}=`));

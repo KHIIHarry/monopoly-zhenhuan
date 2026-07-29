@@ -43,11 +43,11 @@ PostgreSQL 是唯一持久化状态来源。资金、产权、审批、回合、
 
 ## Session 与 Cookie
 
-登录使用服务端 Session，数据库只保存随机令牌的哈希。Cookie 名为 `zhenhuan_session`，默认 30 天，并始终设置：
+登录使用服务端 Session，数据库只保存随机令牌的哈希。Cookie 名为 `zhenhuan_session`，默认 30 天，并设置：
 
 - `HttpOnly`
-- `Secure`
 - `SameSite=Lax`
+- `Secure`（生产环境和普通 localhost 开发模式；显式局域网 HTTP 模式除外）
 
 HTTP 和 Socket.IO 都只从该 Cookie 认证。退出最早设备、退出其他设备、指定设备退出、重置密码和禁用账号会撤销对应 Session，立即向 `session:<sessionId>` 发送 `account.session.revoked` 并强制断开 Socket；后续 REST 请求仍会被服务端拒绝。
 
@@ -83,7 +83,7 @@ npm run dev
 - H5：`http://localhost:3000`
 - API：`http://localhost:4000/health`
 
-Cookie 为 `Secure`。本地认证测试请统一使用 `localhost` 页面和 API，不要混用 `localhost` 与 `127.0.0.1`。
+默认开发 Cookie 为 `Secure`。本地认证测试请统一使用 `localhost` 页面和 API，不要混用 `localhost` 与 `127.0.0.1`。只有下文显式启用的可信局域网 HTTP 模式会移除 `Secure`，其他 Cookie 安全属性保持不变。
 
 如果本机 5432 已占用：
 
@@ -95,6 +95,37 @@ npm run db:migrate
 npm run db:seed
 npm run dev
 ```
+
+## 局域网 HTTP 启动
+
+该模式只适用于同一可信 Wi-Fi 内的实体桌游设备。数据库准备步骤与“本地启动”相同；完成后停止正在运行的普通开发服务，并执行：
+
+```bash
+npm run dev:lan
+```
+
+命令会优先检测常见 Wi-Fi 网卡上的 RFC1918 私有 IPv4，启动 H5 与 API，并打印玩家访问地址。例如电脑地址为 `192.168.31.196` 时，玩家手机和平板访问：
+
+```text
+http://192.168.31.196:3000
+```
+
+如果电脑同时存在虚拟网卡、多个私网地址，或自动选择的地址不正确，可明确指定：
+
+```bash
+LAN_HOST=192.168.31.196 npm run dev:lan
+```
+
+局域网模式只允许 `http://192.168.31.196:3000` 这样的精确页面来源访问 API；相邻 IP、其他端口和其他私网来源仍会被拒绝。H5 会自动连接同一电脑的 `4000` 端口，玩家不需要单独打开 API 地址。
+
+使用要求与排障：
+
+- 电脑和所有玩家设备必须处于同一 Wi-Fi，且路由器未启用客户端隔离。
+- macOS 防火墙首次询问 Node.js 是否允许入站连接时选择允许。
+- 如果休眠、切换 Wi-Fi 或 DHCP 续租造成 IP 地址变化，请停止命令并重新运行 `npm run dev:lan`，再把新地址发给玩家。
+- 需要长期保持地址不变时，在路由器 DHCP 设置中为主持电脑保留地址。
+- HTTP 流量未加密，只能用于可信局域网；不得将 `3000`、`4000` 或 `5432` 映射到公网。
+- `LAN_HTTP_ORIGIN` 由启动器自动生成，仅用于非生产环境；生产环境设置它会导致 API 拒绝启动。
 
 ## 超管初始化
 
