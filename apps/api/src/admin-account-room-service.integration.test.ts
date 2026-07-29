@@ -115,7 +115,6 @@ async function createRoom(creatorId: string, status: 'LOBBY' | 'PLAYING' | 'FINI
     skillEnabled: true,
     storyMoneyCounterpartyMode: 'TREASURY',
     transferApprovalRequired: false,
-    autoSkipTurn: true,
     startReward: 1_000,
     victoryMode: 'LAST_SOLVENT',
     createdBy: `creator-${creatorId}`,
@@ -679,14 +678,18 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(detail.statusCode).toBe(200);
     expectNoSecrets(detail.json());
 
-    const updated = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${lobby.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'room-config' }, payload: { name: 'Renamed lobby', initialBalance: 7_000, autoSkipTurn: false } });
+    const updated = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${lobby.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'room-config' }, payload: { name: 'Renamed lobby', initialBalance: 7_000 } });
     expect(updated.statusCode).toBe(200);
     const password = await app.inject({ method: 'POST', url: `/api/admin/rooms/${lobby.id}/password`, headers: { cookie: cookie.header, 'idempotency-key': 'room-password' }, payload: { password: 'room-secret' } });
     expect(password.statusCode).toBe(200);
     expectNoSecrets(password.json());
-    const forbidden = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${playing.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-config' }, payload: { diceMode: 'PHYSICAL' } });
-    expect(forbidden.statusCode).toBe(409);
-    expect(forbidden.json()).toEqual({ error: 'ROOM_CONFIG_LIFECYCLE_CONFLICT' });
+    const runtime = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${playing.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'playing-runtime' }, payload: { name: 'Running room', visibility: 'PRIVATE', allowMidgameJoin: true, transferApprovalRequired: true } });
+    expect(runtime.statusCode).toBe(200);
+    for (const [field, value] of [['diceMode', 'PHYSICAL'], ['initialBalance', 7_000], ['startReward', 2_000], ['skillEnabled', false]] as const) {
+      const forbidden = await app.inject({ method: 'PATCH', url: `/api/admin/rooms/${playing.id}`, headers: { cookie: cookie.header, 'idempotency-key': `playing-${field}` }, payload: { [field]: value } });
+      expect(forbidden.statusCode).toBe(409);
+      expect(forbidden.json()).toEqual({ error: 'ROOM_CONFIG_LIFECYCLE_CONFLICT' });
+    }
   });
 
   it('replays room config and password writes, rejects changed payloads, and stores no password plaintext', async () => {

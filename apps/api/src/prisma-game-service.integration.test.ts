@@ -226,7 +226,6 @@ class V2GameFixtureFacade {
       allowMidgameJoin: false,
       visibility: 'PUBLIC',
       transferApprovalRequired: false,
-      autoSkipTurn: true,
     }, key);
   }
 

@@ -1234,3 +1234,6 @@ nav span { font-size: 10px; white-space: nowrap; }
     font-size: 16px;
   }
 }
+
+.field-lock-note { color: var(--ink-soft); font-size: 12px; }
+.admin-detail :is(input, select):disabled { color: var(--ink-soft); background: var(--paper-muted); cursor: not-allowed; }

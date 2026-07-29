@@ -157,7 +157,6 @@ model Room {
   storyMoneyCounterpartyMode     StoryMoneyCounterpartyMode
   transferApprovalRequired       Boolean                    @default(false)
   criticalActionApprovalRequired Boolean                    @default(true)
-  autoSkipTurn                   Boolean                    @default(true)
   bankUndoAllowed                Boolean                    @default(true)
   showTotalAssets                Boolean                    @default(true)
   startReward                    Int                        @default(1000)

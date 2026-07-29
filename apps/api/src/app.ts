@@ -232,7 +232,7 @@ app.get('/api/admin/rooms', async (request) => {
 app.get('/api/admin/rooms/:id', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); return accounts.getAdminRoom(auth, id); });
 app.patch('/api/admin/rooms/:id', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
-  const body = z.object({ name: z.string().trim().min(1).max(40).optional(), visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']).optional(), skillEnabled: z.boolean().optional(), startReward: z.number().int().nonnegative().optional(), allowMidgameJoin: z.boolean().optional(), transferApprovalRequired: z.boolean().optional(), autoSkipTurn: z.boolean().optional(), initialBalance: z.number().int().nonnegative().optional() }).strict().refine((value) => Object.keys(value).length > 0).parse(request.body);
+  const body = z.object({ name: z.string().trim().min(1).max(40).optional(), visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']).optional(), skillEnabled: z.boolean().optional(), startReward: z.number().int().nonnegative().optional(), allowMidgameJoin: z.boolean().optional(), transferApprovalRequired: z.boolean().optional(), initialBalance: z.number().int().nonnegative().optional() }).strict().refine((value) => Object.keys(value).length > 0).parse(request.body);
   const result = await accounts.updateAdminRoom(auth, id, body, idempotencyKey(request.headers['idempotency-key']));
   notifyVersion(id, result);
   return result;
@@ -267,7 +267,7 @@ app.get('/api/rooms/mine', async (request) => (await accounts.listRooms(await au
 app.get('/api/rooms/history', async (request) => (await accounts.listRooms(await authenticate(request))).filter((room) => room.mine && room.status === 'FINISHED'));
 app.post('/api/rooms', async (request) => {
   const auth = await authenticate(request);
-  const body = z.object({ name: z.string().trim().min(1).max(40), password: z.string().max(100).optional(), initialBalance: z.number().int().nonnegative(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']), skillEnabled: z.boolean().default(true), startReward: z.number().int().nonnegative().default(1000), allowMidgameJoin: z.boolean().default(false), visibility: z.enum(['PUBLIC', 'PRIVATE']).default('PUBLIC'), transferApprovalRequired: z.boolean().default(false), autoSkipTurn: z.boolean().default(true) }).parse(request.body);
+  const body = z.object({ name: z.string().trim().min(1).max(40), password: z.string().max(100).optional(), initialBalance: z.number().int().nonnegative(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']), skillEnabled: z.boolean().default(true), startReward: z.number().int().nonnegative().default(1000), allowMidgameJoin: z.boolean().default(false), visibility: z.enum(['PUBLIC', 'PRIVATE']).default('PUBLIC'), transferApprovalRequired: z.boolean().default(false) }).parse(request.body);
   return accounts.createRoom(auth, body, idempotencyKey(request.headers['idempotency-key']));
 });
 app.post('/api/rooms/:id/join', async (request) => {
