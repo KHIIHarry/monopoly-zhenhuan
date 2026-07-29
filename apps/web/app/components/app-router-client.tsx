@@ -1676,8 +1676,8 @@ function PlayerView({
             <Quick icon={<ArrowLeftRight />} label="玩家转账" disabled={busy} onClick={() => setPanel('TRANSFER')} />
             <Quick icon={<Banknote />} label="银行付款申请" disabled={busy} onClick={() => setPanel('BANK_PAYMENT')} />
             <Quick icon={<Crown />} label="实体事件" disabled={busy} onClick={() => setPanel('EVENT')} />
-            <Quick icon={<Play />} label="结束回合" danger disabled={busy || !canAct || snapshot.diceMode !== 'ELECTRONIC'} onClick={() => setPanel('END')} />
             <Quick icon={<CircleMinus />} label="停轮次数减除" disabled={busy || snapshot.diceMode !== 'PHYSICAL' || me.remainingSkipTurns <= 0} onClick={() => setPanel('SKIP_CONSUME')} />
+            <Quick icon={<Play />} label="结束回合" danger disabled={busy || !canAct || snapshot.diceMode !== 'ELECTRONIC'} onClick={() => setPanel('END')} />
           </div>
           <SectionTitle title="我的地产" action={`${mine.length} 块`} />
           <PropertyList properties={mine} players={snapshot.players} />

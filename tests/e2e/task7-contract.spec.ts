@@ -802,6 +802,23 @@ test('player submits plot rest and an all-skip-consumption request without a col
   ]);
 });
 
+test('places skip consumption between physical events and end turn', async ({ page }) => {
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 1 }] };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+
+  await openRoom(page);
+  await expect(page.getByRole('heading', { name: '玩家端', exact: true })).toBeVisible();
+  const labels = await page.locator('.quick-grid .quick').evaluateAll((buttons) => buttons.map((button) => button.textContent?.trim()));
+  const physicalEvent = labels.indexOf('实体事件');
+
+  expect(labels.slice(physicalEvent, physicalEvent + 3)).toEqual(['实体事件', '停轮次数减除', '结束回合']);
+});
+
 test('bank displays plot-rest details and submits all remaining skip turns', async ({ page }) => {
   const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
   const directConsumptions: Record<string, unknown>[] = [];
