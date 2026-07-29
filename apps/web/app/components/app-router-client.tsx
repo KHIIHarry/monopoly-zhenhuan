@@ -466,7 +466,7 @@ const roomStatusBadges = (room: RoomSummary): RoomStatusBadge[] => {
   ];
 };
 const localizedRoomStatus = (status: RoomStatus) => ({ LOBBY: '等待入席', PLAYING: '进行中', ENDED: '旧版结束', FINISHED: '已结算', CLOSED: '已关闭' }[status]);
-const capabilityLabel = (room: RoomSummary) => room.characterId && room.isBank ? '人物兼银行' : room.characterId ? room.myCharacter ?? '人物玩家' : room.isBank ? '银行' : '';
+const capabilityLabel = (room: RoomSummary) => room.characterId && room.isBank ? room.myCharacter ? `${room.myCharacter}兼银行` : '人物兼银行' : room.characterId ? room.myCharacter ?? '人物玩家' : room.isBank ? '银行' : '';
 const formatRoomLifecycleTime = (value: string | null, emptyLabel: string) => {
   if (!value) return emptyLabel;
   const date = new Date(value);

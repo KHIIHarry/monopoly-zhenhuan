@@ -25,7 +25,7 @@ async function authenticated(page: Page, rooms: RoomSummary[] = [room]) {
 test('首页只显示海报和加入游戏组，不显示旧身份入口', async ({ page }) => {
   await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: '甄嬛传大富翁' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '甄嬛传', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '加入游戏组' })).toBeVisible();
   await expect(page.getByText('房间码', { exact: true })).toHaveCount(0);
   await expect(page.getByText('恢复上个身份', { exact: true })).toHaveCount(0);
@@ -33,14 +33,16 @@ test('首页只显示海报和加入游戏组，不显示旧身份入口', async
   await expect(page.getByRole('button', { name: '超管' })).toHaveCount(0);
 });
 
-test('首页以分层宫廷海报展示且加入游戏组仍进入登录页', async ({ page }) => {
+test('首页以宫廷纸本布局展示且加入游戏组仍进入登录页', async ({ page }) => {
   await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
   await page.goto('/');
 
   await expect(page.getByTestId('landing-poster')).toBeVisible();
-  for (const layer of ['background', 'frame', 'characters', 'title', 'decorations', 'join-button']) {
-    await expect(page.getByTestId(`landing-${layer}`)).toBeVisible();
-  }
+  await expect(page.getByRole('heading', { name: '甄嬛传', exact: true })).toBeVisible();
+  await expect(page.getByText('大富翁', { exact: true })).toBeVisible();
+  await expect(page.locator('.landing-lantern')).toHaveCount(2);
+  await expect(page.locator('.landing-palace-mark')).toBeVisible();
+  await expect(page.locator('.landing-dice')).toBeVisible();
   const dimensions = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
     scrollHeight: document.documentElement.scrollHeight,

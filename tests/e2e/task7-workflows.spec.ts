@@ -210,6 +210,8 @@ test('landing cards search, select a purchased property, and preserve the declar
   await page.getByRole('button', { name: '声明落点' }).click();
   await expect(page.getByText('请选择棋子精确停留的地产。系统不会追踪棋盘位置。')).toBeVisible();
   await expect(page.getByRole('button', { name: '确认落点' })).toBeVisible();
+  const unowned = page.getByRole('button', { name: /碎玉轩.*无主/ });
+  await expect(unowned.getByText('0 两', { exact: true })).toBeVisible();
   await page.getByPlaceholder('搜索地产名称').fill('不存在');
   await expect(page.getByText('没有找到匹配的地产')).toBeVisible();
   await page.getByPlaceholder('搜索地产名称').fill('景仁');

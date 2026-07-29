@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { filterLandingProperties, landingOwnership } from './landing-property-picker';
+import { filterLandingProperties, landingOwnership, landingPropertyToll } from './landing-property-picker';
 
 const properties = [
-  { name: '景仁宫', ownerId: 'p1', level: 2, mortgaged: false, mortgage: 1500, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800, 2000] },
+  { name: '景仁宫', ownerId: 'p1', level: 2, mortgaged: false, mortgage: 1500, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800, 2000, 3900] },
   { name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800, purchasePrice: 1600, build: 1000, buildingSell: 600, tolls: [300, 700] }
 ];
 
@@ -17,5 +17,14 @@ describe('landing property picker model', () => {
 
   it('marks a property without an owner as unowned', () => {
     expect(landingOwnership(properties[1], [{ id: 'p1', name: '皇后' }])).toEqual({ label: '无主', ownerName: null });
+  });
+
+  it('shows no toll for an unowned or mortgaged property', () => {
+    expect(landingPropertyToll(properties[1], [])).toBe(0);
+    expect(landingPropertyToll({ ...properties[0], mortgaged: true }, [{ id: 'p1', name: '皇后' }])).toBe(0);
+  });
+
+  it('shows the current toll for an owned property', () => {
+    expect(landingPropertyToll(properties[0], [{ id: 'p1', name: '皇后' }])).toBe(3900);
   });
 });

@@ -414,6 +414,8 @@ test('lobby and room management show room lifecycle times', async ({ page }) => 
   });
 
   await page.goto('/rooms');
+  await expect(page.getByText('钮祜禄·甄嬛兼银行', { exact: true })).toBeVisible();
+  await expect(page.getByText('人物兼银行', { exact: true })).toHaveCount(0);
   await expect(page.getByText('创建时间：2026年07月29日 星期三 0:05')).toBeVisible();
   await expect(page.getByText('开始时间：未开始')).toBeVisible();
   await expect(page.getByText('结束时间：未结束')).toBeVisible();

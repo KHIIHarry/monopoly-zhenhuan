@@ -2,7 +2,7 @@
 
 import { Check, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { filterLandingProperties, landingOwnership, type LandingPlayer, type LandingProperty } from './landing-property-picker';
+import { filterLandingProperties, landingOwnership, landingPropertyToll, type LandingPlayer, type LandingProperty } from './landing-property-picker';
 
 type LandingPropertyPickerProps = {
   properties: LandingProperty[];
@@ -39,7 +39,7 @@ export function LandingPropertyCardPicker({ properties, players, value, onChange
             const ownership = landingOwnership(property, players);
             const selected = property.name === value;
             const ownerName = ownership.ownerName ?? '无主';
-            const toll = property.tolls[property.level] ?? 0;
+            const toll = landingPropertyToll(property, players);
             const accessibleName = `${property.name}，${ownership.label}，所有者 ${ownerName}${property.mortgaged ? '，已抵押' : ''}`;
 
             return (
