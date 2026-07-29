@@ -10,6 +10,13 @@ describe('profile device controls', () => {
 
     expect(stylesheet).toMatch(/\.device-list\s*\+\s*button\s*\{[^}]*margin-top:\s*24px;/s);
   });
+
+  test('stacks the device logout control without wrapping on narrow screens', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*560px\)[\s\S]*?\.device-list article\s*\{[^}]*flex-direction:\s*column;/);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*560px\)[\s\S]*?\.device-list article\s*>\s*button\s*\{[^}]*width:\s*100%;[^}]*white-space:\s*nowrap;/);
+  });
 });
 
 describe('reference landing page', () => {

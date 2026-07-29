@@ -1196,6 +1196,8 @@ nav span { font-size: 10px; white-space: nowrap; }
 @media (max-width: 560px) {
   .v2-header { align-items: flex-start; }
   .v2-header > div:last-child { flex-wrap: wrap; justify-content: flex-end; }
+  .device-list article { align-items: stretch; flex-direction: column; }
+  .device-list article > button { width: 100%; white-space: nowrap; }
   .room-row { align-items: flex-start; }
   .room-row > div:last-child { max-width: 42%; }
   .selector-actions,
