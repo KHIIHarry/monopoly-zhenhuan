@@ -711,6 +711,66 @@ test('game action keeps its intent key until the authoritative snapshot refresh 
   expect(transferKeys[2]).not.toBe(transferKeys[1]);
 });
 
+test('meizhuang landlord plot fine transfer deducts 200 from the entered amount', async ({ page }) => {
+  const meizhuangCapability = { characterId: 'meizhuang', playerId: 'player-2', isBank: false, activeHere: true };
+  const transferBodies: Record<string, unknown>[] = [];
+  const meizhuangSnapshot = {
+    ...gameSnapshot,
+    currentPlayerId: 'player-2',
+    players: [
+      ...gameSnapshot.players,
+      { id: 'player-2', name: '沈眉庄', characterId: 'meizhuang', balance: 4_600, remainingSkipTurns: 0 },
+    ],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: 'meizhuang', myCharacter: '沈眉庄' })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(meizhuangCapability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: meizhuangSnapshot }));
+  await page.route('**/api/rooms/room-1/transfers', async (route) => {
+    transferBodies.push(await postBody(route));
+    await route.fulfill({ json: { id: 'transfer-1' } });
+  });
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '玩家转账' }).click();
+  await expect(page.getByText('金额填写实际罚款金额，系统会自动计算扣减-200，请不要填写减后的金额')).toBeVisible();
+  await page.getByLabel('剧情罚俸或损失时勾选').check();
+  await page.getByLabel('转账金额').fill('500');
+  await page.getByRole('button', { name: '确认转账' }).click();
+  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-2', toPlayerId: 'player-1', amount: 300 }]);
+
+  await page.getByRole('button', { name: '玩家转账' }).click();
+  await page.getByLabel('剧情罚俸或损失时勾选').check();
+  await page.getByLabel('转账金额').fill('200');
+  await expect(page.getByRole('button', { name: '确认转账' })).toBeDisabled();
+});
+
+test('non-meizhuang transfer keeps the entered amount without a plot fine control', async ({ page }) => {
+  const transferBodies: Record<string, unknown>[] = [];
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const snapshotWithRecipient = {
+    ...gameSnapshot,
+    players: [...gameSnapshot.players, { id: 'player-2', name: '沈眉庄', characterId: 'meizhuang', balance: 4_600, remainingSkipTurns: 0 }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshotWithRecipient }));
+  await page.route('**/api/rooms/room-1/transfers', async (route) => {
+    transferBodies.push(await postBody(route));
+    await route.fulfill({ json: { id: 'transfer-2' } });
+  });
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '玩家转账' }).click();
+  await expect(page.getByLabel('剧情罚俸或损失时勾选')).toHaveCount(0);
+  await page.getByLabel('转账金额').fill('500');
+  await page.getByRole('button', { name: '确认转账' }).click();
+  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-1', toPlayerId: 'player-2', amount: 500 }]);
+});
+
 test('generated start-landing intent survives room child unmount with the same key and landing id', async ({ page }) => {
   const roomA = room({ id: 'room-a', name: '起点待确认的碎玉轩', status: 'PLAYING' });
   const roomB = room({ id: 'room-b', name: '临时打开的翊坤宫', status: 'LOBBY', characterId: null, myCharacter: null, playerCount: 0 });

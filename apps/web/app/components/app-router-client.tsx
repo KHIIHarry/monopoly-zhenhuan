@@ -1408,6 +1408,7 @@ function PlayerView({
   const [buildingCount, setBuildingCount] = useState('1');
   const [transferPlayerId, setTransferPlayerId] = useState(snapshot.players.find((player) => player.id !== playerId)?.id ?? '');
   const [transferAmount, setTransferAmount] = useState('');
+  const [transferIsPlotFine, setTransferIsPlotFine] = useState(false);
   const [bankPaymentAmount, setBankPaymentAmount] = useState('');
   const [coldPalaceCount, setColdPalaceCount] = useState('1');
   const idempotentAction = booleanRoomAction(action);
@@ -1442,6 +1443,12 @@ function PlayerView({
   const startLanding = snapshot.landings?.find((item) => item.playerId === playerId && item.spaceType === 'START' && (item.turnId ? item.turnId === snapshot.turn?.id : item.id === trustedLandings.startId && trustedLandings.turnKey === turnKey));
   const startLandingConfirmed = startLanding?.status === 'CONFIRMED';
   const pendingTradeConfirmations = snapshot.requests.filter((request) => request.type === 'TRADE_PROPERTY' && request.targetPlayerId === playerId && request.status === 'PENDING' && !request.buyerConfirmed);
+  const isMeizhuang = me?.characterId === 'meizhuang';
+  const rawTransferAmount = Number(transferAmount);
+  const transferAmountAfterPlotFineReduction = isMeizhuang && transferIsPlotFine ? rawTransferAmount - 200 : rawTransferAmount;
+  const validTransferAmount = transferIsPlotFine
+    ? Number.isInteger(rawTransferAmount) && transferAmountAfterPlotFineReduction > 0
+    : rawTransferAmount > 0;
 
   useEffect(() => {
     setTrustedLandings((current) => current.turnKey === turnKey ? current : { turnKey });
@@ -1568,8 +1575,10 @@ function PlayerView({
   }
 
   async function submitTransfer(event: FormEvent) {
-    event.preventDefault(); const ok = await idempotentAction(`/api/rooms/${snapshot.id}/transfers`, { fromPlayerId: playerId, toPlayerId: transferPlayerId, amount: Number(transferAmount) });
-    if (ok) { setTransferAmount(''); setPanel(null); showNotice('转账已完成并写入双方账本'); }
+    event.preventDefault();
+    if (!validTransferAmount) return;
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/transfers`, { fromPlayerId: playerId, toPlayerId: transferPlayerId, amount: transferAmountAfterPlotFineReduction });
+    if (ok) { setTransferAmount(''); setTransferIsPlotFine(false); setPanel(null); showNotice('转账已完成并写入双方账本'); }
   }
 
   async function requestBankPayment(event: FormEvent) {
@@ -1714,7 +1723,7 @@ function PlayerView({
           <button className="primary" disabled={busy || !validSellBuildingCount || !validTradeAmount || (assetMode === 'TRADE_PROPERTY' && !targetPlayerId) || (assetMode === 'PAY_TOLL' && (!landingConfirmed || currentLanding?.propertyName !== assetProperty))} onClick={() => void submitAssetAction()}>{busy ? <LoaderCircle className="spin" /> : <Landmark />}确认提交</button></> : <><div className="empty no-margin">当前没有符合条件的地产</div><button className="primary" disabled><Landmark />确认提交</button></>}
       </ActionSheet>}
 
-      {panel === 'TRANSFER' && <ActionSheet title="玩家转账" onClose={() => setPanel(null)}><form onSubmit={(event) => void submitTransfer(event)}><label>收款玩家<select value={transferPlayerId} onChange={(event) => setTransferPlayerId(event.target.value)}>{snapshot.players.filter((player) => player.id !== playerId).map((player) => <option value={player.id} key={player.id}>{player.name}</option>)}</select></label><label>转账金额<input type="number" min="1" step="1" value={transferAmount} onChange={(event) => setTransferAmount(event.target.value)} /></label><button className="primary" disabled={busy || !transferPlayerId || Number(transferAmount) <= 0} type="submit">{busy ? <LoaderCircle className="spin" /> : <ArrowLeftRight />}确认转账</button></form></ActionSheet>}
+      {panel === 'TRANSFER' && <ActionSheet title="玩家转账" onClose={() => setPanel(null)}><form onSubmit={(event) => void submitTransfer(event)}><label>收款玩家<select value={transferPlayerId} onChange={(event) => setTransferPlayerId(event.target.value)}>{snapshot.players.filter((player) => player.id !== playerId).map((player) => <option value={player.id} key={player.id}>{player.name}</option>)}</select></label><label>转账金额<input type="number" min="1" step="1" value={transferAmount} onChange={(event) => setTransferAmount(event.target.value)} /></label>{isMeizhuang && <><label className="check-field"><input type="checkbox" checked={transferIsPlotFine} onChange={(event) => setTransferIsPlotFine(event.target.checked)} /><span>剧情罚俸或损失时勾选</span></label><p className="sheet-copy">金额填写实际罚款金额，系统会自动计算扣减-200，请不要填写减后的金额</p></>}<button className="primary" disabled={busy || !transferPlayerId || !validTransferAmount} type="submit">{busy ? <LoaderCircle className="spin" /> : <ArrowLeftRight />}确认转账</button></form></ActionSheet>}
 
       {panel === 'BANK_PAYMENT' && <ActionSheet title="申请银行付款" onClose={() => setPanel(null)}><form onSubmit={(event) => void requestBankPayment(event)}><label>付款金额<input required type="number" min="1" step="1" inputMode="numeric" value={bankPaymentAmount} onChange={(event) => setBankPaymentAmount(event.target.value)} /></label><button className="primary" disabled={busy || !Number.isInteger(Number(bankPaymentAmount)) || Number(bankPaymentAmount) <= 0} type="submit">{busy ? <LoaderCircle className="spin" /> : <Banknote />}提交付款申请</button></form></ActionSheet>}
 
