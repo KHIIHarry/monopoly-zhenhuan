@@ -6,6 +6,13 @@ import { RuleError } from './api-error.js';
 
 export type GameActor = { accountId: string; sessionId: string };
 export type SnapshotView = 'PLAYER' | 'BANK';
+export type TransferInput = {
+  fromPlayerId: string;
+  recipientType: 'PLAYER' | 'BANK';
+  toPlayerId?: string;
+  amount: number;
+  isPlotFine: boolean;
+};
 type RequestAction = {
   type: 'BUY_PROPERTY' | 'BUILD_PROPERTY' | 'SELL_BUILDING' | 'MORTGAGE_PROPERTY' | 'REDEEM_PROPERTY' | 'SELL_PROPERTY_TO_BANK' | 'TRADE_PROPERTY' | 'START_REWARD' | 'COLD_PALACE_EVENT' | 'COMPANION_EVENT';
   propertyName?: string; targetPlayerId?: string; amount?: number; count?: number; landingId?: string;
@@ -155,6 +162,7 @@ export class PrismaGameService {
         tollCollectionBlocked: tollBlockedPlayerIds.has(player.id),
         buildDiscount: room.skillEnabled && player.character?.skillCode === 'BUILD_DISCOUNT' ? int(asObject(player.character.skillConfig).discount) : 0,
         tollBonus: room.skillEnabled && player.character?.skillCode === 'TOLL_BONUS' ? int(asObject(player.character.skillConfig).bonus) : 0,
+        plotFineReduction: room.skillEnabled && player.character?.skillCode === 'PLOT_FINE_REDUCTION' ? int(asObject(player.character.skillConfig).reduction) : 0,
         coldPalaceSkipReduction: room.skillEnabled && player.character?.skillCode === 'COLD_PALACE_RELIEF' ? int(asObject(player.character.skillConfig).skipTurnsReduction) : 0,
         coldPalaceCashReward: room.skillEnabled && player.character?.skillCode === 'COLD_PALACE_RELIEF' ? int(asObject(player.character.skillConfig).cashReward) : 0,
       })),
@@ -165,7 +173,20 @@ export class PrismaGameService {
       })),
       turn: activeTurn ? { id: activeTurn.id, number: activeTurn.turnNumber, playerId: activeTurn.playerId, dice: activeTurn.die1 && activeTurn.die2 ? [activeTurn.die1, activeTurn.die2] : undefined, total: activeTurn.diceValue ?? undefined } : null,
       ledger: visibleLedger,
-      requests: visibleRequests.map((request) => ({ id: request.id, type: request.type, playerId: request.actorPlayerId, targetPlayerId: request.targetPlayerId, propertyName: request.property?.definition.name, amount: request.amount ?? 0, quantity: request.quantity, status: request.status, rejectionReason: request.rejectionReason, buyerConfirmed: request.type === 'TRADE_PROPERTY' && asObject(request.payload).buyerConfirmed === true, createdAt: request.createdAt })),
+      requests: visibleRequests.map((request) => {
+        const payload = asObject(request.payload);
+        return {
+          id: request.id, type: request.type, playerId: request.actorPlayerId, targetPlayerId: request.targetPlayerId, propertyName: request.property?.definition.name,
+          amount: request.amount ?? 0, quantity: request.quantity, status: request.status, rejectionReason: request.rejectionReason,
+          buyerConfirmed: request.type === 'TRADE_PROPERTY' && payload.buyerConfirmed === true,
+          recipientType: request.type === 'PLAYER_TRANSFER' && (payload.recipientType === 'PLAYER' || payload.recipientType === 'BANK') ? payload.recipientType : undefined,
+          originalAmount: request.type === 'PLAYER_TRANSFER' ? int(payload.originalAmount) : undefined,
+          reduction: request.type === 'PLAYER_TRANSFER' ? int(payload.reduction) : undefined,
+          actualAmount: request.type === 'PLAYER_TRANSFER' ? int(payload.actualAmount) : undefined,
+          isPlotFine: request.type === 'PLAYER_TRANSFER' ? payload.isPlotFine === true : undefined,
+          createdAt: request.createdAt,
+        };
+      }),
       landings: room.landingEvents.map((landing) => ({ id: landing.id, turnId: landing.turnId ?? undefined, playerId: landing.playerId, propertyName: landing.property?.definition.name, spaceType: landing.spaceType, status: landing.status, plotResolved: landing.plotResolved, propertyActionsCancelled: landing.propertyActionsCancelled })),
       audit: viewer.role === 'BANK' ? room.auditLogs : [],
       reversalCandidate: reversal ? {
@@ -433,6 +454,8 @@ export class PrismaGameService {
       const amount = request.amount ?? 0; const effects: Array<{ playerId: string; amount: number; before: number; after: number; type: string; description: string }> = [];
       const propertyBefore = request.property ? { ownerPlayerId: request.property.ownerPlayerId, buildingLevel: request.property.buildingLevel, mortgaged: request.property.mortgaged, version: request.property.version } : null;
       let propertyAfter: typeof propertyBefore = propertyBefore;
+      let transactionType = request.type;
+      let transactionMetadata: Prisma.InputJsonObject = {};
       const actorId = request.actorPlayerId; const targetId = request.targetPlayerId;
       const addEffect = async (playerId: string, delta: number, type: string, description: string) => { const changed = await this.changeBalance(tx, playerId, delta); effects.push({ playerId, amount: delta, ...changed, type, description }); };
       switch (request.type) {
@@ -477,6 +500,30 @@ export class PrismaGameService {
         }
         case 'START_REWARD': if (!actorId) fail('PLAYER_NOT_FOUND'); await addEffect(actorId, amount, 'START_REWARD', '精确停留起点奖励'); break;
         case 'BANK_PAYMENT': if (!targetId && !actorId) fail('PLAYER_NOT_FOUND'); await addEffect(targetId ?? actorId ?? '', amount, 'BANK_PAYMENT', '银行付款'); break;
+        case 'PLAYER_TRANSFER': {
+          if (!actorId || !request.actor) fail('PLAYER_NOT_FOUND');
+          const payload = asObject(request.payload);
+          const recipientType = payload.recipientType;
+          const originalAmount = int(payload.originalAmount);
+          const isPlotFine = payload.isPlotFine === true;
+          const playerRecipientValid = recipientType === 'PLAYER' && targetId !== null && targetId !== actorId;
+          const bankRecipientValid = recipientType === 'BANK' && targetId === null;
+          if (originalAmount <= 0 || (!playerRecipientValid && !bankRecipientValid)) fail('INVALID_TRANSFER');
+          const amounts = this.transferAmounts(request.room, request.actor, originalAmount, isPlotFine);
+          const ledgerType = isPlotFine ? 'PLOT_FINE' : recipientType === 'BANK' ? 'PLAYER_BANK_PAYMENT' : 'PLAYER_TRANSFER';
+          transactionType = isPlotFine ? 'PLOT_FINE' : recipientType === 'BANK' ? 'PLAYER_BANK_PAYMENT' : 'PLAYER_TRANSFER';
+          await addEffect(actorId, -amounts.actualAmount, ledgerType, isPlotFine ? '支付剧情罚款' : recipientType === 'BANK' ? '支付银行' : '玩家转出');
+          if (recipientType === 'PLAYER') await addEffect(targetId!, amounts.actualAmount, ledgerType, isPlotFine ? '收到剧情款项' : '玩家转入');
+          transactionMetadata = {
+            recipientType,
+            originalAmount: amounts.originalAmount,
+            reduction: amounts.reduction,
+            actualAmount: amounts.actualAmount,
+            isPlotFine,
+            ...(targetId ? { toPlayerId: targetId } : {}),
+          };
+          break;
+        }
         case 'COMPANION_EVENT': {
           if (!actorId || !request.actor) fail('PLAYER_NOT_FOUND'); if (request.actor.partnerCardCount >= 3) fail('PARTNER_LIMIT');
           const config = asObject(request.actor.character?.skillConfig); const reward = request.room.skillEnabled && request.actor.character?.skillCode === 'COMPANION_REWARD' ? int(config.cashReward) : 0;
@@ -497,7 +544,7 @@ export class PrismaGameService {
         }
         default: fail('UNSUPPORTED_REQUEST_TYPE');
       }
-      const transaction = await tx.gameTransaction.create({ data: { roomId, type: request.type, requestId: request.id, reversible: request.type !== 'COMPANION_EVENT' && request.type !== 'COLD_PALACE_EVENT', metadata: { effects, propertyId: request.propertyId, propertyBefore, propertyAfter } } });
+      const transaction = await tx.gameTransaction.create({ data: { roomId, type: transactionType, requestId: request.id, reversible: request.type !== 'COMPANION_EVENT' && request.type !== 'COLD_PALACE_EVENT', metadata: { effects, propertyId: request.propertyId, propertyBefore, propertyAfter, ...transactionMetadata } } });
       if (effects.length) await tx.ledgerEntry.createMany({ data: effects.map((effect) => ({ roomId, transactionId: transaction.id, playerId: effect.playerId, amount: effect.amount, balanceBefore: effect.before, balanceAfter: effect.after, type: effect.type, description: effect.description, createdBy: bank.id })) });
       const executed = await tx.gameRequest.update({ where: { id: request.id }, data: { status: 'EXECUTED', resolvedAt: new Date() } });
       mutationCreated = true;
@@ -518,15 +565,68 @@ export class PrismaGameService {
     });
   }
 
-  async transfer(actor: GameActor, roomId: string, fromPlayerId: string, toPlayerId: string, amount: number, key: string) {
-    if (!Number.isInteger(amount) || amount <= 0 || fromPlayerId === toPlayerId) fail('INVALID_TRANSFER');
-    return this.executeIdempotent(actor, roomId, 'PLAYER', fromPlayerId, 'transfer', key, { roomId, fromPlayerId, toPlayerId, amount }, async (tx) => {
+  async transfer(actor: GameActor, roomId: string, input: TransferInput, key: string) {
+    if (!Number.isInteger(input.amount) || input.amount <= 0) fail('INVALID_AMOUNT');
+    const playerRecipientValid = input.recipientType === 'PLAYER'
+      && typeof input.toPlayerId === 'string'
+      && input.toPlayerId.length > 0
+      && input.toPlayerId !== input.fromPlayerId;
+    const bankRecipientValid = input.recipientType === 'BANK' && input.toPlayerId === undefined;
+    if (!input.fromPlayerId || (!playerRecipientValid && !bankRecipientValid)) fail('INVALID_TRANSFER');
+    return this.executeIdempotent(actor, roomId, 'PLAYER', input.fromPlayerId, 'transfer', key, { roomId, ...input }, async (tx, member) => {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
-      const from = await this.changeBalance(tx, fromPlayerId, -amount); const to = await this.changeBalance(tx, toPlayerId, amount);
-      const effects = [{ playerId: fromPlayerId, amount: -amount, ...from, type: 'PLAYER_TRANSFER', description: '玩家转出' }, { playerId: toPlayerId, amount, ...to, type: 'PLAYER_TRANSFER', description: '玩家转入' }];
-      const transaction = await this.recordTransaction(tx, roomId, 'PLAYER_TRANSFER', effects, null); const response = { id: transaction.id };
-      return response;
-    }, async (tx) => this.requirePlayablePlayer(tx, roomId, toPlayerId));
+      const payer = await tx.player.findUnique({ where: { id: input.fromPlayerId }, include: { character: true } });
+      if (!payer || payer.roomId !== roomId) fail('PLAYER_NOT_FOUND');
+      const amounts = this.transferAmounts(room, payer, input.amount, input.isPlotFine);
+      if (room.transferApprovalRequired) {
+        const payload: Prisma.InputJsonObject = {
+          recipientType: input.recipientType,
+          originalAmount: amounts.originalAmount,
+          reduction: amounts.reduction,
+          actualAmount: amounts.actualAmount,
+          isPlotFine: input.isPlotFine,
+        };
+        const request = await tx.gameRequest.create({ data: {
+          roomId,
+          type: 'PLAYER_TRANSFER',
+          actorPlayerId: input.fromPlayerId,
+          targetPlayerId: input.toPlayerId,
+          amount: amounts.actualAmount,
+          payload,
+          idempotencyKey: `${actor.accountId}:transfer:${key}`,
+          requestHash: requestFingerprint({ roomId, ...input }),
+        } });
+        return {
+          id: request.id,
+          type: request.type,
+          status: request.status,
+          originalAmount: amounts.originalAmount,
+          reduction: amounts.reduction,
+          amount: amounts.actualAmount,
+        };
+      }
+      const ledgerType = input.isPlotFine ? 'PLOT_FINE' : input.recipientType === 'BANK' ? 'PLAYER_BANK_PAYMENT' : 'PLAYER_TRANSFER';
+      const transactionType = input.isPlotFine ? 'PLOT_FINE' : input.recipientType === 'BANK' ? 'PLAYER_BANK_PAYMENT' : 'PLAYER_TRANSFER';
+      const effects: Array<{ playerId: string; amount: number; before: number; after: number; type: string; description: string }> = [];
+      const paid = await this.changeBalance(tx, input.fromPlayerId, -amounts.actualAmount);
+      effects.push({ playerId: input.fromPlayerId, amount: -amounts.actualAmount, ...paid, type: ledgerType, description: input.isPlotFine ? '支付剧情罚款' : input.recipientType === 'BANK' ? '支付银行' : '玩家转出' });
+      if (input.recipientType === 'PLAYER') {
+        const received = await this.changeBalance(tx, input.toPlayerId!, amounts.actualAmount);
+        effects.push({ playerId: input.toPlayerId!, amount: amounts.actualAmount, ...received, type: ledgerType, description: input.isPlotFine ? '收到剧情款项' : '玩家转入' });
+      }
+      const metadata: Prisma.InputJsonObject = {
+        recipientType: input.recipientType,
+        originalAmount: amounts.originalAmount,
+        reduction: amounts.reduction,
+        actualAmount: amounts.actualAmount,
+        isPlotFine: input.isPlotFine,
+        ...(input.toPlayerId ? { toPlayerId: input.toPlayerId } : {}),
+      };
+      const transaction = await this.recordTransaction(tx, roomId, transactionType, effects, member.id, metadata);
+      return { id: transaction.id, status: 'EXECUTED', originalAmount: amounts.originalAmount, reduction: amounts.reduction, amount: amounts.actualAmount };
+    }, async (tx) => input.recipientType === 'PLAYER'
+      ? this.requirePlayablePlayers(tx, roomId, [input.fromPlayerId, input.toPlayerId!])
+      : this.requirePlayablePlayer(tx, roomId, input.fromPlayerId));
   }
 
   async payToll(actor: GameActor, roomId: string, payerId: string, propertyName: string, key: string) {
@@ -613,8 +713,11 @@ export class PrismaGameService {
     if (!Number.isInteger(amount) || amount <= 0) fail('INVALID_AMOUNT');
     return this.executeIdempotent(actor, roomId, 'BANK', undefined, 'plot-fine', key, { roomId, playerId, amount }, async (tx, bank) => {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
-      const player = await tx.player.findUnique({ where: { id: playerId }, include: { character: true } }); if (!player || player.roomId !== roomId) fail('PLAYER_NOT_FOUND'); const config = asObject(player.character?.skillConfig); const reduction = room.skillEnabled && player.character?.skillCode === 'PLOT_FINE_REDUCTION' ? int(config.reduction) : 0; const actual = Math.max(0, amount - reduction);
-      const changed = await this.changeBalance(tx, playerId, -actual); const transaction = await this.recordTransaction(tx, roomId, 'PLOT_FINE', [{ playerId, amount: -actual, ...changed, type: 'PLOT_FINE', description: '剧情罚款' }], bank.id); return { id: transaction.id, amount: actual };
+      const player = await tx.player.findUnique({ where: { id: playerId }, include: { character: true } }); if (!player || player.roomId !== roomId) fail('PLAYER_NOT_FOUND');
+      const amounts = this.transferAmounts(room, player, amount, true);
+      const changed = await this.changeBalance(tx, playerId, -amounts.actualAmount);
+      const transaction = await this.recordTransaction(tx, roomId, 'PLOT_FINE', [{ playerId, amount: -amounts.actualAmount, ...changed, type: 'PLOT_FINE', description: '剧情罚款' }], bank.id, { recipientType: 'BANK', originalAmount: amounts.originalAmount, reduction: amounts.reduction, actualAmount: amounts.actualAmount, isPlotFine: true });
+      return { id: transaction.id, originalAmount: amounts.originalAmount, reduction: amounts.reduction, amount: amounts.actualAmount };
     }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId));
   }
 
@@ -773,6 +876,19 @@ export class PrismaGameService {
     if (!Number.isInteger(amount)) fail('INVALID_AMOUNT'); const beforePlayer = await tx.player.findUnique({ where: { id: playerId }, select: { balance: true, version: true } }); if (!beforePlayer) fail('PLAYER_NOT_FOUND');
     if (amount < 0 && beforePlayer.balance < -amount) fail('INSUFFICIENT_BALANCE');
     const changed = await tx.player.updateMany({ where: { id: playerId, version: beforePlayer.version, ...(amount < 0 ? { balance: { gte: -amount } } : {}) }, data: { balance: { increment: amount }, version: { increment: 1 } } }); if (changed.count !== 1) fail('BALANCE_STATE_CHANGED'); return { before: beforePlayer.balance, after: beforePlayer.balance + amount };
+  }
+
+  private transferAmounts(
+    room: { skillEnabled: boolean },
+    player: { character: { skillCode: string; skillConfig: Prisma.JsonValue } | null },
+    originalAmount: number,
+    isPlotFine: boolean,
+  ) {
+    const config = asObject(player.character?.skillConfig);
+    const reduction = isPlotFine && room.skillEnabled && player.character?.skillCode === 'PLOT_FINE_REDUCTION'
+      ? int(config.reduction)
+      : 0;
+    return { originalAmount, reduction, actualAmount: Math.max(0, originalAmount - reduction) };
   }
 
   private async recordTransaction(

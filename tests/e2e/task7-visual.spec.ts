@@ -483,6 +483,32 @@ test('transaction starts with plot fine and retains its confirmation flow', asyn
   await expect.poll(() => requests).toEqual([{ method: 'POST', body: { playerId: snapshot.players[0].id, amount: 100 } }]);
 });
 
+test('bank plot fine confirmation uses the selected player configured reduction', async ({ page }) => {
+  const configuredSnapshot: BrowserSnapshot = {
+    ...snapshot,
+    players: snapshot.players.map((player) => player.id === 'player-2'
+      ? { ...player, plotFineReduction: 275 }
+      : player),
+  };
+
+  await mockAuthenticated(page);
+  await mockRoom(page);
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: configuredSnapshot }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: new RegExp(longRoomName) }).click();
+  await page.getByRole('button', { name: '银行端', exact: true }).click();
+  await page.getByRole('button', { name: '事务', exact: true }).click();
+  await page.getByLabel('罚款玩家').selectOption('player-2');
+  await page.getByLabel('剧情罚款金额').fill('500');
+  await page.getByRole('button', { name: '执行剧情罚款', exact: true }).click();
+
+  const dialog = page.getByRole('dialog', { name: '确认剧情罚款' });
+  await expect(dialog.getByText('原始金额 500 两')).toBeVisible();
+  await expect(dialog.getByText('沈眉庄减免 275 两')).toBeVisible();
+  await expect(dialog.getByText('实际扣款 225 两')).toBeVisible();
+});
+
 test('seats, swap decision dialog, and displaced takeover remain contained', async ({ page }, testInfo) => {
   await mockAuthenticated(page);
   await mockRoom(page);

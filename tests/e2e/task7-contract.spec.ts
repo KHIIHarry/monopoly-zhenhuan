@@ -573,9 +573,9 @@ test('a delayed room A game action cannot refresh over later room B navigation',
   await page.goto('/');
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
   await expect(page.getByText('房间 A 初始快照')).toBeVisible();
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(1);
   await page.getByRole('button', { name: '关闭' }).click();
   await page.getByRole('button', { name: '退出' }).click();
@@ -592,13 +592,13 @@ test('a delayed room A game action cannot refresh over later room B navigation',
   await page.getByRole('button', { name: '退出' }).click();
   await page.getByRole('button', { name: '确认返回' }).click();
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(2);
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(3);
 
   expect(transferKeys[0]).toBeTruthy();
@@ -647,9 +647,9 @@ test('a delayed room A game action error cannot surface in later room B', async 
   await page.goto('/');
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
   await expect(page.getByText('房间 A 初始快照')).toBeVisible();
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(1);
   await page.getByRole('button', { name: '关闭' }).click();
   await page.getByRole('button', { name: '退出' }).click();
@@ -661,7 +661,7 @@ test('a delayed room A game action error cannot surface in later room B', async 
   await page.waitForTimeout(300);
 
   await expect(page.getByText('房间 B 最新快照')).toBeVisible();
-  await expect(page.getByText('转账信息无效，请检查玩家和金额')).toHaveCount(0);
+  await expect(page.getByText('转帐信息无效，请检查收款对象和金额')).toHaveCount(0);
 });
 
 test('game action keeps its intent key until the authoritative snapshot refresh succeeds', async ({ page }) => {
@@ -690,18 +690,18 @@ test('game action keeps its intent key until the authoritative snapshot refresh 
   });
 
   await openRoom(page);
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => refreshFailures).toBe(1);
-  await expect(page.getByRole('heading', { name: '玩家转账' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '转帐' })).toBeVisible();
 
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(2);
-  await expect(page.getByRole('heading', { name: '玩家转账' })).toHaveCount(0);
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await page.getByLabel('转账金额').fill('100');
-  await page.getByRole('button', { name: '确认转账' }).click();
+  await expect(page.getByRole('heading', { name: '转帐' })).toHaveCount(0);
+  await page.getByRole('button', { name: '转帐' }).click();
+  await page.getByLabel('转帐金额').fill('100');
+  await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(3);
 
   expect(snapshotReads).toBe(4);
@@ -711,7 +711,53 @@ test('game action keeps its intent key until the authoritative snapshot refresh 
   expect(transferKeys[2]).not.toBe(transferKeys[1]);
 });
 
-test('meizhuang landlord plot fine transfer deducts 200 from the entered amount', async ({ page }) => {
+test('unified transfer renders recipient cards and submits the selected player or bank command', async ({ page }) => {
+  const transferBodies: Record<string, unknown>[] = [];
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const snapshotWithRecipient = {
+    ...gameSnapshot,
+    players: [
+      { ...gameSnapshot.players[0], name: '甄嬛玩家' },
+      { id: 'player-2', name: '眉庄玩家', characterId: 'meizhuang', balance: 4_600, remainingSkipTurns: 0, plotFineReduction: 200 },
+    ],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshotWithRecipient }));
+  await page.route('**/api/rooms/room-1/transfers', async (route) => {
+    transferBodies.push(await postBody(route));
+    await route.fulfill({ json: { id: `transfer-${transferBodies.length}` } });
+  });
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '转帐', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '转帐', exact: true })).toBeVisible();
+  await expect(page.getByText('玩家转账', { exact: true })).toHaveCount(0);
+  const playerCard = page.getByRole('button', { name: /沈眉庄.*眉庄玩家/ });
+  const bankCard = page.getByRole('button', { name: /银行.*管理审批、轮次与结算/ });
+  await expect(playerCard).toHaveAttribute('aria-pressed', 'true');
+  await expect(bankCard).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('button', { name: /钮祜禄·甄嬛.*甄嬛玩家/ })).toHaveCount(0);
+
+  await bankCard.click();
+  await expect(bankCard).toHaveAttribute('aria-pressed', 'true');
+  await page.getByLabel('转帐金额').fill('500');
+  await page.getByRole('button', { name: '确认转帐' }).click();
+  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-1', recipientType: 'BANK', amount: 500, isPlotFine: false }]);
+
+  await page.getByRole('button', { name: '转帐', exact: true }).click();
+  await playerCard.click();
+  await page.getByLabel('转帐金额').fill('400');
+  await page.getByRole('button', { name: '确认转帐' }).click();
+  await expect.poll(() => transferBodies).toEqual([
+    { fromPlayerId: 'player-1', recipientType: 'BANK', amount: 500, isPlotFine: false },
+    { fromPlayerId: 'player-1', recipientType: 'PLAYER', toPlayerId: 'player-2', amount: 400, isPlotFine: false },
+  ]);
+});
+
+test('meizhuang plot fine transfer sends the original amount for server-authoritative reduction', async ({ page }) => {
   const meizhuangCapability = { characterId: 'meizhuang', playerId: 'player-2', isBank: false, activeHere: true };
   const transferBodies: Record<string, unknown>[] = [];
   const meizhuangSnapshot = {
@@ -719,7 +765,7 @@ test('meizhuang landlord plot fine transfer deducts 200 from the entered amount'
     currentPlayerId: 'player-2',
     players: [
       ...gameSnapshot.players,
-      { id: 'player-2', name: '沈眉庄', characterId: 'meizhuang', balance: 4_600, remainingSkipTurns: 0 },
+      { id: 'player-2', name: '沈眉庄', characterId: 'meizhuang', balance: 4_600, remainingSkipTurns: 0, plotFineReduction: 200 },
     ],
   };
 
@@ -733,18 +779,22 @@ test('meizhuang landlord plot fine transfer deducts 200 from the entered amount'
   });
 
   await openRoom(page);
-  await page.getByRole('button', { name: '玩家转账' }).click();
-  await expect(page.getByText('金额填写实际罚款金额，系统会自动计算扣减-200，请不要填写减后的金额')).toBeVisible();
+  await page.getByRole('button', { name: '转帐', exact: true }).click();
+  await page.getByRole('button', { name: /银行.*管理审批、轮次与结算/ }).click();
   await expect(page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）')).toBeVisible();
   await page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）').check();
-  await page.getByLabel('转账金额').fill('500');
-  await page.getByRole('button', { name: '确认转账' }).click();
-  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-2', toPlayerId: 'player-1', amount: 300 }]);
+  await page.getByLabel('转帐金额').fill('500');
+  await expect(page.getByText('原始金额 500 两')).toBeVisible();
+  await expect(page.getByText('沈眉庄减免 200 两')).toBeVisible();
+  await expect(page.getByText('预计支付 300 两')).toBeVisible();
+  await page.getByRole('button', { name: '确认转帐' }).click();
+  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-2', recipientType: 'BANK', amount: 500, isPlotFine: true }]);
 
-  await page.getByRole('button', { name: '玩家转账' }).click();
+  await page.getByRole('button', { name: '转帐', exact: true }).click();
   await page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）').check();
-  await page.getByLabel('转账金额').fill('200');
-  await expect(page.getByRole('button', { name: '确认转账' })).toBeDisabled();
+  await page.getByLabel('转帐金额').fill('200');
+  await expect(page.getByText('预计支付 0 两')).toBeVisible();
+  await expect(page.getByRole('button', { name: '确认转帐' })).toBeEnabled();
 });
 
 test('non-meizhuang transfer keeps the entered amount without a plot fine control', async ({ page }) => {
@@ -765,11 +815,48 @@ test('non-meizhuang transfer keeps the entered amount without a plot fine contro
   });
 
   await openRoom(page);
-  await page.getByRole('button', { name: '玩家转账' }).click();
+  await page.getByRole('button', { name: '转帐', exact: true }).click();
   await expect(page.getByLabel('剧情罚俸或损失时勾选（沈眉庄专属技能）')).toHaveCount(0);
-  await page.getByLabel('转账金额').fill('500');
-  await page.getByRole('button', { name: '确认转账' }).click();
-  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-1', toPlayerId: 'player-2', amount: 500 }]);
+  await page.getByLabel('转帐金额').fill('500');
+  await page.getByRole('button', { name: '确认转帐' }).click();
+  await expect.poll(() => transferBodies).toEqual([{ fromPlayerId: 'player-1', recipientType: 'PLAYER', toPlayerId: 'player-2', amount: 500, isPlotFine: false }]);
+});
+
+test('bank approval presents unified player and bank transfer details', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+  const approvalSnapshot = {
+    ...gameSnapshot,
+    players: [
+      { id: 'player-1', name: '沈眉庄玩家', characterId: 'meizhuang', balance: 5_000, remainingSkipTurns: 0, plotFineReduction: 200 },
+      { id: 'player-2', name: '甄嬛玩家', characterId: 'zhenhuan', balance: 5_000, remainingSkipTurns: 0 },
+    ],
+    requests: [
+      { id: 'transfer-bank-1', type: 'PLAYER_TRANSFER', playerId: 'player-1', targetPlayerId: null, recipientType: 'BANK', originalAmount: 500, reduction: 200, actualAmount: 300, amount: 300, isPlotFine: true, status: 'PENDING' },
+      { id: 'transfer-player-1', type: 'PLAYER_TRANSFER', playerId: 'player-2', targetPlayerId: 'player-1', recipientType: 'PLAYER', originalAmount: 400, reduction: 0, actualAmount: 400, amount: 400, isPlotFine: false, status: 'PENDING' },
+    ],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: approvalSnapshot }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: /审批/ }).click();
+
+  const bankTransfer = page.locator('.approval-list article').filter({ hasText: '收款：银行' });
+  await expect(bankTransfer).toContainText('转帐');
+  await expect(bankTransfer).toContainText('收款：银行');
+  await expect(bankTransfer).toContainText('原始金额 500 两');
+  await expect(bankTransfer).toContainText('沈眉庄减免 200 两');
+  await expect(bankTransfer).toContainText('实际金额 300 两');
+  await expect(bankTransfer.getByRole('button', { name: '批准 300 两' })).toBeVisible();
+  await expect(bankTransfer.getByRole('button', { name: '拒绝 300 两' })).toBeVisible();
+
+  const playerTransfer = page.locator('.approval-list article').filter({ hasText: '甄嬛玩家' });
+  await expect(playerTransfer).toContainText('收款：沈眉庄玩家（沈眉庄）');
+  await expect(playerTransfer).toContainText('原始金额 400 两');
+  await expect(playerTransfer).toContainText('实际金额 400 两');
 });
 
 test('generated start-landing intent survives room child unmount with the same key and landing id', async ({ page }) => {

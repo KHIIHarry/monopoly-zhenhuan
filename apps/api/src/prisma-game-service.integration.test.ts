@@ -156,6 +156,13 @@ afterAll(() => {
 });
 
 type FixtureIdentity = { auth: AuthenticatedSession; actor: GameActor; playerId?: string; role: 'PLAYER' | 'BANK'; roomId: string; intent: string };
+type UnifiedTransferInput = {
+  fromPlayerId: string;
+  recipientType: 'PLAYER' | 'BANK';
+  toPlayerId?: string;
+  amount: number;
+  isPlotFine: boolean;
+};
 type FixtureState = {
   creator: AuthenticatedSession;
   identities: Map<string, Promise<FixtureIdentity>>;
@@ -297,7 +304,15 @@ class V2GameFixtureFacade {
   confirmTrade(roomId: string, requestId: string, playerId: string, key: string) { return this.games.confirmTrade(this.playerActor(playerId), roomId, requestId, playerId, key); }
   approve(roomId: string, requestId: string, fixtureKey: string, key: string) { return this.games.approve(this.actor(fixtureKey), roomId, requestId, key); }
   reject(roomId: string, requestId: string, fixtureKey: string, reason: string, key: string) { return this.games.reject(this.actor(fixtureKey), roomId, requestId, reason, key); }
-  transfer(roomId: string, from: string, to: string, amount: number, key: string) { return this.games.transfer(this.playerActor(from), roomId, from, to, amount, key); }
+  transfer(roomId: string, input: UnifiedTransferInput, key: string) {
+    const transfer = this.games.transfer as unknown as (
+      actor: GameActor,
+      targetRoomId: string,
+      transferInput: UnifiedTransferInput,
+      idempotencyKey: string,
+    ) => ReturnType<PrismaGameService['transfer']>;
+    return transfer.call(this.games, this.playerActor(input.fromPlayerId), roomId, input, key);
+  }
   payToll(roomId: string, payer: string, property: string, key: string) { return this.games.payToll(this.playerActor(payer), roomId, payer, property, key); }
   adjustBalance(roomId: string, playerId: string, amount: number, fixtureKey: string, reason: string, key: string) { return this.games.adjustBalance(this.actor(fixtureKey), roomId, playerId, amount, reason, key); }
   adjustProperty(roomId: string, property: string, change: Parameters<PrismaGameService['adjustProperty']>[3], fixtureKey: string, reason: string, key: string) { return this.games.adjustProperty(this.actor(fixtureKey), roomId, property, change, reason, key); }
@@ -356,16 +371,27 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     return { room, a, b, bank };
   }
 
+  async function unifiedTransferRoom(name = '统一转帐即时结算') {
+    const room = await first.createRoom({ name, initialBalance: 5000, diceMode: 'PHYSICAL' });
+    const meizhuang = await first.joinPlayer(room.code, '沈眉庄玩家', 'meizhuang');
+    const zhenhuan = await first.joinPlayer(room.code, '甄嬛玩家', 'zhenhuan');
+    const huashifei = await first.joinPlayer(room.code, '年世兰玩家', 'huashifei');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, `start:${name}`);
+    return { room, meizhuang, zhenhuan, huashifei, bank };
+  }
+
   it('revalidates player, capability, Session, and controller before mutation or replay', async () => {
     const { room, a, b, bank } = await physicalRoom();
     const game = new PrismaGameService(firstDb, () => 0);
+    const transfer = game.transfer as unknown as (actor: GameActor, targetRoomId: string, input: UnifiedTransferInput, key: string) => Promise<unknown>;
     const playerActor = state.players.get(a.playerId)!;
     const bankActor = state.banks.get(bank.token)!;
     const balanceBefore = (await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).balance;
 
-    await expect(game.transfer(playerActor, room.id, b.playerId, a.playerId, 10, 'wrong-player')).rejects.toThrow('PLAYER_IDENTITY_MISMATCH');
+    await expect(transfer.call(game, playerActor, room.id, { fromPlayerId: b.playerId, recipientType: 'PLAYER', toPlayerId: a.playerId, amount: 10, isPlotFine: false }, 'wrong-player')).rejects.toThrow('PLAYER_IDENTITY_MISMATCH');
     await expect(game.adjustBalance(playerActor, room.id, a.playerId, 10, 'wrong capability', 'wrong-capability')).rejects.toThrow('BANK_REQUIRED');
-    await expect(game.transfer(bankActor, room.id, a.playerId, b.playerId, 10, 'bank-as-player')).rejects.toThrow('PLAYER_IDENTITY_MISMATCH');
+    await expect(transfer.call(game, bankActor, room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: b.playerId, amount: 10, isPlotFine: false }, 'bank-as-player')).rejects.toThrow('PLAYER_IDENTITY_MISMATCH');
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).balance).toBe(balanceBefore);
 
     await firstDb.accountSession.update({ where: { id: playerActor.sessionId }, data: { revokedAt: new Date() } });
@@ -883,8 +909,8 @@ integration('PrismaGameService PostgreSQL transactions', () => {
   it('replays concurrent same-key transfers and rejects a changed payload', async () => {
     const { room, a, b } = await physicalRoom();
     const [left, right] = await Promise.all([
-      first.transfer(room.id, a.playerId, b.playerId, 300, 'concurrent-transfer-key'),
-      second.transfer(room.id, a.playerId, b.playerId, 300, 'concurrent-transfer-key'),
+      first.transfer(room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: b.playerId, amount: 300, isPlotFine: false }, 'concurrent-transfer-key'),
+      second.transfer(room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: b.playerId, amount: 300, isPlotFine: false }, 'concurrent-transfer-key'),
     ]);
 
     expect(right).toEqual(left);
@@ -892,8 +918,295 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect(await firstDb.player.findUniqueOrThrow({ where: { id: b.playerId } })).toMatchObject({ balance: 5300 });
     expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, type: 'PLAYER_TRANSFER' } })).toBe(2);
     await expect(
-      second.transfer(room.id, a.playerId, b.playerId, 301, 'concurrent-transfer-key'),
+      second.transfer(room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: b.playerId, amount: 301, isPlotFine: false }, 'concurrent-transfer-key'),
     ).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
+  });
+
+  it('unified transfer immediately settles player and bank recipients when approval is disabled', async () => {
+    const { room, zhenhuan, huashifei } = await unifiedTransferRoom();
+
+    const playerTransfer = await first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: huashifei.playerId,
+      amount: 400,
+      isPlotFine: false,
+    }, 'unified-player-immediate');
+    const bankTransfer = await first.transfer(room.id, {
+      fromPlayerId: huashifei.playerId,
+      recipientType: 'BANK',
+      amount: 250,
+      isPlotFine: false,
+    }, 'unified-bank-immediate');
+
+    expect(playerTransfer).toMatchObject({ amount: 400, status: 'EXECUTED' });
+    expect(bankTransfer).toMatchObject({ amount: 250, status: 'EXECUTED' });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 4600 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: huashifei.playerId } })).toMatchObject({ balance: 5150 });
+    expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, transactionId: playerTransfer.id, type: 'PLAYER_TRANSFER' } })).toBe(2);
+    expect(await firstDb.ledgerEntry.findFirstOrThrow({ where: { roomId: room.id, transactionId: bankTransfer.id } })).toMatchObject({
+      playerId: huashifei.playerId,
+      amount: -250,
+      type: 'PLAYER_BANK_PAYMENT',
+    });
+  });
+
+  it('unified transfer applies the configured Meizhuang plot-fine reduction to player and bank recipients', async () => {
+    const { room, meizhuang, zhenhuan } = await unifiedTransferRoom('统一转帐沈眉庄减免');
+
+    const playerTransfer = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: zhenhuan.playerId,
+      amount: 500,
+      isPlotFine: true,
+    }, 'unified-meizhuang-player-fine');
+    const bankTransfer = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'BANK',
+      amount: 500,
+      isPlotFine: true,
+    }, 'unified-meizhuang-bank-fine');
+
+    expect(playerTransfer).toMatchObject({ originalAmount: 500, reduction: 200, amount: 300, status: 'EXECUTED' });
+    expect(bankTransfer).toMatchObject({ originalAmount: 500, reduction: 200, amount: 300, status: 'EXECUTED' });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: meizhuang.playerId } })).toMatchObject({ balance: 4400 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 5300 });
+    expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, type: 'PLOT_FINE' } })).toBe(3);
+    expect(await firstDb.gameTransaction.findUniqueOrThrow({ where: { id: bankTransfer.id } })).toMatchObject({
+      type: 'PLOT_FINE',
+      metadata: expect.objectContaining({ recipientType: 'BANK', originalAmount: 500, reduction: 200, actualAmount: 300, isPlotFine: true }),
+    });
+  });
+
+  it('unified transfer does not reduce plot fines when skills are disabled or the payer is not Meizhuang', async () => {
+    const { room, meizhuang, zhenhuan } = await unifiedTransferRoom('统一转帐技能边界');
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
+
+    const disabledSkill = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'BANK',
+      amount: 500,
+      isPlotFine: true,
+    }, 'unified-disabled-skill-fine');
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: true } });
+    const otherCharacter = await first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'BANK',
+      amount: 500,
+      isPlotFine: true,
+    }, 'unified-non-meizhuang-fine');
+
+    expect(disabledSkill).toMatchObject({ originalAmount: 500, reduction: 0, amount: 500 });
+    expect(otherCharacter).toMatchObject({ originalAmount: 500, reduction: 0, amount: 500 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: meizhuang.playerId } })).toMatchObject({ balance: 4500 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 4500 });
+  });
+
+  it('unified transfer rejects inconsistent recipient inputs without creating a transaction', async () => {
+    const { room, zhenhuan, huashifei } = await unifiedTransferRoom('统一转帐收款参数校验');
+    const before = await firstDb.gameTransaction.count({ where: { roomId: room.id } });
+
+    await expect(first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'BANK',
+      toPlayerId: huashifei.playerId,
+      amount: 100,
+      isPlotFine: false,
+    }, 'unified-bank-with-player')).rejects.toThrow('INVALID_TRANSFER');
+    await expect(first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'PLAYER',
+      amount: 100,
+      isPlotFine: false,
+    }, 'unified-player-without-target')).rejects.toThrow('INVALID_TRANSFER');
+    await expect(first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: zhenhuan.playerId,
+      amount: 100,
+      isPlotFine: false,
+    }, 'unified-self-transfer')).rejects.toThrow('INVALID_TRANSFER');
+
+    expect(await firstDb.gameTransaction.count({ where: { roomId: room.id } })).toBe(before);
+  });
+
+  it('unified transfer rolls back the recipient and ledger when the payer balance is insufficient', async () => {
+    const { room, zhenhuan, huashifei } = await unifiedTransferRoom('统一转帐余额不足');
+    await firstDb.player.update({ where: { id: zhenhuan.playerId }, data: { balance: 100 } });
+
+    await expect(first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: huashifei.playerId,
+      amount: 500,
+      isPlotFine: false,
+    }, 'unified-insufficient-player')).rejects.toThrow('INSUFFICIENT_BALANCE');
+
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 100 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: huashifei.playerId } })).toMatchObject({ balance: 5000 });
+    expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, type: 'PLAYER_TRANSFER' } })).toBe(0);
+  });
+
+  it('unified transfer and bank plot fine use the same configured authoritative amount', async () => {
+    const { room, meizhuang, bank } = await unifiedTransferRoom('统一转帐与银行剧情罚款一致');
+    const unified = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'BANK',
+      amount: 500,
+      isPlotFine: true,
+    }, 'unified-authoritative-fine');
+    const bankEntered = await first.plotFine(room.id, meizhuang.playerId, 500, 'bank-authoritative-fine', bank.token);
+
+    expect(unified).toMatchObject({ originalAmount: 500, reduction: 200, amount: 300 });
+    expect(bankEntered).toMatchObject({ originalAmount: 500, reduction: 200, amount: 300 });
+  });
+
+  it('transfer approval creates pending player and bank requests without changing balances', async () => {
+    const { room, meizhuang, zhenhuan, huashifei } = await unifiedTransferRoom('统一转帐审批请求');
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+
+    const playerRequest = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: zhenhuan.playerId,
+      amount: 500,
+      isPlotFine: true,
+    }, 'approval-player-request');
+    const bankRequest = await first.transfer(room.id, {
+      fromPlayerId: huashifei.playerId,
+      recipientType: 'BANK',
+      amount: 250,
+      isPlotFine: false,
+    }, 'approval-bank-request');
+
+    expect(playerRequest).toMatchObject({ type: 'PLAYER_TRANSFER', status: 'PENDING', originalAmount: 500, reduction: 200, amount: 300 });
+    expect(bankRequest).toMatchObject({ type: 'PLAYER_TRANSFER', status: 'PENDING', originalAmount: 250, reduction: 0, amount: 250 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: meizhuang.playerId } })).toMatchObject({ balance: 5000 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 5000 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: huashifei.playerId } })).toMatchObject({ balance: 5000 });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: playerRequest.id } })).toMatchObject({
+      type: 'PLAYER_TRANSFER',
+      actorPlayerId: meizhuang.playerId,
+      targetPlayerId: zhenhuan.playerId,
+      amount: 300,
+      payload: expect.objectContaining({ recipientType: 'PLAYER', originalAmount: 500, reduction: 200, actualAmount: 300, isPlotFine: true }),
+    });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: bankRequest.id } })).toMatchObject({
+      type: 'PLAYER_TRANSFER',
+      actorPlayerId: huashifei.playerId,
+      targetPlayerId: null,
+      amount: 250,
+      payload: expect.objectContaining({ recipientType: 'BANK', originalAmount: 250, reduction: 0, actualAmount: 250, isPlotFine: false }),
+    });
+  });
+
+  it('transfer approval settles both recipient types once and replays repeated approval', async () => {
+    const { room, meizhuang, zhenhuan, huashifei, bank } = await unifiedTransferRoom('统一转帐批准结算');
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+    const playerRequest = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: zhenhuan.playerId,
+      amount: 500,
+      isPlotFine: true,
+    }, 'approval-settle-player');
+    const bankRequest = await first.transfer(room.id, {
+      fromPlayerId: huashifei.playerId,
+      recipientType: 'BANK',
+      amount: 250,
+      isPlotFine: false,
+    }, 'approval-settle-bank');
+
+    const playerApproval = await first.approve(room.id, playerRequest.id, bank.token, 'approve-player-transfer');
+    const replay = await second.approve(room.id, playerRequest.id, bank.token, 'approve-player-transfer-again');
+    const bankApproval = await first.approve(room.id, bankRequest.id, bank.token, 'approve-bank-transfer');
+
+    expect(replay).toMatchObject({ id: playerRequest.id, status: 'EXECUTED', transactionId: playerApproval.transactionId });
+    expect(bankApproval).toMatchObject({ id: bankRequest.id, status: 'EXECUTED' });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: meizhuang.playerId } })).toMatchObject({ balance: 4700 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 5300 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: huashifei.playerId } })).toMatchObject({ balance: 4750 });
+    expect(await firstDb.gameTransaction.count({ where: { roomId: room.id, requestId: playerRequest.id } })).toBe(1);
+    expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, transactionId: playerApproval.transactionId } })).toBe(2);
+    expect(await firstDb.ledgerEntry.findFirstOrThrow({ where: { roomId: room.id, transactionId: bankApproval.transactionId } })).toMatchObject({ type: 'PLAYER_BANK_PAYMENT', amount: -250 });
+  });
+
+  it('transfer approval deduplicates repeated submission and rejects a changed payload', async () => {
+    const { room, meizhuang } = await unifiedTransferRoom('统一转帐提交幂等');
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+    const input = { fromPlayerId: meizhuang.playerId, recipientType: 'BANK' as const, amount: 500, isPlotFine: true };
+
+    const [left, right] = await Promise.all([
+      first.transfer(room.id, input, 'approval-submit-key'),
+      second.transfer(room.id, input, 'approval-submit-key'),
+    ]);
+
+    expect(right).toEqual(left);
+    expect(await firstDb.gameRequest.count({ where: { roomId: room.id, type: 'PLAYER_TRANSFER' } })).toBe(1);
+    await expect(second.transfer(room.id, { ...input, amount: 501 }, 'approval-submit-key')).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
+  });
+
+  it('transfer approval rejection leaves balances unchanged', async () => {
+    const { room, zhenhuan, bank } = await unifiedTransferRoom('统一转帐拒绝');
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+    const request = await first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'BANK',
+      amount: 400,
+      isPlotFine: false,
+    }, 'approval-reject-request');
+
+    await first.reject(room.id, request.id, bank.token, '银行拒绝转帐', 'approval-reject');
+
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 5000 });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: request.id } })).toMatchObject({ status: 'REJECTED', rejectionReason: '银行拒绝转帐' });
+    expect(await firstDb.gameTransaction.count({ where: { requestId: request.id } })).toBe(0);
+  });
+
+  it('transfer approval rolls back its claim when the payer becomes insufficient before approval', async () => {
+    const { room, zhenhuan, huashifei, bank } = await unifiedTransferRoom('统一转帐批准时余额不足');
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+    const request = await first.transfer(room.id, {
+      fromPlayerId: zhenhuan.playerId,
+      recipientType: 'PLAYER',
+      toPlayerId: huashifei.playerId,
+      amount: 500,
+      isPlotFine: false,
+    }, 'approval-insufficient-request');
+    await firstDb.player.update({ where: { id: zhenhuan.playerId }, data: { balance: 100 } });
+
+    await expect(first.approve(room.id, request.id, bank.token, 'approval-insufficient')).rejects.toThrow('INSUFFICIENT_BALANCE');
+
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).toMatchObject({ balance: 100 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: huashifei.playerId } })).toMatchObject({ balance: 5000 });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: request.id } })).toMatchObject({ status: 'PENDING', approvedByMemberId: null, approvedAt: null, resolvedAt: null });
+    expect(await firstDb.gameTransaction.count({ where: { requestId: request.id } })).toBe(0);
+  });
+
+  it('transfer approval snapshot exposes authoritative transfer details after bank reconnect', async () => {
+    const { room, meizhuang } = await unifiedTransferRoom('统一转帐审批快照');
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+    const request = await first.transfer(room.id, {
+      fromPlayerId: meizhuang.playerId,
+      recipientType: 'BANK',
+      amount: 500,
+      isPlotFine: true,
+    }, 'approval-snapshot-request');
+
+    const snapshot = await second.snapshot(room.id);
+    expect(snapshot.requests.find((item) => item.id === request.id)).toMatchObject({
+      type: 'PLAYER_TRANSFER',
+      playerId: meizhuang.playerId,
+      targetPlayerId: null,
+      recipientType: 'BANK',
+      originalAmount: 500,
+      reduction: 200,
+      actualAmount: 300,
+      amount: 300,
+      isPlotFine: true,
+      status: 'PENDING',
+    });
   });
 
   it('rejects a request idempotency key reused with a different payload', async () => {
@@ -1058,7 +1371,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     const otherRoom = await first.createRoom({ name: '其他房间', initialBalance: 5000, diceMode: 'PHYSICAL' });
     const outsider = await first.joinPlayer(otherRoom.code, '外部玩家', 'meizhuang');
 
-    await expect(first.transfer(room.id, a.playerId, outsider.playerId, 100, 'cross-room-transfer')).rejects.toThrow('PLAYER_NOT_FOUND');
+    await expect(first.transfer(room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: outsider.playerId, amount: 100, isPlotFine: false }, 'cross-room-transfer')).rejects.toThrow('PLAYER_NOT_FOUND');
     await expect(first.adjustBalance(room.id, outsider.playerId, 100, bank.token, '跨房间修正', 'cross-room-adjust')).rejects.toThrow('PLAYER_NOT_FOUND');
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: outsider.playerId } })).balance).toBe(5000);
   });
@@ -1373,7 +1686,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
         () => first.createRequest(room.id, a.playerId, { type: 'COMPANION_EVENT' }, `terminal-family-companion-${status}`),
         () => first.createRequest(room.id, a.playerId, { type: 'COLD_PALACE_EVENT', count: 1 }, `terminal-family-cold-${status}`),
         () => first.requestBankPayment(room.id, a.playerId, 100, `terminal-family-payment-${status}`),
-        () => first.transfer(room.id, a.playerId, b.playerId, 1, `terminal-family-transfer-${status}`),
+        () => first.transfer(room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: b.playerId, amount: 1, isPlotFine: false }, `terminal-family-transfer-${status}`),
         () => first.payToll(room.id, a.playerId, '甘露寺', `terminal-family-toll-${status}`),
         () => first.roll(room.id, a.playerId, `terminal-family-roll-${status}`),
         () => first.endTurn(room.id, a.playerId, `terminal-family-end-turn-${status}`),
@@ -1562,6 +1875,18 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await first.snapshot(room.id)).players.find((player) => player.id === huashifei.playerId)?.tollBonus).toBe(300);
     await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
     expect((await first.snapshot(room.id)).players.find((player) => player.id === huashifei.playerId)?.tollBonus).toBe(0);
+  });
+
+  it('exposes the configured plot-fine reduction in snapshots only while skills are enabled', async () => {
+    const room = await first.createRoom({ name: '剧情罚款技能快照', initialBalance: 5000, diceMode: 'PHYSICAL' });
+    const meizhuang = await first.joinPlayer(room.code, '眉庄', 'meizhuang');
+    await first.joinPlayer(room.code, '乙', 'zhenhuan');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, 'start-plot-fine-snapshot-room');
+
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === meizhuang.playerId)?.plotFineReduction).toBe(200);
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === meizhuang.playerId)?.plotFineReduction).toBe(0);
   });
 
   it('applies every seeded character skill through the Prisma production path', async () => {
@@ -2063,7 +2388,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     };
 
     const attempts = await Promise.allSettled([
-      first.transfer(room.id, seller.playerId, target.playerId, 10, 'retained-target-transfer'),
+      first.transfer(room.id, { fromPlayerId: seller.playerId, recipientType: 'PLAYER', toPlayerId: target.playerId, amount: 10, isPlotFine: false }, 'retained-target-transfer'),
       first.payToll(room.id, seller.playerId, targetProperty.definition.name, 'retained-target-toll'),
       first.confirmLanding(room.id, targetLanding.id, bank.token, true, 'retained-target-confirm-after-swap'),
       first.adjustBalance(room.id, target.playerId, 10, bank.token, '不应修正', 'retained-target-balance'),
