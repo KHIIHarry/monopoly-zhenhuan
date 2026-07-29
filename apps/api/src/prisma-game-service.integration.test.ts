@@ -303,7 +303,7 @@ class V2GameFixtureFacade {
   adjustProperty(roomId: string, property: string, change: Parameters<PrismaGameService['adjustProperty']>[3], fixtureKey: string, reason: string, key: string) { return this.games.adjustProperty(this.actor(fixtureKey), roomId, property, change, reason, key); }
   addSkipTurns(roomId: string, playerId: string, count: number, source: string, fixtureKey: string, key: string, reason: string) { return this.games.addSkipTurns(this.actor(fixtureKey), roomId, playerId, count, source, key, reason); }
   plotFine(roomId: string, playerId: string, amount: number, key: string, fixtureKey: string) { return this.games.plotFine(this.actor(fixtureKey), roomId, playerId, amount, key); }
-  consumeSkip(roomId: string, playerId: string, fixtureKey: string, key: string, reason: string) { return this.games.consumeSkip(this.actor(fixtureKey), roomId, playerId, key, reason); }
+  consumeSkip(roomId: string, playerId: string, count: number, fixtureKey: string, key: string, reason: string) { return this.games.consumeSkip(this.actor(fixtureKey), roomId, playerId, count, key, reason); }
   invalidateRoll(roomId: string, fixtureKey: string, reason: string, key = randomUUID()) { return this.games.invalidateRoll(this.actor(fixtureKey), roomId, reason, key); }
   forceNext(roomId: string, fixtureKey: string, reason: string, key: string) { return this.games.forceNext(this.actor(fixtureKey), roomId, reason, key); }
   reverseLatest(roomId: string, transactionId: string, fixtureKey: string, reason: string, key: string) { return this.games.reverseLatest(this.actor(fixtureKey), roomId, transactionId, reason, key); }
@@ -792,8 +792,8 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(2);
     expect(await firstDb.skipTurnEntry.count({ where: { roomId: room.id, playerId: a.playerId } })).toBe(1);
 
-    const firstConsume = await first.consumeSkip(room.id, a.playerId, bank.token, 'consume-skip-once', '实体骰子停轮确认');
-    const repeatedConsume = await second.consumeSkip(room.id, a.playerId, bank.token, 'consume-skip-once', '实体骰子停轮确认');
+    const firstConsume = await first.consumeSkip(room.id, a.playerId, 1, bank.token, 'consume-skip-once', '实体骰子停轮确认');
+    const repeatedConsume = await second.consumeSkip(room.id, a.playerId, 1, bank.token, 'consume-skip-once', '实体骰子停轮确认');
     expect(repeatedConsume).toEqual(firstConsume);
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(1);
     expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'MANUAL_SKIP_TURNS_CHANGE' } })).toBe(2);
@@ -804,10 +804,51 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     const { room, a, bank } = await physicalRoom();
     await first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'consume-reason-setup', '剧情停轮');
 
-    await expect(first.consumeSkip(room.id, a.playerId, bank.token, 'consume-without-reason', undefined as unknown as string)).rejects.toThrow('REASON_REQUIRED');
-    const consumed = await first.consumeSkip(room.id, a.playerId, bank.token, 'consume-reason-key', '原因甲');
-    await expect(second.consumeSkip(room.id, a.playerId, bank.token, 'consume-reason-key', '原因乙')).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
+    await expect(first.consumeSkip(room.id, a.playerId, 1, bank.token, 'consume-without-reason', undefined as unknown as string)).rejects.toThrow('REASON_REQUIRED');
+    const consumed = await first.consumeSkip(room.id, a.playerId, 1, bank.token, 'consume-reason-key', '原因甲');
+    await expect(second.consumeSkip(room.id, a.playerId, 1, bank.token, 'consume-reason-key', '原因乙')).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
     expect(consumed).toMatchObject({ remainingSkipTurns: 0, stateVersion: expect.any(Number) });
+  });
+
+  it('approves plot rest without blocking tolls or applying Yixiu cold-palace skill', async () => {
+    const room = await first.createRoom({ name: '剧情停留', initialBalance: 5000, diceMode: 'PHYSICAL' });
+    const yixiu = await first.joinPlayer(room.code, '宜修', 'yixiu');
+    await first.joinPlayer(room.code, '乙', 'huashifei');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, 'start-plot-rest');
+    const request = await first.createRequest(room.id, yixiu.playerId, { type: 'PLOT_REST_EVENT', count: 3, reason: '养病留宫' }, 'plot-rest-request');
+
+    await first.approve(room.id, request.id, bank.token, 'approve-plot-rest');
+
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: yixiu.playerId } })).toMatchObject({ remainingSkipTurns: 3, balance: 5000 });
+    expect(await firstDb.skipTurnEntry.findFirstOrThrow({ where: { roomId: room.id, playerId: yixiu.playerId } })).toMatchObject({
+      sourceType: 'PLOT_REST', sourceDescription: '养病留宫', originalCount: 3, remainingCount: 3, blocksTollCollection: false,
+    });
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === yixiu.playerId)).toMatchObject({ tollCollectionBlocked: false });
+  });
+
+  it('consumes the requested number across oldest skip entries atomically', async () => {
+    const { room, a, bank } = await physicalRoom();
+    const firstEntry = await first.addSkipTurns(room.id, a.playerId, 2, 'PLOT_REST', bank.token, 'first-entry', '剧情停留');
+    const secondEntry = await first.addSkipTurns(room.id, a.playerId, 3, 'MANUAL', bank.token, 'second-entry', '现场裁定');
+
+    await first.consumeSkip(room.id, a.playerId, 4, bank.token, 'consume-four', '已跳过四回合');
+
+    expect(await firstDb.skipTurnEntry.findUniqueOrThrow({ where: { id: firstEntry.id } })).toMatchObject({ remainingCount: 0 });
+    expect(await firstDb.skipTurnEntry.findUniqueOrThrow({ where: { id: secondEntry.id } })).toMatchObject({ remainingCount: 1 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ remainingSkipTurns: 1 });
+    await expect(first.consumeSkip(room.id, a.playerId, 2, bank.token, 'consume-too-many', '不可部分扣除')).rejects.toThrow('INSUFFICIENT_SKIP_TURNS');
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ remainingSkipTurns: 1 });
+  });
+
+  it('requires bank approval before a player skip-consumption request changes state', async () => {
+    const { room, a, bank } = await physicalRoom();
+    await first.addSkipTurns(room.id, a.playerId, 2, 'PLOT_REST', bank.token, 'setup-consume-request', '剧情停留');
+    const request = await first.createRequest(room.id, a.playerId, { type: 'CONSUME_SKIP_TURNS', count: 2 }, 'player-consume-request');
+
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(2);
+    await first.approve(room.id, request.id, bank.token, 'approve-player-consume');
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(0);
   });
 
   it('accepts only supported skip sources and always blocks toll collection for cold palace', async () => {
@@ -876,7 +917,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await first.start(room.id, bank.token, 'start-room');
     await first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'electronic-skip-entry', '测试电子模式人工停轮');
 
-    await expect(first.consumeSkip(room.id, a.playerId, bank.token, 'manual-electronic-consume', '电子模式不能人工消费')).rejects.toThrow('PHYSICAL_DICE_MODE_REQUIRED');
+    await expect(first.consumeSkip(room.id, a.playerId, 1, bank.token, 'manual-electronic-consume', '电子模式不能人工消费')).rejects.toThrow('PHYSICAL_DICE_MODE_REQUIRED');
     expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ remainingSkipTurns: 1 });
   });
 
@@ -1318,7 +1359,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await expect(first.adjustBalance(room.id, a.playerId, 100, bank.token, '结束后新修正', 'post-end-adjustment')).rejects.toThrow('ROOM_FINISHED');
     await expect(first.adjustProperty(room.id, '甘露寺', { ownerPlayerId: a.playerId }, bank.token, '结束后改产权', 'post-end-property')).rejects.toThrow('ROOM_FINISHED');
     await expect(first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'post-end-skip', '结束后加停轮')).rejects.toThrow('ROOM_FINISHED');
-    await expect(first.consumeSkip(room.id, a.playerId, bank.token, 'post-end-consume', '结束后不能消费')).rejects.toThrow('ROOM_FINISHED');
+    await expect(first.consumeSkip(room.id, a.playerId, 1, bank.token, 'post-end-consume', '结束后不能消费')).rejects.toThrow('ROOM_FINISHED');
     await expect(first.reverseLatest(room.id, adjustment.id, bank.token, '结束后撤销', 'post-end-reversal')).rejects.toThrow('ROOM_FINISHED');
     await expect(first.reject(room.id, pending.id, bank.token, '结束后拒绝', 'post-end-reject')).rejects.toThrow('ROOM_FINISHED');
     await expect(first.cancelLandingPropertyActions(room.id, landing.id, bank.token, '结束后取消落点')).rejects.toThrow('ROOM_FINISHED');
@@ -1383,7 +1424,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
         () => first.adjustBalance(room.id, a.playerId, 1, bank.token, 'terminal', `terminal-family-balance-${status}`),
         () => first.adjustProperty(room.id, '甘露寺', { ownerPlayerId: a.playerId }, bank.token, 'terminal', `terminal-family-property-${status}`),
         () => first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, `terminal-family-add-skip-${status}`, 'terminal'),
-        () => first.consumeSkip(room.id, a.playerId, bank.token, `terminal-family-consume-${status}`, 'terminal'),
+        () => first.consumeSkip(room.id, a.playerId, 1, bank.token, `terminal-family-consume-${status}`, 'terminal'),
         () => first.invalidateRoll(room.id, bank.token, 'terminal', `terminal-family-invalidate-${status}`),
         () => first.forceNext(room.id, bank.token, 'terminal', `terminal-family-force-${status}`),
         () => first.plotFine(room.id, a.playerId, 1, `terminal-family-fine-${status}`, bank.token),
@@ -2072,7 +2113,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       first.adjustProperty(room.id, dormantOwnerProperty.definition.name, { ownerPlayerId: null }, bank.token, '不应清空留存产权', 'retained-owner-clear-property'),
       first.adjustProperty(room.id, dormantOwnerProperty.definition.name, { ownerPlayerId: seller.playerId }, bank.token, '不应转移留存产权', 'retained-owner-reassign-property'),
       first.addSkipTurns(room.id, target.playerId, 1, 'MANUAL', bank.token, 'retained-target-add-skip', '不应停轮'),
-      first.consumeSkip(room.id, target.playerId, bank.token, 'retained-target-consume-skip', '不应消耗'),
+      first.consumeSkip(room.id, target.playerId, 1, bank.token, 'retained-target-consume-skip', '不应消耗'),
       first.plotFine(room.id, target.playerId, 10, 'retained-target-fine', bank.token),
       first.createRequest(room.id, seller.playerId, {
         type: 'TRADE_PROPERTY',

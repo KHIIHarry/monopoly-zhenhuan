@@ -7,8 +7,8 @@ import { RuleError } from './api-error.js';
 export type GameActor = { accountId: string; sessionId: string };
 export type SnapshotView = 'PLAYER' | 'BANK';
 type RequestAction = {
-  type: 'BUY_PROPERTY' | 'BUILD_PROPERTY' | 'SELL_BUILDING' | 'MORTGAGE_PROPERTY' | 'REDEEM_PROPERTY' | 'SELL_PROPERTY_TO_BANK' | 'TRADE_PROPERTY' | 'START_REWARD' | 'COLD_PALACE_EVENT' | 'COMPANION_EVENT';
-  propertyName?: string; targetPlayerId?: string; amount?: number; count?: number; landingId?: string;
+  type: 'BUY_PROPERTY' | 'BUILD_PROPERTY' | 'SELL_BUILDING' | 'MORTGAGE_PROPERTY' | 'REDEEM_PROPERTY' | 'SELL_PROPERTY_TO_BANK' | 'TRADE_PROPERTY' | 'START_REWARD' | 'COLD_PALACE_EVENT' | 'COMPANION_EVENT' | 'PLOT_REST_EVENT' | 'CONSUME_SKIP_TURNS';
+  propertyName?: string; targetPlayerId?: string; amount?: number; count?: number; landingId?: string; reason?: string;
 };
 
 const lockedPropertyTypes = new Set(['BUY_PROPERTY', 'BUILD_PROPERTY', 'SELL_BUILDING', 'MORTGAGE_PROPERTY', 'REDEEM_PROPERTY', 'SELL_PROPERTY_TO_BANK', 'TRADE_PROPERTY']);
@@ -165,7 +165,7 @@ export class PrismaGameService {
       })),
       turn: activeTurn ? { id: activeTurn.id, number: activeTurn.turnNumber, playerId: activeTurn.playerId, dice: activeTurn.die1 && activeTurn.die2 ? [activeTurn.die1, activeTurn.die2] : undefined, total: activeTurn.diceValue ?? undefined } : null,
       ledger: visibleLedger,
-      requests: visibleRequests.map((request) => ({ id: request.id, type: request.type, playerId: request.actorPlayerId, targetPlayerId: request.targetPlayerId, propertyName: request.property?.definition.name, amount: request.amount ?? 0, quantity: request.quantity, status: request.status, rejectionReason: request.rejectionReason, buyerConfirmed: request.type === 'TRADE_PROPERTY' && asObject(request.payload).buyerConfirmed === true, createdAt: request.createdAt })),
+      requests: visibleRequests.map((request) => ({ id: request.id, type: request.type, playerId: request.actorPlayerId, targetPlayerId: request.targetPlayerId, propertyName: request.property?.definition.name, amount: request.amount ?? 0, quantity: request.quantity, note: request.note, status: request.status, rejectionReason: request.rejectionReason, buyerConfirmed: request.type === 'TRADE_PROPERTY' && asObject(request.payload).buyerConfirmed === true, createdAt: request.createdAt })),
       landings: room.landingEvents.map((landing) => ({ id: landing.id, turnId: landing.turnId ?? undefined, playerId: landing.playerId, propertyName: landing.property?.definition.name, spaceType: landing.spaceType, status: landing.status, plotResolved: landing.plotResolved, propertyActionsCancelled: landing.propertyActionsCancelled })),
       audit: viewer.role === 'BANK' ? room.auditLogs : [],
       reversalCandidate: reversal ? {
@@ -315,6 +315,13 @@ export class PrismaGameService {
         if (room.diceMode === 'ELECTRONIC' && (!turn || turn.diceValue === null || room.currentTurnPlayerId !== playerId || landing.turnId !== turn.id)) fail('START_LANDING_TURN_EXPIRED');
       }
       if (action.type === 'COLD_PALACE_EVENT' && (!Number.isInteger(action.count) || (action.count ?? 0) <= 0)) fail('INVALID_SKIP_COUNT');
+      const skipRequest = action.type === 'PLOT_REST_EVENT' || action.type === 'CONSUME_SKIP_TURNS';
+      if (skipRequest && (action.propertyName || action.amount !== undefined || action.targetPlayerId || action.landingId)) fail('INVALID_SKIP_REQUEST_PAYLOAD');
+      if (action.type === 'PLOT_REST_EVENT' && (!Number.isInteger(action.count) || (action.count ?? 0) <= 0 || !action.reason?.trim())) fail('INVALID_PLOT_REST');
+      if (action.type === 'CONSUME_SKIP_TURNS') {
+        if (room.diceMode !== 'PHYSICAL') fail('PHYSICAL_DICE_MODE_REQUIRED');
+        if (action.reason !== undefined || !Number.isInteger(action.count) || (action.count ?? 0) <= 0 || (action.count ?? 0) > player.remainingSkipTurns) fail('INSUFFICIENT_SKIP_TURNS');
+      }
       if (action.type === 'COMPANION_EVENT' && player.partnerCardCount >= 3) fail('PARTNER_LIMIT');
       if (landing) {
         const priorLandingAction = await tx.gameRequest.findFirst({ where: {
@@ -348,7 +355,7 @@ export class PrismaGameService {
       }
       if (['BUY_PROPERTY', 'BUILD_PROPERTY', 'REDEEM_PROPERTY'].includes(action.type) && player.balance < computedAmount) fail('INSUFFICIENT_BALANCE');
       if (action.type === 'TRADE_PROPERTY') { const buyer = tradeBuyer ?? fail('PLAYER_NOT_FOUND'); if (buyer.balance < computedAmount) fail('INSUFFICIENT_BALANCE'); }
-      const request = await tx.gameRequest.create({ data: { roomId, type: action.type, actorPlayerId: playerId, targetPlayerId: action.targetPlayerId, propertyId: property?.id, landingEventId: landing?.id, turnId: turn?.id, amount: computedAmount, quantity: action.count, payload: { propertyVersion: property?.version ?? null, playerVersion: player.version, ...(action.type === 'TRADE_PROPERTY' ? { buyerConfirmed: false } : {}) }, idempotencyKey: storedKey, requestHash: expectedHash } });
+      const request = await tx.gameRequest.create({ data: { roomId, type: action.type, actorPlayerId: playerId, targetPlayerId: action.targetPlayerId, propertyId: property?.id, landingEventId: landing?.id, turnId: turn?.id, amount: computedAmount, quantity: action.count, note: action.type === 'PLOT_REST_EVENT' ? action.reason?.trim() : null, payload: { propertyVersion: property?.version ?? null, playerVersion: player.version, ...(action.type === 'TRADE_PROPERTY' ? { buyerConfirmed: false } : {}) }, idempotencyKey: storedKey, requestHash: expectedHash } });
       if (property) { const locked = await tx.roomProperty.updateMany({ where: { id: property.id, lockedByRequestId: null, version: property.version }, data: { lockedByRequestId: request.id } }); if (locked.count !== 1) fail('PROPERTY_LOCKED'); }
       const versionedRoom = await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } });
       const versioned = await tx.gameRequest.update({ where: { id: request.id }, data: { payload: { ...asObject(request.payload), stateVersion: versionedRoom.stateVersion } } });
@@ -495,6 +502,17 @@ export class PrismaGameService {
           if (actual) await tx.skipTurnEntry.create({ data: { roomId, playerId: actorId, sourceType: 'COLD_PALACE', sourceDescription: '冷宫', originalCount: actual, remainingCount: actual, blocksTollCollection: true, createdBy: request.actor.memberId, approvedBy: bank.id } });
           break;
         }
+        case 'PLOT_REST_EVENT': {
+          if (!actorId || !request.actor || !Number.isInteger(request.quantity) || (request.quantity ?? 0) <= 0 || !request.note?.trim()) fail('INVALID_PLOT_REST');
+          const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version }, data: { remainingSkipTurns: { increment: request.quantity }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
+          await tx.skipTurnEntry.create({ data: { roomId, playerId: actorId, sourceType: 'PLOT_REST', sourceDescription: request.note.trim(), originalCount: request.quantity, remainingCount: request.quantity, blocksTollCollection: false, createdBy: request.actor.memberId, approvedBy: bank.id } });
+          break;
+        }
+        case 'CONSUME_SKIP_TURNS': {
+          if (!actorId || request.room.diceMode !== 'PHYSICAL' || !Number.isInteger(request.quantity) || (request.quantity ?? 0) <= 0) fail('INSUFFICIENT_SKIP_TURNS');
+          await this.consumeSkipTurns(tx, roomId, actorId, request.quantity);
+          break;
+        }
         default: fail('UNSUPPORTED_REQUEST_TYPE');
       }
       const transaction = await tx.gameTransaction.create({ data: { roomId, type: request.type, requestId: request.id, reversible: request.type !== 'COMPANION_EVENT' && request.type !== 'COLD_PALACE_EVENT', metadata: { effects, propertyId: request.propertyId, propertyBefore, propertyAfter } } });
@@ -618,14 +636,30 @@ export class PrismaGameService {
     }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId));
   }
 
-  async consumeSkip(actor: GameActor, roomId: string, playerId: string, key: string, reason: string) {
-    if (!key) fail('IDEMPOTENCY_KEY_REQUIRED'); if (!reason?.trim()) fail('REASON_REQUIRED');
-    return this.executeIdempotent(actor, roomId, 'BANK', undefined, 'consume-skip-turn', key, { roomId, playerId, reason }, async (tx, bank) => {
+  private async consumeSkipTurns(tx: Prisma.TransactionClient, roomId: string, playerId: string, count: number) {
+    const player = await tx.player.findFirst({ where: { id: playerId, roomId } });
+    if (!player || !Number.isInteger(count) || count <= 0 || player.remainingSkipTurns < count) fail('INSUFFICIENT_SKIP_TURNS');
+    const entries = await tx.skipTurnEntry.findMany({ where: { roomId, playerId, remainingCount: { gt: 0 } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    if (entries.reduce((total, entry) => total + entry.remainingCount, 0) < count) fail('INSUFFICIENT_SKIP_TURNS');
+    let remaining = count;
+    for (const entry of entries) {
+      if (!remaining) break;
+      const consumed = Math.min(entry.remainingCount, remaining);
+      const changed = await tx.skipTurnEntry.updateMany({ where: { id: entry.id, remainingCount: entry.remainingCount }, data: { remainingCount: { decrement: consumed } } });
+      if (changed.count !== 1) fail('SKIP_STATE_CHANGED');
+      remaining -= consumed;
+    }
+    const changed = await tx.player.updateMany({ where: { id: playerId, roomId, version: player.version, remainingSkipTurns: player.remainingSkipTurns }, data: { remainingSkipTurns: { decrement: count }, version: { increment: 1 } } });
+    if (changed.count !== 1) fail('SKIP_STATE_CHANGED');
+    return { before: player.remainingSkipTurns, after: player.remainingSkipTurns - count };
+  }
+
+  async consumeSkip(actor: GameActor, roomId: string, playerId: string, count: number, key: string, reason: string) {
+    if (!key) fail('IDEMPOTENCY_KEY_REQUIRED'); if (!reason?.trim()) fail('REASON_REQUIRED'); if (!Number.isInteger(count) || count <= 0) fail('INSUFFICIENT_SKIP_TURNS');
+    return this.executeIdempotent(actor, roomId, 'BANK', undefined, 'consume-skip-turn', key, { roomId, playerId, count, reason }, async (tx, bank) => {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING'); if (room.diceMode !== 'PHYSICAL') fail('PHYSICAL_DICE_MODE_REQUIRED');
-      const entry = await tx.skipTurnEntry.findFirst({ where: { roomId, playerId, remainingCount: { gt: 0 } }, orderBy: { createdAt: 'asc' } }); if (!entry) fail('NO_SKIP_TURNS');
-      const player = await tx.player.findUnique({ where: { id: playerId } }); if (!player || player.remainingSkipTurns <= 0) fail('NO_SKIP_TURNS');
-      await tx.skipTurnEntry.update({ where: { id: entry.id }, data: { remainingCount: { decrement: 1 } } }); await tx.player.update({ where: { id: playerId }, data: { remainingSkipTurns: { decrement: 1 }, version: { increment: 1 } } }); const response = { remainingSkipTurns: player.remainingSkipTurns - 1 };
-      await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'MANUAL_SKIP_TURNS_CHANGE', entityType: 'Player', entityId: playerId, beforeJson: { remainingSkipTurns: player.remainingSkipTurns }, afterJson: response, reason } });
+      const consumed = await this.consumeSkipTurns(tx, roomId, playerId, count); const response = { remainingSkipTurns: consumed.after };
+      await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'MANUAL_SKIP_TURNS_CHANGE', entityType: 'Player', entityId: playerId, beforeJson: { remainingSkipTurns: consumed.before }, afterJson: response, reason } });
       return response;
     }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId));
   }
