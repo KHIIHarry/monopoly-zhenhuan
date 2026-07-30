@@ -1614,25 +1614,23 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await expect(first.createRequest(room.id, a.playerId, { type: 'BUY_PROPERTY', propertyName: '甘露寺' }, 'request-without-turn')).rejects.toThrow('TURN_NOT_FOUND');
   });
 
-  it('requires bank approval before applying companion and cold-palace events', async () => {
+  it('awards Zhenhuan 500 taels for an approved companion event without tracking the card', async () => {
     const { room, a, bank } = await physicalRoom();
     const before = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
     const companion = await first.createRequest(room.id, a.playerId, { type: 'COMPANION_EVENT' }, 'companion-event');
     expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 0 });
     await first.approve(room.id, companion.id, bank.token, 'approve-companion-event');
-    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 1 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance + 500, partnerCardCount: 0 });
     const companionTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: companion.id } });
-    expect(await firstDb.ledgerEntry.count({ where: { transactionId: companionTransaction.id, type: 'SKILL_REWARD' } })).toBe(0);
-
-    const cold = await first.createRequest(room.id, a.playerId, { type: 'COLD_PALACE_EVENT', count: 2 }, 'cold-event');
-    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(0);
-    await first.approve(room.id, cold.id, bank.token, 'approve-cold-event');
-    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(2);
+    expect(await firstDb.ledgerEntry.findMany({ where: { transactionId: companionTransaction.id, type: 'SKILL_REWARD' } })).toMatchObject([
+      { amount: 500, description: '甄嬛伙伴卡奖励' },
+    ]);
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === a.playerId)).not.toHaveProperty('partnerCardCount');
   });
 
-  it('settles tracked and untracked physical companion returns exactly once at approval time', async () => {
+  it('settles physical companion returns exactly once without reading or changing legacy card counts', async () => {
     const { room, a, bank } = await physicalRoom();
-    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 1 } });
+    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 2 } });
     const before = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
 
     const forbiddenReturnPayloads = [
@@ -1647,65 +1645,64 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       await expect(first.createRequest(room.id, a.playerId, action, `return-client-${field}`)).rejects.toThrow('INVALID_RETURN_COMPANION_PAYLOAD');
     }
 
-    const tracked = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-tracked-companion');
-    const trackedReplay = await second.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-tracked-companion');
-    expect(tracked).toMatchObject({ type: 'RETURN_COMPANION_EVENT', amount: 500, quantity: 1, landingEventId: null, turnId: null, status: 'PENDING' });
-    expect(trackedReplay).toEqual(tracked);
-    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 1 });
-    expect((await firstDb.room.findUniqueOrThrow({ where: { id: room.id }, select: { stateVersion: true } })).stateVersion).toBe(tracked.stateVersion);
-    expect(await firstDb.gameRequest.count({ where: { roomId: room.id, idempotencyKey: `${state.players.get(a.playerId)!.accountId}:return-tracked-companion` } })).toBe(1);
+    const returned = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-companion');
+    const returnReplay = await second.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-companion');
+    expect(returned).toMatchObject({ type: 'RETURN_COMPANION_EVENT', amount: 500, quantity: 1, landingEventId: null, turnId: null, status: 'PENDING' });
+    expect(returnReplay).toEqual(returned);
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 2 });
+    expect((await firstDb.room.findUniqueOrThrow({ where: { id: room.id }, select: { stateVersion: true } })).stateVersion).toBe(returned.stateVersion);
+    expect(await firstDb.gameRequest.count({ where: { roomId: room.id, idempotencyKey: `${state.players.get(a.playerId)!.accountId}:return-companion` } })).toBe(1);
 
     const [approval, replay] = await Promise.all([
-      first.approve(room.id, tracked.id, bank.token, 'approve-return-tracked-companion'),
-      second.approve(room.id, tracked.id, bank.token, 'approve-return-tracked-companion'),
+      first.approve(room.id, returned.id, bank.token, 'approve-return-companion'),
+      second.approve(room.id, returned.id, bank.token, 'approve-return-companion'),
     ]);
     expect(replay).toEqual(approval);
 
-    const afterTracked = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
-    const trackedTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: tracked.id } });
-    expect(afterTracked).toMatchObject({ balance: before.balance + 500, partnerCardCount: 0 });
-    expect(trackedTransaction).toMatchObject({ type: 'RETURN_COMPANION_EVENT', reversible: false });
-    expect(trackedTransaction.metadata).toMatchObject({ companionCardCountBefore: 1, companionCardCountAfter: 0, returnedCount: 1, rewardAmount: 500, untrackedPhysicalReturn: false });
-    expect(await firstDb.gameTransaction.count({ where: { requestId: tracked.id } })).toBe(1);
-    expect(await firstDb.ledgerEntry.count({ where: { transactionId: trackedTransaction.id, type: 'RETURN_COMPANION_EVENT' } })).toBe(1);
+    const afterReturn = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+    const returnTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: returned.id } });
+    expect(afterReturn).toMatchObject({ balance: before.balance + 500, partnerCardCount: 2 });
+    expect(returnTransaction).toMatchObject({ type: 'RETURN_COMPANION_EVENT', reversible: false });
+    expect(returnTransaction.metadata).toMatchObject({ returnedCount: 1, rewardAmount: 500 });
+    expect(returnTransaction.metadata).not.toHaveProperty('companionCardCountBefore');
+    expect(await firstDb.gameTransaction.count({ where: { requestId: returned.id } })).toBe(1);
+    expect(await firstDb.ledgerEntry.count({ where: { transactionId: returnTransaction.id, type: 'RETURN_COMPANION_EVENT' } })).toBe(1);
     expect(await firstDb.auditLog.findFirstOrThrow({ where: { roomId: room.id, action: 'RETURN_COMPANION_EVENT', entityId: a.playerId } })).toMatchObject({
       actorRole: 'BANK',
-      beforeJson: { balance: before.balance, partnerCardCount: 1 },
-      afterJson: { balance: before.balance + 500, partnerCardCount: 0, returnedCount: 1, rewardAmount: 500, untrackedPhysicalReturn: false },
+      beforeJson: { balance: before.balance },
+      afterJson: { balance: before.balance + 500, returnedCount: 1, rewardAmount: 500 },
     });
     expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'RETURN_COMPANION_EVENT', entityId: a.playerId } })).toBe(1);
     expect(await firstDb.idempotencyRecord.count({ where: {
-      scope: `account:${state.banks.get(bank.token)!.accountId}:room:${room.id}:request:${tracked.id}:approve`,
-      key: 'approve-return-tracked-companion',
+      scope: `account:${state.banks.get(bank.token)!.accountId}:room:${room.id}:request:${returned.id}:approve`,
+      key: 'approve-return-companion',
     } })).toBe(1);
 
-    const untracked = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-untracked-companion');
-    await first.approve(room.id, untracked.id, bank.token, 'approve-return-untracked-companion');
-    const afterUntracked = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
-    const untrackedTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: untracked.id } });
-    expect(afterUntracked).toMatchObject({ balance: before.balance + 1000, partnerCardCount: 0 });
-    expect(untrackedTransaction.metadata).toMatchObject({ companionCardCountBefore: 0, companionCardCountAfter: 0, untrackedPhysicalReturn: true });
-    expect((await firstDb.auditLog.findFirstOrThrow({ where: { roomId: room.id, action: 'RETURN_COMPANION_EVENT', entityId: a.playerId, afterJson: { path: ['untrackedPhysicalReturn'], equals: true } } })).afterJson).toMatchObject({ untrackedPhysicalReturn: true });
-    expect(await firstDb.gameTransaction.count({ where: { requestId: tracked.id } })).toBe(1);
+    const secondReturn = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-companion-second');
+    await first.approve(room.id, secondReturn.id, bank.token, 'approve-return-companion-second');
+    const afterSecondReturn = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+    const secondReturnTransaction = await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: secondReturn.id } });
+    expect(afterSecondReturn).toMatchObject({ balance: before.balance + 1000, partnerCardCount: 2 });
+    expect(secondReturnTransaction.metadata).toMatchObject({ returnedCount: 1, rewardAmount: 500 });
+    expect(await firstDb.gameTransaction.count({ where: { requestId: returned.id } })).toBe(1);
     const reconnectedSnapshot = await second.snapshot(room.id);
-    expect(reconnectedSnapshot.players.find((player) => player.id === a.playerId)).toMatchObject({ balance: before.balance + 1000, partnerCardCount: 0 });
-    expect(reconnectedSnapshot.requests.find((item) => item.id === untracked.id)).toMatchObject({ type: 'RETURN_COMPANION_EVENT', quantity: 1, amount: 500, status: 'EXECUTED' });
-    expect(reconnectedSnapshot.ledger.filter((entry) => entry.transactionId === untrackedTransaction.id)).toHaveLength(1);
+    expect(reconnectedSnapshot.players.find((player) => player.id === a.playerId)).toMatchObject({ balance: before.balance + 1000 });
+    expect(reconnectedSnapshot.players.find((player) => player.id === a.playerId)).not.toHaveProperty('partnerCardCount');
+    expect(reconnectedSnapshot.requests.find((item) => item.id === secondReturn.id)).toMatchObject({ type: 'RETURN_COMPANION_EVENT', quantity: 1, amount: 500, status: 'EXECUTED' });
+    expect(reconnectedSnapshot.ledger.filter((entry) => entry.transactionId === secondReturnTransaction.id)).toHaveLength(1);
     expect(reconnectedSnapshot.audit.some((entry) => entry.action === 'RETURN_COMPANION_EVENT' && entry.entityId === a.playerId)).toBe(true);
 
-    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 1 } });
     const queuedFirst = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'queued-companion-return-first');
     const queuedSecond = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'queued-companion-return-second');
     expect(await firstDb.gameRequest.count({ where: { id: { in: [queuedFirst.id, queuedSecond.id] }, status: 'PENDING' } })).toBe(2);
     await first.approve(room.id, queuedFirst.id, bank.token, 'approve-queued-companion-return-first');
     await first.approve(room.id, queuedSecond.id, bank.token, 'approve-queued-companion-return-second');
-    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance + 2000, partnerCardCount: 0 });
-    expect((await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: queuedSecond.id } })).metadata).toMatchObject({ untrackedPhysicalReturn: true });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance + 2000, partnerCardCount: 2 });
+    expect((await firstDb.gameTransaction.findUniqueOrThrow({ where: { requestId: queuedSecond.id } })).metadata).toMatchObject({ returnedCount: 1, rewardAmount: 500 });
   });
 
   it('rolls back a companion return when its audit entry cannot be written', async () => {
     const { room, a, bank } = await physicalRoom();
-    await firstDb.player.update({ where: { id: a.playerId }, data: { partnerCardCount: 1 } });
     const request = await first.createRequest(room.id, a.playerId, { type: 'RETURN_COMPANION_EVENT' }, 'return-with-audit-failure');
     const before = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
     const roomBefore = await firstDb.room.findUniqueOrThrow({ where: { id: room.id }, select: { stateVersion: true } });
@@ -1728,7 +1725,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       await firstDb.$executeRawUnsafe('DROP TRIGGER IF EXISTS "fail_return_companion_audit_trigger" ON "AuditLog"');
       await firstDb.$executeRawUnsafe('DROP FUNCTION IF EXISTS "fail_return_companion_audit"()');
     }
-    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance, partnerCardCount: 1 });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: before.balance });
     expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: request.id } })).toMatchObject({ status: 'PENDING', approvedAt: null, approvedByMemberId: null });
     expect(await firstDb.gameTransaction.count({ where: { requestId: request.id } })).toBe(0);
     expect(await firstDb.ledgerEntry.count({ where: { roomId: room.id, playerId: a.playerId, type: 'RETURN_COMPANION_EVENT' } })).toBe(0);
@@ -2041,7 +2038,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await first.snapshot(room.id)).players.find((player) => player.id === meizhuang.playerId)?.plotFineReduction).toBe(0);
   });
 
-  it('applies online character skills while companion-card rewards remain physical-only', async () => {
+  it('applies online character skills and companion-card rewards only while skills are enabled', async () => {
     const room = await first.createRoom({ name: '人物技能生产路径', initialBalance: 10000, diceMode: 'PHYSICAL' });
     const yixiu = await first.joinPlayer(room.code, '宜修', 'yixiu');
     const huashifei = await first.joinPlayer(room.code, '年世兰', 'huashifei');
@@ -2061,7 +2058,12 @@ integration('PrismaGameService PostgreSQL transactions', () => {
 
     const companion = await first.createRequest(room.id, zhenhuan.playerId, { type: 'COMPANION_EVENT' }, 'zhenhuan-companion');
     await first.approve(room.id, companion.id, bank.token, 'approve-zhenhuan-companion');
-    expect((await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).balance).toBe(10000);
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).balance).toBe(10500);
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
+    const disabledCompanion = await first.createRequest(room.id, zhenhuan.playerId, { type: 'COMPANION_EVENT' }, 'zhenhuan-companion-skills-disabled');
+    await first.approve(room.id, disabledCompanion.id, bank.token, 'approve-zhenhuan-companion-skills-disabled');
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: zhenhuan.playerId } })).balance).toBe(10500);
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: true } });
 
     await firstDb.roomProperty.updateMany({ where: { roomId: room.id, definition: { name: '甘露寺' } }, data: { ownerPlayerId: huashifei.playerId } });
     const tollLanding = await first.declareLanding(room.id, zhenhuan.playerId, '甘露寺', zhenhuan.token, 'zhenhuan-toll-landing');

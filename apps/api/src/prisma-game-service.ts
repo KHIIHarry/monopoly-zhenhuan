@@ -160,7 +160,7 @@ export class PrismaGameService {
       currentPlayerId: room.currentTurnPlayerId && playablePlayerIds.has(room.currentTurnPlayerId) ? room.currentTurnPlayerId : null,
       players: players.map((player) => ({
         id: player.id, name: player.member.displayNameSnapshot, characterId: player.characterId, balance: player.balance,
-        remainingSkipTurns: player.remainingSkipTurns, partnerCardCount: player.partnerCardCount, version: player.version,
+        remainingSkipTurns: player.remainingSkipTurns, version: player.version,
         tollCollectionBlocked: tollBlockedPlayerIds.has(player.id),
         buildDiscount: room.skillEnabled && player.character?.skillCode === 'BUILD_DISCOUNT' ? int(asObject(player.character.skillConfig).discount) : 0,
         tollBonus: room.skillEnabled && player.character?.skillCode === 'TOLL_BONUS' ? int(asObject(player.character.skillConfig).bonus) : 0,
@@ -349,7 +349,6 @@ export class PrismaGameService {
         if (room.diceMode !== 'PHYSICAL') fail('PHYSICAL_DICE_MODE_REQUIRED');
         if (action.reason !== undefined || !Number.isInteger(action.count) || (action.count ?? 0) <= 0 || (action.count ?? 0) > player.remainingSkipTurns) fail('INSUFFICIENT_SKIP_TURNS');
       }
-      if (action.type === 'COMPANION_EVENT' && player.partnerCardCount >= 3) fail('PARTNER_LIMIT');
       if (landing) {
         const priorLandingAction = await tx.gameRequest.findFirst({ where: {
           landingEventId: landing.id,
@@ -539,24 +538,21 @@ export class PrismaGameService {
           break;
         }
         case 'COMPANION_EVENT': {
-          if (!actorId || !request.actor) fail('PLAYER_NOT_FOUND'); if (request.actor.partnerCardCount >= 3) fail('PARTNER_LIMIT');
-          const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version, partnerCardCount: { lt: 3 } }, data: { partnerCardCount: { increment: 1 }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
+          if (!actorId || !request.actor) fail('PLAYER_NOT_FOUND');
+          const config = asObject(request.actor.character?.skillConfig);
+          const reward = request.room.skillEnabled && request.actor.character?.skillCode === 'COMPANION_REWARD'
+            ? int(config.cashReward)
+            : 0;
+          if (reward) await addEffect(actorId, reward, 'SKILL_REWARD', '甄嬛伙伴卡奖励');
           break;
         }
         case 'RETURN_COMPANION_EVENT': {
           if (!actorId || !request.actor || request.amount !== RETURN_COMPANION_REWARD || request.quantity !== 1) fail('INVALID_RETURN_COMPANION_REQUEST');
-          const companionCardCountBefore = request.actor.partnerCardCount;
-          const untrackedPhysicalReturn = companionCardCountBefore === 0;
-          const companionCardCountAfter = Math.max(0, companionCardCountBefore - 1);
           await addEffect(actorId, RETURN_COMPANION_REWARD, 'RETURN_COMPANION_EVENT', '放回实体伙伴卡奖励');
-          if (!untrackedPhysicalReturn) {
-            const changed = await tx.player.updateMany({ where: { id: actorId, roomId, version: request.actor.version + 1, partnerCardCount: companionCardCountBefore }, data: { partnerCardCount: { decrement: 1 }, version: { increment: 1 } } });
-            if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
-          }
-          transactionMetadata = { companionCardCountBefore, companionCardCountAfter, returnedCount: 1, rewardAmount: RETURN_COMPANION_REWARD, untrackedPhysicalReturn };
+          transactionMetadata = { returnedCount: 1, rewardAmount: RETURN_COMPANION_REWARD };
           approvalAudit = {
-            beforeJson: { balance: request.actor.balance, partnerCardCount: companionCardCountBefore },
-            afterJson: { balance: request.actor.balance + RETURN_COMPANION_REWARD, partnerCardCount: companionCardCountAfter, returnedCount: 1, rewardAmount: RETURN_COMPANION_REWARD, untrackedPhysicalReturn },
+            beforeJson: { balance: request.actor.balance },
+            afterJson: { balance: request.actor.balance + RETURN_COMPANION_REWARD, returnedCount: 1, rewardAmount: RETURN_COMPANION_REWARD },
           };
           break;
         }
