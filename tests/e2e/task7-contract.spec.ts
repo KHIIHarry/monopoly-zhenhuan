@@ -950,7 +950,7 @@ test('实体事件 shares one count, resets after success, and sends distinct co
 test('伙伴卡放回 confirms a zero-card physical return and sends only the request type', async ({ page }) => {
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
   const requests: Record<string, unknown>[] = [];
-  const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], partnerCardCount: 0 }] };
+  const snapshot = gameSnapshot;
 
   await mockAccount(page);
   await mockLobby(page);
@@ -968,7 +968,7 @@ test('伙伴卡放回 confirms a zero-card physical return and sends only the re
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText('银行批准后获得 500 两', { exact: true })).toBeVisible();
   await expect(dialog.getByText('该操作不关联落点，批准后不可撤销', { exact: true })).toBeVisible();
-  await expect(dialog.getByText('H5 当前未记录伙伴卡，请确认玩家已在线下实际放回实体卡。', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('H5 当前未记录伙伴卡，请确认玩家已在线下实际放回实体卡。', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '确认放回', exact: true })).toBeEnabled();
 
   await page.getByRole('button', { name: '取消', exact: true }).click();
@@ -981,11 +981,10 @@ test('伙伴卡放回 confirms a zero-card physical return and sends only the re
   ]);
 });
 
-test('伙伴卡放回 bank approval repeats the authoritative reward and untracked-card warning', async ({ page }) => {
+test('伙伴卡放回 bank approval repeats the authoritative reward without an untracked-card warning', async ({ page }) => {
   const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
   const snapshot = {
     ...gameSnapshot,
-    players: [{ ...gameSnapshot.players[0], partnerCardCount: 0 }],
     requests: [{
       id: 'return-companion-request', type: 'RETURN_COMPANION_EVENT', playerId: 'player-1',
       amount: 500, quantity: 1, status: 'PENDING',
@@ -1003,7 +1002,7 @@ test('伙伴卡放回 bank approval repeats the authoritative reward and untrack
   await expect(approval).toContainText('放回伙伴卡');
   await expect(approval).toContainText('放回 1 张');
   await expect(approval).toContainText('奖励 500 两');
-  await expect(approval).toContainText('未记录实体卡放回：是');
+  await expect(approval).not.toContainText('未记录实体卡放回');
   await expect(approval).toContainText('批准后不可撤销');
   await approval.getByRole('button', { name: '批准事件', exact: true }).click();
 
@@ -1011,7 +1010,7 @@ test('伙伴卡放回 bank approval repeats the authoritative reward and untrack
   await expect(dialog).toContainText('玩家：甄嬛');
   await expect(dialog).toContainText('放回 1 张');
   await expect(dialog).toContainText('奖励 500 两');
-  await expect(dialog).toContainText('未记录实体卡放回：是');
+  await expect(dialog).not.toContainText('未记录实体卡放回');
   await expect(dialog).toContainText('批准后不可撤销');
   await expect(dialog).not.toContainText('地产：无');
 });

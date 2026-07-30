@@ -59,7 +59,6 @@ type Player = {
   characterId: string | null;
   balance: number;
   remainingSkipTurns: number;
-  partnerCardCount: number;
   buildDiscount?: number;
   tollBonus?: number;
   coldPalaceSkipReduction?: number;
@@ -5833,11 +5832,6 @@ function PlayerView({
         >
           <p>银行批准后获得 500 两</p>
           <p>该操作不关联落点，批准后不可撤销</p>
-          {me.partnerCardCount === 0 && (
-            <p className="error">
-              H5 当前未记录伙伴卡，请确认玩家已在线下实际放回实体卡。
-            </p>
-          )}
         </ConfirmDialog>
       )}
 
@@ -7055,14 +7049,6 @@ function BankView({
             <>
               <p>放回 {approveTarget.quantity ?? 1} 张</p>
               <p>奖励 {formatMoney(approveTarget.amount)} 两</p>
-              <p>
-                未记录实体卡放回：
-                {snapshot.players.find(
-                  (player) => player.id === approveTarget.playerId,
-                )?.partnerCardCount === 0
-                  ? "是"
-                  : "否"}
-              </p>
               <p className="error">批准后不可撤销</p>
             </>
           ) : (
@@ -7251,7 +7237,6 @@ function approvalDetails(request: BankRequest, players: Player[]) {
     details.push(
       `放回 ${request.quantity ?? 1} 张`,
       `奖励 ${formatMoney(request.amount)} 两`,
-      `未记录实体卡放回：${player?.partnerCardCount === 0 ? "是" : "否"}`,
       "批准后不可撤销",
     );
   } else if (request.type !== "COMPANION_EVENT") {
