@@ -2,7 +2,24 @@
   "name": "@zhenhuan/web",
   "version": "1.0.0",
   "private": true,
-  "scripts": { "dev": "next dev -p 3000", "build": "next build", "start": "next start -p 3000" },
-  "dependencies": { "@tanstack/react-query": "latest", "lucide-react": "latest", "next": "latest", "react": "latest", "react-dom": "latest", "socket.io-client": "latest", "zod": "latest" },
-  "devDependencies": { "@types/react": "latest", "@types/react-dom": "latest", "typescript": "latest" }
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "latest",
+    "lucide-react": "latest",
+    "next": "latest",
+    "pinyin-pro": "^3.28.2",
+    "react": "latest",
+    "react-dom": "latest",
+    "socket.io-client": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest"
+  }
 }

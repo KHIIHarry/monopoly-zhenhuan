@@ -118,7 +118,7 @@ git commit -m "feat: filter landings by pinyin and owner"
 ### Task 2: 角色标签筛选界面
 
 **Files:**
-- Create: `apps/web/app/components/landing-property-card-picker.test.tsx`
+- Create: `apps/web/app/components/landing-property-card-picker.test.ts`
 - Modify: `apps/web/app/components/landing-property-card-picker.tsx`
 - Modify: `apps/web/app/globals.css`
 
@@ -128,23 +128,22 @@ git commit -m "feat: filter landings by pinyin and owner"
 
 - [ ] **Step 1: 写出失败的默认标签渲染测试**
 
-创建 `apps/web/app/components/landing-property-card-picker.test.tsx`：
+创建 `apps/web/app/components/landing-property-card-picker.test.ts`：
 
 ```tsx
+import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { LandingPropertyCardPicker } from './landing-property-card-picker';
 
 describe('LandingPropertyCardPicker', () => {
   it('renders an active all-properties tag and a tag for each player', () => {
-    const html = renderToStaticMarkup(
-      <LandingPropertyCardPicker
-        properties={[{ name: '景仁宫', ownerId: 'p1', level: 0, mortgaged: false, mortgage: 0, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800] }]}
-        players={[{ id: 'p1', name: '皇后' }, { id: 'p2', name: '甄嬛' }]}
-        value=""
-        onChange={() => undefined}
-      />,
-    );
+    const html = renderToStaticMarkup(createElement(LandingPropertyCardPicker, {
+      properties: [{ name: '景仁宫', ownerId: 'p1', level: 0, mortgaged: false, mortgage: 0, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800] }],
+      players: [{ id: 'p1', name: '皇后' }, { id: 'p2', name: '甄嬛' }],
+      value: '',
+      onChange: () => undefined,
+    }));
 
     expect(html).toContain('全部');
     expect(html).toContain('皇后');
@@ -157,7 +156,7 @@ describe('LandingPropertyCardPicker', () => {
 - [ ] **Step 2: 运行标签测试，确认失败**
 
 ```bash
-npm test -- apps/web/app/components/landing-property-card-picker.test.tsx
+npm test -- apps/web/app/components/landing-property-card-picker.test.ts
 ```
 
 预期：因尚未渲染筛选标签，断言找不到“全部”而失败。
@@ -207,7 +206,7 @@ const visibleProperties = useMemo(
 - [ ] **Step 5: 运行组件测试，确认通过**
 
 ```bash
-npm test -- apps/web/app/components/landing-property-card-picker.test.tsx
+npm test -- apps/web/app/components/landing-property-card-picker.test.ts
 ```
 
 预期：测试通过，表明默认“全部”标签按下且所有玩家标签已渲染。
@@ -215,7 +214,7 @@ npm test -- apps/web/app/components/landing-property-card-picker.test.tsx
 - [ ] **Step 6: 提交界面变更**
 
 ```bash
-git add apps/web/app/components/landing-property-card-picker.test.tsx apps/web/app/components/landing-property-card-picker.tsx apps/web/app/globals.css
+git add apps/web/app/components/landing-property-card-picker.test.ts apps/web/app/components/landing-property-card-picker.tsx apps/web/app/globals.css
 git commit -m "feat: add landing owner filter tags"
 ```
 
@@ -231,7 +230,7 @@ git commit -m "feat: add landing owner filter tags"
 - [ ] **Step 1: 运行相关组件测试**
 
 ```bash
-npm test -- apps/web/app/components/landing-property-picker.test.ts apps/web/app/components/landing-property-card-picker.test.tsx
+npm test -- apps/web/app/components/landing-property-picker.test.ts apps/web/app/components/landing-property-card-picker.test.ts
 ```
 
 预期：两个测试文件全部通过。
