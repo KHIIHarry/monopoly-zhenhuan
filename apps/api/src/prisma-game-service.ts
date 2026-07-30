@@ -165,6 +165,7 @@ export class PrismaGameService {
         buildDiscount: room.skillEnabled && player.character?.skillCode === 'BUILD_DISCOUNT' ? int(asObject(player.character.skillConfig).discount) : 0,
         tollBonus: room.skillEnabled && player.character?.skillCode === 'TOLL_BONUS' ? int(asObject(player.character.skillConfig).bonus) : 0,
         plotFineReduction: room.skillEnabled && player.character?.skillCode === 'PLOT_FINE_REDUCTION' ? int(asObject(player.character.skillConfig).reduction) : 0,
+        companionCashReward: room.skillEnabled && player.character?.skillCode === 'COMPANION_REWARD' ? int(asObject(player.character.skillConfig).cashReward) : 0,
         coldPalaceSkipReduction: room.skillEnabled && player.character?.skillCode === 'COLD_PALACE_RELIEF' ? int(asObject(player.character.skillConfig).skipTurnsReduction) : 0,
         coldPalaceCashReward: room.skillEnabled && player.character?.skillCode === 'COLD_PALACE_RELIEF' ? int(asObject(player.character.skillConfig).cashReward) : 0,
       })),

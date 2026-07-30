@@ -223,6 +223,7 @@ test('玩家端从快照展示并申请非默认 1,200 两起点奖励', async (
   await page.route('**/api/rooms/r1/snapshot*', (route) => route.fulfill({ json: {
     ...snapshot,
     startReward: 1_200,
+    players: [{ ...snapshot.players[0], companionCashReward: 777 }],
     landings: startLandingId ? [{ id: startLandingId, playerId: 'p1', spaceType: 'START', status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false }] : [],
   } }));
   await page.route('**/api/rooms/r1/landings/start', async (route) => {
@@ -237,6 +238,9 @@ test('玩家端从快照展示并申请非默认 1,200 两起点奖励', async (
 
   await page.goto('/');
   await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+  const identity = page.locator('.identity-band');
+  await expect(identity.getByText('技能：伙伴卡 +777 两')).toBeVisible();
+  await expect(identity.getByText('技能：伙伴卡 +777 两')).toHaveCSS('color', 'rgb(54, 95, 113)');
   await page.getByRole('button', { name: '起点奖励' }).click();
   await expect(page.getByText('仅棋子精确停留起点可领取 1,200 两')).toBeVisible();
   await page.getByRole('button', { name: '声明停留起点' }).click();

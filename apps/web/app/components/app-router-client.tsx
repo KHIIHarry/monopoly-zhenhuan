@@ -59,6 +59,7 @@ type Player = {
   characterId: string | null;
   balance: number;
   remainingSkipTurns: number;
+  companionCashReward?: number;
   buildDiscount?: number;
   tollBonus?: number;
   coldPalaceSkipReduction?: number;
@@ -550,6 +551,7 @@ type WorkbenchContext = {
   membership: RoomMembershipView;
   view: "PLAYER" | "BANK";
 };
+  skillEnabled: boolean;
 type RoleSwapStatus =
   | "PENDING_TARGET"
   | "PENDING_BANK"
@@ -1406,6 +1408,7 @@ export default function AppRouterClient({
       membership: nextSeats.membership,
       view,
     });
+      skillEnabled: nextSeats.room.skillEnabled,
     if (page === "finish") {
       const preview = await call<SettlementPreviewView>(
         `/api/rooms/${owner.roomId}/settlement/preview`,
@@ -4507,6 +4510,7 @@ function Workbench({
             membership={context.membership}
             snapshot={snapshot}
             busy={busy}
+            skillEnabled={context.skillEnabled}
             tab={playerTab}
             action={action}
             showNotice={showNotice}
@@ -4613,6 +4617,7 @@ function PlayerView({
   membership,
   snapshot,
   busy,
+  skillEnabled,
   tab,
   action,
   showNotice,
@@ -4620,6 +4625,7 @@ function PlayerView({
   membership: RoomMembershipView;
   snapshot: Snapshot;
   busy: boolean;
+  skillEnabled: boolean;
   tab: "HOME" | "PROPERTY" | "LEDGER";
   action: ActionRunner;
   showNotice: (message: string) => void;
@@ -4632,6 +4638,13 @@ function PlayerView({
     (player) => player.id === snapshot.currentPlayerId,
   );
   const canAct =
+  const currentCharacterSkill = me?.characterId
+    ? formatCharacterSkill(
+        me.characterId,
+        me as unknown as Record<string, unknown>,
+        skillEnabled,
+      )
+    : null;
     snapshot.diceMode === "PHYSICAL" || me?.id === snapshot.currentPlayerId;
   const mine = useMemo(
     () => snapshot.properties.filter((property) => property.ownerId === me?.id),
@@ -5164,6 +5177,11 @@ function PlayerView({
               (snapshot.status === "LOBBY" ? "等待开局" : "实体轮次")}
           </strong>
         </div>
+            {currentCharacterSkill && (
+              <small className="current-character-skill">
+                技能：{currentCharacterSkill}
+              </small>
+            )}
         <span className={canAct ? "permission yes" : "permission"}>
           {canAct ? "可操作" : "等待中"}
         </span>

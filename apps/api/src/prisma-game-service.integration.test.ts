@@ -2043,6 +2043,17 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     const yixiu = await first.joinPlayer(room.code, '宜修', 'yixiu');
     const huashifei = await first.joinPlayer(room.code, '年世兰', 'huashifei');
     const meizhuang = await first.joinPlayer(room.code, '眉庄', 'meizhuang');
+  it('exposes the configured companion reward in snapshots only while skills are enabled', async () => {
+    const room = await first.createRoom({ name: '伙伴卡技能快照', initialBalance: 5000, diceMode: 'PHYSICAL' });
+    const zhenhuan = await first.joinPlayer(room.code, '甄嬛', 'zhenhuan');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, 'start-companion-snapshot-room');
+
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === zhenhuan.playerId)?.companionCashReward).toBe(500);
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === zhenhuan.playerId)?.companionCashReward).toBe(0);
+  });
+
     const anlingrong = await first.joinPlayer(room.code, '安陵容', 'anlingrong');
     const zhenhuan = await first.joinPlayer(room.code, '甄嬛', 'zhenhuan');
     const bank = await first.joinBank(room.code, '国库');
