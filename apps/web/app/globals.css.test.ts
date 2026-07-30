@@ -46,6 +46,23 @@ describe('mobile editable controls', () => {
   });
 });
 
+describe('character seat titles', () => {
+  test('reserve the occupied marker space only on occupied cards', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.seat-card h2\s*\{(?![^}]*padding-right)[^}]*\}/s);
+    expect(stylesheet).toMatch(/\.seat-card\.occupied h2\s*\{[^}]*padding-right:\s*58px;/s);
+  });
+});
+
+describe('settlement header return action', () => {
+  test('keeps the room-list action on one line when the header is narrow', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.v2-header\s*>\s*button\s*\{[^}]*flex:\s*0\s+0\s+auto;[^}]*white-space:\s*nowrap;/s);
+  });
+});
+
 describe('admin room configuration controls', () => {
   test('aligns select controls with text inputs', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
