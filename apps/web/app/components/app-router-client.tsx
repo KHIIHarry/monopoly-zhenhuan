@@ -7197,7 +7197,6 @@ function ApprovalList({
 
 function approvalDetails(request: BankRequest, players: Player[]) {
   const details = request.propertyName ? [request.propertyName] : [];
-  const player = players.find((item) => item.id === request.playerId);
   if (request.type === "PLAYER_TRANSFER") {
     const recipient = players.find(
       (player) => player.id === request.targetPlayerId,
