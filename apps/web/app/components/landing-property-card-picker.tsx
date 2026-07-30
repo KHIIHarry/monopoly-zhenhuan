@@ -21,7 +21,11 @@ function buildingLabel(level: number) {
 
 export function LandingPropertyCardPicker({ properties, players, value, onChange }: LandingPropertyPickerProps) {
   const [query, setQuery] = useState('');
-  const visibleProperties = useMemo(() => filterLandingProperties(properties, query), [properties, query]);
+  const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(null);
+  const visibleProperties = useMemo(
+    () => filterLandingProperties(properties, query, selectedOwnerId),
+    [properties, query, selectedOwnerId],
+  );
 
   return (
     <div className="landing-property-picker">
@@ -32,6 +36,27 @@ export function LandingPropertyCardPicker({ properties, players, value, onChange
           <input placeholder="搜索地产名称" value={query} onChange={(event) => setQuery(event.target.value)} />
         </div>
       </label>
+      <div className="landing-property-owner-filters" role="group" aria-label="按地产所有者筛选">
+        <button
+          type="button"
+          className={`landing-owner-filter${selectedOwnerId === null ? ' selected' : ''}`}
+          aria-pressed={selectedOwnerId === null}
+          onClick={() => setSelectedOwnerId(null)}
+        >
+          全部
+        </button>
+        {players.map((player) => (
+          <button
+            type="button"
+            key={player.id}
+            className={`landing-owner-filter${selectedOwnerId === player.id ? ' selected' : ''}`}
+            aria-pressed={selectedOwnerId === player.id}
+            onClick={() => setSelectedOwnerId(player.id)}
+          >
+            {player.name}
+          </button>
+        ))}
+      </div>
       <p className="landing-property-selection" aria-live="polite">已选：{value || '未选择'}</p>
       {visibleProperties.length ? (
         <div className="landing-property-grid" aria-label="选择落点地产">
