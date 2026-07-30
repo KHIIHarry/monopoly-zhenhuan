@@ -140,6 +140,39 @@ npm run db:seed
 
 之后由该账号在 H5 超管后台创建普通账号、设置 `canCreateRoom`、管理设备和房间。系统不使用超管 Bearer Token 或银行授权码。
 
+## 超管离线密码重置
+
+仅当配置中的超级管理员忘记密码、无法登录后台时，可信服务器上的运维人员可交互式重置其密码。执行前必须正确配置 `DATABASE_URL` 和 `SUPER_ADMIN_USERNAMES`；后者只列出用户名，不创建账号，也不应包含空用户名或重复用户名。
+
+命令只接受用户名，绝不接受 `--password` 或其他明文密码参数。它会在可信终端隐藏输入新密码并再次确认；密码长度必须为 8 至 200 个字符。请勿通过 SSH 命令文本、管道、shell 历史、自动化变量或日志传递密码。
+
+本地开发环境：
+
+```bash
+set -a
+. ./.env
+set +a
+npm run admin:reset-password -- --username admin
+```
+
+开发 Docker Compose 环境：
+
+```bash
+docker compose exec api npm run admin:reset-password -- --username admin
+```
+
+生产 Docker Compose 环境（在项目目录执行，并使用受保护的生产环境文件）：
+
+```bash
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml \
+  run --rm --no-deps --entrypoint node api \
+  apps/api/dist/admin-reset-password-cli.js --username admin
+```
+
+该操作在一个数据库事务中更新密码哈希、撤销目标账号全部未撤销且未过期的 Session，并写入 `PASSWORD_RESET` 安全日志。日志标记 `OFFLINE_OPERATIONS_CLI`、目标账号 ID、撤销数量和发生时间，但不记录密码或密码哈希。成功后该账号所有现有设备都必须重新登录；建议立即在后台安全日志中核对记录。
+
+离线重置不会创建账号、不会提升普通账号权限、不会启用已禁用账号，也不会修改 `.env` 中的 `BOOTSTRAP_ADMIN_PASSWORD`。修改 bootstrap 密码不能重置既有账号。配置中的超级管理员账号不能通过后台禁用或删除；如历史数据中已有被禁用的超级管理员，请走独立的受控恢复流程，而不是通过密码重置绕过状态保护。
+
 ## Migration 与 seed
 
 部署和升级固定按以下顺序运行：

@@ -4,7 +4,7 @@ import { Server } from 'socket.io';
 import { z } from 'zod';
 import { prisma } from '@zhenhuan/database';
 import { AccountRoomService, type AuthenticatedSession } from './account-room-service.js';
-import { authMeResponse, clearSessionCookie, loginBodySchema, sessionCookie, sessionCookieName } from './auth-domain.js';
+import { authMeResponse, clearSessionCookie, loginBodySchema, passwordSchema, sessionCookie, sessionCookieName } from './auth-domain.js';
 import { mapApiError, RuleError } from './api-error.js';
 import { loadOriginPolicy } from './origin-policy.js';
 import { parseRoomSubscriptionPayload, PrismaGameService } from './prisma-game-service.js';
@@ -187,7 +187,7 @@ app.patch('/api/admin/accounts/:id', async (request) => {
 });
 app.post('/api/admin/accounts/:id/reset-password', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
-  const { password } = z.object({ password: z.string().min(8).max(200) }).parse(request.body);
+  const { password } = z.object({ password: passwordSchema }).parse(request.body);
   const result = await accounts.resetPassword(auth, id, password, idempotencyKey(request.headers['idempotency-key']));
   for (const sessionId of result.revokedSessionIds ?? []) revokeSocketSession(sessionId, 'PASSWORD_RESET');
   return result;

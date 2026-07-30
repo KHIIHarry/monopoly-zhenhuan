@@ -10,9 +10,10 @@ const base64UrlPattern = /^[A-Za-z0-9_-]+$/;
 
 export const sessionCookieName = 'zhenhuan_session';
 export const sessionDurationMs = sessionSeconds * 1000;
+export const passwordSchema = z.string().min(8).max(200);
 export const loginBodySchema = z.object({
   username: z.string().trim().min(1).max(80),
-  password: z.string().min(8).max(200),
+  password: passwordSchema,
 }).strict();
 
 const scrypt = (password: string, salt: Buffer, length: number, options: ScryptOptions) => new Promise<Buffer>((resolve, reject) => {

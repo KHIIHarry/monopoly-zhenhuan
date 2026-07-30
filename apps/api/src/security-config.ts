@@ -4,12 +4,8 @@ const minimumProductionTokenLength = 32;
 
 type SecurityEnvironment = Record<string, string | undefined>;
 
-export function loadSecurityConfig(environment: SecurityEnvironment = process.env) {
-  const nodeEnv = environment.NODE_ENV;
-  const adminToken = environment.ADMIN_TOKEN ?? localAdminToken;
-  const bankJoinToken = environment.BANK_JOIN_TOKEN ?? localBankJoinToken;
+export function loadSuperAdminUsernames(environment: SecurityEnvironment = process.env) {
   const configuredUsernames = environment.SUPER_ADMIN_USERNAMES;
-
   if (!configuredUsernames?.trim()) {
     throw new Error('SUPER_ADMIN_USERNAMES is required');
   }
@@ -23,6 +19,15 @@ export function loadSecurityConfig(environment: SecurityEnvironment = process.en
   if (superAdminUsernames.size !== usernames.length) {
     throw new Error('SUPER_ADMIN_USERNAMES must not contain duplicate usernames');
   }
+
+  return superAdminUsernames;
+}
+
+export function loadSecurityConfig(environment: SecurityEnvironment = process.env) {
+  const nodeEnv = environment.NODE_ENV;
+  const adminToken = environment.ADMIN_TOKEN ?? localAdminToken;
+  const bankJoinToken = environment.BANK_JOIN_TOKEN ?? localBankJoinToken;
+  const superAdminUsernames = loadSuperAdminUsernames(environment);
 
   if (nodeEnv === 'development' || nodeEnv === 'test') {
     return { adminToken, bankJoinToken, superAdminUsernames };

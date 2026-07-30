@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { RuleError } from './api-error.js';
-import { accountSummary, hashPassword, maskIp, sessionDurationMs, sessionSummary, verifyPassword } from './auth-domain.js';
+import { accountSummary, hashPassword, maskIp, passwordSchema, sessionDurationMs, sessionSummary, verifyPassword } from './auth-domain.js';
 import { buildPropertySettlementDetail, isPristineSettlementTurn, rankSettlementPlayers, type RankedSettlementPlayer, type SettlementCandidate } from './settlement.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -17,6 +17,26 @@ function isSerializationConflict(error: unknown) {
 }
 const required = <T>(value: T | null | undefined, code: string): T => value ?? fail(code);
 const activeSessionWhere = (now = new Date()) => ({ revokedAt: null, expiresAt: { gt: now } });
+
+type PasswordResetSource = 'OFFLINE_OPERATIONS_CLI';
+
+export async function resetAccountPassword(
+  tx: Prisma.TransactionClient,
+  input: { accountId: string; password: string; actorAccountId?: string; source?: PasswordResetSource },
+) {
+  const at = new Date();
+  const account = await tx.account.update({ where: { id: input.accountId }, data: { passwordHash: await hashPassword(input.password) } });
+  const sessions = await tx.accountSession.findMany({ where: { accountId: input.accountId, ...activeSessionWhere(at) }, select: { id: true } });
+  if (sessions.length) await tx.accountSession.updateMany({ where: { id: { in: sessions.map((session) => session.id) } }, data: { revokedAt: at, revokeReason: 'PASSWORD_RESET' } });
+  await tx.securityLog.create({ data: {
+    accountId: input.accountId,
+    ...(input.actorAccountId ? { actorAccountId: input.actorAccountId } : {}),
+    action: 'PASSWORD_RESET',
+    detailsJson: { ...(input.source ? { source: input.source, targetAccountId: input.accountId } : {}), revokedSessions: sessions.length },
+    createdAt: at,
+  } });
+  return { account, revokedSessions: sessions.length, revokedSessionIds: sessions.map((session) => session.id) };
+}
 
 function canonicalValue(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -296,6 +316,14 @@ export class AccountRoomService {
       SELECT "id" FROM "Account" WHERE "id" = ${accountId} FOR UPDATE
     `;
     if (!rows.length) fail(missingCode);
+  }
+
+  private async lockAccountByUsername(tx: Prisma.TransactionClient, username: string) {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Account" WHERE "username" = ${username} FOR UPDATE
+    `;
+    if (!rows.length) fail('ACCOUNT_NOT_FOUND');
+    return rows[0]!.id;
   }
 
   private async ensureAdminActor(tx: Prisma.TransactionClient, auth: AuthenticatedSession) {
@@ -706,15 +734,23 @@ export class AccountRoomService {
       lock: (tx) => this.lockAccount(tx, id),
       authorize: async (tx) => { required(await tx.account.findUnique({ where: { id } }), 'ACCOUNT_NOT_FOUND'); },
       mutate: async (tx) => {
-        const at = new Date();
-        const account = await tx.account.update({ where: { id }, data: { passwordHash: await hashPassword(password) } });
-        const sessions = await tx.accountSession.findMany({ where: { accountId: id, revokedAt: null, expiresAt: { gt: at } }, select: { id: true } });
-        if (sessions.length) await tx.accountSession.updateMany({ where: { id: { in: sessions.map((session) => session.id) } }, data: { revokedAt: at, revokeReason: 'PASSWORD_RESET' } });
-        await tx.securityLog.create({ data: { accountId: id, actorAccountId: auth.account.id, action: 'PASSWORD_RESET', detailsJson: { revokedSessions: sessions.length }, createdAt: at } });
-        return { value: { account: adminAccountDto(account, this.isConfiguredSuperAdmin(account.username)), revokedSessions: sessions.length, revokedSessionIds: sessions.map((session) => session.id) } };
+        const reset = await resetAccountPassword(tx, { accountId: id, password, actorAccountId: auth.account.id });
+        return { value: { account: adminAccountDto(reset.account, this.isConfiguredSuperAdmin(reset.account.username)), revokedSessions: reset.revokedSessions, revokedSessionIds: reset.revokedSessionIds } };
       },
     });
     return result.value;
+  }
+
+  async resetSuperAdminPassword(username: string, password: string) {
+    passwordSchema.parse(password);
+    return this.db.$transaction(async (tx) => {
+      const accountId = await this.lockAccountByUsername(tx, username);
+      const account = required(await tx.account.findUnique({ where: { id: accountId } }), 'ACCOUNT_NOT_FOUND');
+      if (!this.isConfiguredSuperAdmin(account.username)) fail('SUPER_ADMIN_REQUIRED');
+      if (account.status !== 'ACTIVE') fail('ACCOUNT_DISABLED');
+      const reset = await resetAccountPassword(tx, { accountId: account.id, password, source: 'OFFLINE_OPERATIONS_CLI' });
+      return { username: reset.account.username, revokedSessions: reset.revokedSessions };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async setAccountStatus(auth: AuthenticatedSession, id: string, enabled: boolean, key: string) {
@@ -728,6 +764,7 @@ export class AccountRoomService {
       authorize: async (tx) => { required(await tx.account.findUnique({ where: { id } }), 'ACCOUNT_NOT_FOUND'); },
       mutate: async (tx) => {
         const current = required(await tx.account.findUnique({ where: { id } }), 'ACCOUNT_NOT_FOUND');
+        if (!enabled && this.isConfiguredSuperAdmin(current.username)) fail('SUPER_ADMIN_CANNOT_BE_DISABLED');
         if (enabled && current.status === 'ACTIVE') fail('ACCOUNT_ALREADY_ENABLED');
         if (!enabled && current.status === 'DISABLED') fail('ACCOUNT_ALREADY_DISABLED');
         const at = new Date();

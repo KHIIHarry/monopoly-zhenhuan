@@ -19,7 +19,8 @@
     "test:e2e": "playwright test",
     "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema packages/database/prisma/schema.prisma",
-    "db:seed": "npm run build -w @zhenhuan/shared && tsx packages/database/src/seed.ts"
+    "db:seed": "npm run build -w @zhenhuan/shared && tsx packages/database/src/seed.ts",
+    "admin:reset-password": "tsx scripts/admin-reset-password.ts"
   },
   "devDependencies": {
     "@eslint/js": "latest",

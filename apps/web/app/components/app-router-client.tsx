@@ -234,6 +234,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   ACCOUNT_DELETE_BLOCKED: "该账号仍关联保留房间或结算记录，无法删除",
   CANNOT_DELETE_CURRENT_ACCOUNT: "不能删除当前登录的超级管理员账号",
   CANNOT_DELETE_SUPER_ADMIN: "不能删除超级管理员账号",
+  SUPER_ADMIN_CANNOT_BE_DISABLED: "不能禁用超级管理员账号",
   ADMIN_REQUIRED: "此操作需要超级管理员权限",
   BANK_REQUIRED: "此操作需要银行能力，请切换到银行端",
   UNAUTHORIZED: "当前账号无权执行此操作",
@@ -3579,6 +3580,8 @@ function AdminView({
                     </div>
                     <button
                       className="danger-button"
+                      title={selectedAccount.isSuperAdmin ? "超级管理员账号不能禁用" : undefined}
+                      disabled={busy || selectedAccount.isSuperAdmin}
                       onClick={() =>
                         setConfirm({
                           title:
@@ -3603,6 +3606,8 @@ function AdminView({
                     </button>
                     <button
                       className="danger-button"
+                      title={selectedAccount.isSuperAdmin ? "超级管理员账号不能删除" : undefined}
+                      disabled={busy || selectedAccount.isSuperAdmin}
                       onClick={() => {
                         setConfirmName("");
                         setConfirm({

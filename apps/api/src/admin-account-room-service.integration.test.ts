@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApiApp } from './app.js';
-import { hashPassword, sessionCookieName } from './auth-domain.js';
+import { hashPassword, sessionCookieName, verifyPassword } from './auth-domain.js';
 import { AccountRoomService } from './account-room-service.js';
 
 function configuredTestDatabaseUrl() {
@@ -622,6 +622,73 @@ integration('Task 6 real-Cookie admin routes', () => {
     const enabled = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/enable`, headers: { cookie: adminCookie.header, 'idempotency-key': 'enable-key' } });
     expect(enabled.statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: fresh.header } })).statusCode).toBe(401);
+  });
+
+  it('resets only a configured active super-admin offline, revokes active Sessions, and writes a secret-free operations log', async () => {
+    const target = await createAccount({ superAdmin: true });
+    const ordinary = await createAccount();
+    const first = await loginCookie(target.account, target.password, '10.24.18.99');
+    const active = await db.accountSession.findFirstOrThrow({ where: { accountId: target.account.id, sessionTokenHash: { not: '' } } });
+    const alreadyRevoked = await db.accountSession.create({ data: {
+      accountId: target.account.id, sessionTokenHash: `revoked-${randomUUID()}`, deviceId: randomUUID(), deviceName: 'Revoked', browser: 'Vitest', operatingSystem: 'Test', userAgent: 'test', loginIp: '127.0.0.1', lastIp: '127.0.0.1', expiresAt: new Date(Date.now() + 60_000), revokedAt: new Date(), revokeReason: 'TEST_REVOKED',
+    } });
+    const expired = await db.accountSession.create({ data: {
+      accountId: target.account.id, sessionTokenHash: `expired-${randomUUID()}`, deviceId: randomUUID(), deviceName: 'Expired', browser: 'Vitest', operatingSystem: 'Test', userAgent: 'test', loginIp: '127.0.0.1', lastIp: '127.0.0.1', expiresAt: new Date(Date.now() - 1),
+    } });
+    const password = `Offline-reset-${randomUUID()}`;
+    const service = new AccountRoomService(db, (username) => configuredSuperAdmins.has(username));
+
+    const reset = await service.resetSuperAdminPassword(target.account.username, password);
+
+    const updated = await db.account.findUniqueOrThrow({ where: { id: target.account.id } });
+    expect(reset).toMatchObject({ username: target.account.username, revokedSessions: 1 });
+    await expect(verifyPassword(password, updated.passwordHash)).resolves.toBe(true);
+    await expect(verifyPassword(target.password, updated.passwordHash)).resolves.toBe(false);
+    await expect(app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: first.header } })).resolves.toMatchObject({ statusCode: 401 });
+    expect(await db.accountSession.findUniqueOrThrow({ where: { id: active.id } })).toMatchObject({ revokeReason: 'PASSWORD_RESET', revokedAt: expect.any(Date) });
+    expect(await db.accountSession.findUniqueOrThrow({ where: { id: alreadyRevoked.id } })).toMatchObject({ revokeReason: 'TEST_REVOKED', revokedAt: expect.any(Date) });
+    expect(await db.accountSession.findUniqueOrThrow({ where: { id: expired.id } })).toMatchObject({ revokedAt: null, revokeReason: null });
+    const log = await db.securityLog.findFirstOrThrow({ where: { accountId: target.account.id, action: 'PASSWORD_RESET' }, orderBy: { createdAt: 'desc' } });
+    expect(log).toMatchObject({ actorAccountId: null, detailsJson: { source: 'OFFLINE_OPERATIONS_CLI', targetAccountId: target.account.id, revokedSessions: 1 } });
+    expect(JSON.stringify([reset, log])).not.toContain(password);
+    expect(JSON.stringify([reset, log])).not.toContain(updated.passwordHash);
+    await expect(service.resetSuperAdminPassword(ordinary.account.username, password)).rejects.toMatchObject({ code: 'SUPER_ADMIN_REQUIRED' });
+    await expect(service.resetSuperAdminPassword(`missing-${randomUUID()}`, password)).rejects.toMatchObject({ code: 'ACCOUNT_NOT_FOUND' });
+  });
+
+  it('rejects disabled super-admin offline resets and rolls every write back when its SecurityLog insert fails', async () => {
+    const disabled = await createAccount({ superAdmin: true, status: 'DISABLED' });
+    const target = await createAccount({ superAdmin: true });
+    const originalHash = target.account.passwordHash;
+    const service = new AccountRoomService(db, (username) => configuredSuperAdmins.has(username));
+    await expect(service.resetSuperAdminPassword(disabled.account.username, 'Offline-reset-disabled-1')).rejects.toMatchObject({ code: 'ACCOUNT_DISABLED' });
+    executeSql(isolatedUrl, `
+      CREATE OR REPLACE FUNCTION "task_offline_reset_reject_log"() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW."action" = 'PASSWORD_RESET' AND NEW."actorAccountId" IS NULL THEN RAISE EXCEPTION 'forced offline reset log failure'; END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER "task_offline_reset_reject_log" BEFORE INSERT ON "SecurityLog" FOR EACH ROW EXECUTE FUNCTION "task_offline_reset_reject_log"();
+    `);
+    try {
+      await expect(service.resetSuperAdminPassword(target.account.username, 'Offline-reset-rollback-1')).rejects.toThrow();
+      expect((await db.account.findUniqueOrThrow({ where: { id: target.account.id } })).passwordHash).toBe(originalHash);
+      expect(await db.accountSession.count({ where: { accountId: target.account.id, revokedAt: { not: null } } })).toBe(0);
+      expect(await db.securityLog.count({ where: { accountId: target.account.id, action: 'PASSWORD_RESET' } })).toBe(0);
+    } finally {
+      executeSql(isolatedUrl, 'DROP TRIGGER IF EXISTS "task_offline_reset_reject_log" ON "SecurityLog"; DROP FUNCTION IF EXISTS "task_offline_reset_reject_log"();');
+    }
+  });
+
+  it('never disables an account configured as a super-admin', async () => {
+    const actor = await createAccount({ superAdmin: true });
+    const target = await createAccount({ superAdmin: true });
+    const actorCookie = await loginCookie(actor.account, actor.password);
+    const response = await app.inject({ method: 'POST', url: `/api/admin/accounts/${target.account.id}/disable`, headers: { cookie: actorCookie.header, 'idempotency-key': `protect-super-admin-${randomUUID()}` } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: 'SUPER_ADMIN_CANNOT_BE_DISABLED' });
+    expect((await db.account.findUniqueOrThrow({ where: { id: target.account.id } })).status).toBe('ACTIVE');
   });
 
   it('force revokes only one target device and emits one post-commit notification', async () => {
