@@ -1895,6 +1895,23 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await first.snapshot(room.id)).players.find((player) => player.id === anlingrong.playerId)?.buildDiscount).toBe(0);
   });
 
+  it('derives committed toll settlement state for each visible landing', async () => {
+    const { room, a, b, bank } = await physicalRoom();
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: b.playerId },
+    });
+    const landing = await firstDb.landingEvent.findFirstOrThrow({
+      where: { roomId: room.id, playerId: a.playerId, property: { definition: { name: '甘露寺' } } },
+    });
+
+    expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: false });
+    const payment = await first.payToll(room.id, a.playerId, '甘露寺', 'snapshot-toll-payment');
+    expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: true });
+    await first.reverseLatest(room.id, payment.id, bank.token, '测试冲正', 'reverse-snapshot-toll');
+    expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: false });
+  });
+
   it('records nonzero initial balances in the immutable ledger', async () => {
     const room = await first.createRoom({ name: '初始账本', initialBalance: 5000, diceMode: 'PHYSICAL' });
     const player = await first.joinPlayer(room.code, '甲', 'zhenhuan');
@@ -2026,6 +2043,17 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await first.snapshot(room.id)).players.find((player) => player.id === huashifei.playerId)?.tollBonus).toBe(0);
   });
 
+  it('exposes the configured companion reward in snapshots only while skills are enabled', async () => {
+    const room = await first.createRoom({ name: '伙伴卡技能快照', initialBalance: 5000, diceMode: 'PHYSICAL' });
+    const zhenhuan = await first.joinPlayer(room.code, '甄嬛', 'zhenhuan');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, 'start-companion-snapshot-room');
+
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === zhenhuan.playerId)?.companionCashReward).toBe(500);
+    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
+    expect((await first.snapshot(room.id)).players.find((player) => player.id === zhenhuan.playerId)?.companionCashReward).toBe(0);
+  });
+
   it('exposes the configured plot-fine reduction in snapshots only while skills are enabled', async () => {
     const room = await first.createRoom({ name: '剧情罚款技能快照', initialBalance: 5000, diceMode: 'PHYSICAL' });
     const meizhuang = await first.joinPlayer(room.code, '眉庄', 'meizhuang');
@@ -2043,17 +2071,6 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     const yixiu = await first.joinPlayer(room.code, '宜修', 'yixiu');
     const huashifei = await first.joinPlayer(room.code, '年世兰', 'huashifei');
     const meizhuang = await first.joinPlayer(room.code, '眉庄', 'meizhuang');
-  it('exposes the configured companion reward in snapshots only while skills are enabled', async () => {
-    const room = await first.createRoom({ name: '伙伴卡技能快照', initialBalance: 5000, diceMode: 'PHYSICAL' });
-    const zhenhuan = await first.joinPlayer(room.code, '甄嬛', 'zhenhuan');
-    const bank = await first.joinBank(room.code, '国库');
-    await first.start(room.id, bank.token, 'start-companion-snapshot-room');
-
-    expect((await first.snapshot(room.id)).players.find((player) => player.id === zhenhuan.playerId)?.companionCashReward).toBe(500);
-    await firstDb.room.update({ where: { id: room.id }, data: { skillEnabled: false } });
-    expect((await first.snapshot(room.id)).players.find((player) => player.id === zhenhuan.playerId)?.companionCashReward).toBe(0);
-  });
-
     const anlingrong = await first.joinPlayer(room.code, '安陵容', 'anlingrong');
     const zhenhuan = await first.joinPlayer(room.code, '甄嬛', 'zhenhuan');
     const bank = await first.joinBank(room.code, '国库');

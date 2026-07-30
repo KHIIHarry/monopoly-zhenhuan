@@ -122,6 +122,7 @@ type Landing = {
   status: "DECLARED" | "CONFIRMED";
   plotResolved: boolean;
   propertyActionsCancelled: boolean;
+  tollSettled?: boolean;
   turnId?: string;
 };
 
@@ -550,8 +551,8 @@ type WorkbenchContext = {
   roomId: string;
   membership: RoomMembershipView;
   view: "PLAYER" | "BANK";
-};
   skillEnabled: boolean;
+};
 type RoleSwapStatus =
   | "PENDING_TARGET"
   | "PENDING_BANK"
@@ -1407,8 +1408,8 @@ export default function AppRouterClient({
       roomId: nextSeats.room.id,
       membership: nextSeats.membership,
       view,
-    });
       skillEnabled: nextSeats.room.skillEnabled,
+    });
     if (page === "finish") {
       const preview = await call<SettlementPreviewView>(
         `/api/rooms/${owner.roomId}/settlement/preview`,
@@ -1661,7 +1662,7 @@ export default function AppRouterClient({
         { owner },
       );
       if (!result.ok || !ownsRoom(owner)) return;
-      if (!(await fetchSettlement(owner))) return;
+      go(roomPath("settlement", roomId), true);
       result.confirm();
       await loadRooms(owner);
     });
@@ -4509,8 +4510,8 @@ function Workbench({
           <PlayerView
             membership={context.membership}
             snapshot={snapshot}
-            busy={busy}
             skillEnabled={context.skillEnabled}
+            busy={busy}
             tab={playerTab}
             action={action}
             showNotice={showNotice}
@@ -4616,16 +4617,16 @@ function Workbench({
 function PlayerView({
   membership,
   snapshot,
-  busy,
   skillEnabled,
+  busy,
   tab,
   action,
   showNotice,
 }: {
   membership: RoomMembershipView;
   snapshot: Snapshot;
-  busy: boolean;
   skillEnabled: boolean;
+  busy: boolean;
   tab: "HOME" | "PROPERTY" | "LEDGER";
   action: ActionRunner;
   showNotice: (message: string) => void;
@@ -4637,7 +4638,6 @@ function PlayerView({
   const current = snapshot.players.find(
     (player) => player.id === snapshot.currentPlayerId,
   );
-  const canAct =
   const currentCharacterSkill = me?.characterId
     ? formatCharacterSkill(
         me.characterId,
@@ -4645,6 +4645,7 @@ function PlayerView({
         skillEnabled,
       )
     : null;
+  const canAct =
     snapshot.diceMode === "PHYSICAL" || me?.id === snapshot.currentPlayerId;
   const mine = useMemo(
     () => snapshot.properties.filter((property) => property.ownerId === me?.id),
@@ -4654,6 +4655,7 @@ function PlayerView({
     | "LANDING"
     | "START"
     | "PROPERTY"
+    | "TOLL"
     | "ASSET"
     | "TRANSFER"
     | "BANK_PAYMENT"
@@ -4678,7 +4680,6 @@ function PlayerView({
     | "REDEEM_PROPERTY"
     | "SELL_PROPERTY_TO_BANK"
     | "TRADE_PROPERTY"
-    | "PAY_TOLL"
   >("SELL_BUILDING");
   const [assetProperty, setAssetProperty] = useState("");
   const [targetPlayerId, setTargetPlayerId] = useState(
@@ -4705,12 +4706,6 @@ function PlayerView({
   const [playerSkipConsumeCount, setPlayerSkipConsumeCount] = useState("1");
   const idempotentAction = booleanRoomAction(action);
   const assetProperties = snapshot.properties.filter((property) => {
-    if (assetMode === "PAY_TOLL")
-      return Boolean(
-        property.ownerId &&
-        property.ownerId !== playerId &&
-        currentPropertyToll(property, snapshot.players) > 0,
-      );
     if (property.ownerId !== playerId) return false;
     if (assetMode === "SELL_BUILDING") return property.level > 0;
     if (
@@ -4761,10 +4756,7 @@ function PlayerView({
           };
         if (assetMode === "TRADE_PROPERTY")
           return { label: "交易金额", amount: Number(operationAmount) || 0 };
-        return {
-          label: "本次应付过路费",
-          amount: currentPropertyToll(selectedAssetProperty, snapshot.players),
-        };
+        return null;
       })()
     : null;
   const validTradeAmount =
@@ -4801,6 +4793,30 @@ function PlayerView({
         !landingProperty.mortgaged &&
         landingProperty.level < 5),
   );
+  const tollOwner = landingProperty?.ownerId
+    ? snapshot.players.find((player) => player.id === landingProperty.ownerId)
+    : undefined;
+  const tollAmount = landingProperty && tollOwner
+    ? currentPropertyToll(landingProperty, snapshot.players)
+    : 0;
+  const tollDisabledReason = !landingConfirmed
+    ? "请先声明该地产落点，并由银行确认剧情已结算。"
+    : !landingProperty
+      ? "当前落点地产不存在，请刷新后重试。"
+      : !landingProperty.ownerId
+        ? "当前落点为无主地产，无需支付过路费。"
+        : landingProperty.ownerId === me?.id
+          ? "当前落点归你所有，无需支付过路费。"
+          : landingProperty.mortgaged
+            ? "当前落点地产已抵押，无需支付过路费。"
+            : tollOwner?.tollCollectionBlocked
+              ? "地主正在冷宫中，本次免过路费。"
+              : currentLanding?.tollSettled
+                ? "本次过路费已经结算。"
+                : tollAmount <= 0
+                  ? "当前无需支付过路费。"
+                  : null;
+  const canPayToll = tollDisabledReason === null;
   const startLanding = snapshot.landings?.find(
     (item) =>
       item.playerId === playerId &&
@@ -5004,31 +5020,31 @@ function PlayerView({
     );
     if (!selected || (assetMode === "SELL_BUILDING" && !validSellBuildingCount))
       return;
-    const ok =
-      assetMode === "PAY_TOLL"
-        ? await idempotentAction(
-            `/api/rooms/${snapshot.id}/properties/${encodeURIComponent(assetProperty)}/toll`,
-            { playerId },
-          )
-        : await idempotentAction(`/api/rooms/${snapshot.id}/requests`, {
-            playerId,
-            type: assetMode,
-            propertyName: assetProperty,
-            targetPlayerId:
-              assetMode === "TRADE_PROPERTY" ? targetPlayerId : undefined,
-            amount:
-              assetMode === "TRADE_PROPERTY"
-                ? Number(operationAmount)
-                : undefined,
-            count:
-              assetMode === "SELL_BUILDING" ? sellBuildingCount : undefined,
-          });
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/requests`, {
+      playerId,
+      type: assetMode,
+      propertyName: assetProperty,
+      targetPlayerId:
+        assetMode === "TRADE_PROPERTY" ? targetPlayerId : undefined,
+      amount:
+        assetMode === "TRADE_PROPERTY" ? Number(operationAmount) : undefined,
+      count: assetMode === "SELL_BUILDING" ? sellBuildingCount : undefined,
+    });
     if (ok) {
-      if (assetMode === "PAY_TOLL") clearTrustedProperty();
       setPanel(null);
-      showNotice(
-        assetMode === "PAY_TOLL" ? "过路费已结算" : "资产操作已提交银行审批",
-      );
+      showNotice("资产操作已提交银行审批");
+    }
+  }
+
+  async function payLandingToll() {
+    if (!landingProperty || !canPayToll) return;
+    const ok = await idempotentAction(
+      `/api/rooms/${snapshot.id}/properties/${encodeURIComponent(landingProperty.name)}/toll`,
+      { playerId },
+    );
+    if (ok) {
+      setPanel(null);
+      showNotice("过路费已结算");
     }
   }
 
@@ -5161,6 +5177,11 @@ function PlayerView({
           <div>
             <span>当前人物</span>
             <strong>{characterName(me.characterId)}</strong>
+            {currentCharacterSkill && (
+              <small className="current-character-skill">
+                技能：{currentCharacterSkill}
+              </small>
+            )}
           </div>
         )}
         <div className="balance">
@@ -5177,11 +5198,6 @@ function PlayerView({
               (snapshot.status === "LOBBY" ? "等待开局" : "实体轮次")}
           </strong>
         </div>
-            {currentCharacterSkill && (
-              <small className="current-character-skill">
-                技能：{currentCharacterSkill}
-              </small>
-            )}
         <span className={canAct ? "permission yes" : "permission"}>
           {canAct ? "可操作" : "等待中"}
         </span>
@@ -5284,6 +5300,12 @@ function PlayerView({
               label="购买 / 建造"
               disabled={busy || !canAct || !landingConfirmed}
               onClick={() => setPanel("PROPERTY")}
+            />
+            <Quick
+              icon={<CircleDollarSign />}
+              label="支付过路费"
+              disabled={busy || !canAct}
+              onClick={() => setPanel("TOLL")}
             />
             <Quick
               icon={<Landmark />}
@@ -5510,8 +5532,44 @@ function PlayerView({
         </ConfirmDialog>
       )}
 
+      {panel === "TOLL" && (
+        <ActionSheet title="支付过路费" onClose={() => setPanel(null)}>
+          {landingProperty && (
+            <>
+              <p className="cost-line">
+                <span>落点地产</span>
+                <strong>{landingProperty.name}</strong>
+              </p>
+              <p className="cost-line">
+                <span>地产主人</span>
+                <strong>{tollOwner?.name ?? "未知玩家"}</strong>
+              </p>
+              <p className="cost-line">
+                <span>建筑等级</span>
+                <strong>{landingProperty.level} 级</strong>
+              </p>
+              <p className="cost-line">
+                <span>本次应付过路费</span>
+                <strong>{formatMoney(tollAmount)} 两</strong>
+              </p>
+            </>
+          )}
+          {tollDisabledReason && (
+            <p className="error">{tollDisabledReason}</p>
+          )}
+          <button
+            className="primary"
+            disabled={busy || !canPayToll}
+            onClick={() => void payLandingToll()}
+          >
+            {busy ? <LoaderCircle className="spin" /> : <CircleDollarSign />}
+            确认支付过路费
+          </button>
+        </ActionSheet>
+      )}
+
       {panel === "ASSET" && (
-        <ActionSheet title="资产与过路费" onClose={() => setPanel(null)}>
+        <ActionSheet title="资产操作" onClose={() => setPanel(null)}>
           <label>
             操作类型
             <select
@@ -5525,7 +5583,6 @@ function PlayerView({
               <option value="REDEEM_PROPERTY">赎回地产</option>
               <option value="SELL_PROPERTY_TO_BANK">卖给银行</option>
               <option value="TRADE_PROPERTY">玩家间交易</option>
-              <option value="PAY_TOLL">支付过路费</option>
             </select>
           </label>
           {assetProperties.length ? (
@@ -5597,20 +5654,13 @@ function PlayerView({
                   <strong>{formatMoney(assetSettlement.amount)} 两</strong>
                 </p>
               )}
-              {assetMode === "PAY_TOLL" &&
-                currentLanding?.propertyName !== assetProperty && (
-                  <p className="error">过路费必须对应本回合已确认落点。</p>
-                )}
               <button
                 className="primary"
                 disabled={
                   busy ||
                   !validSellBuildingCount ||
                   !validTradeAmount ||
-                  (assetMode === "TRADE_PROPERTY" && !targetPlayerId) ||
-                  (assetMode === "PAY_TOLL" &&
-                    (!landingConfirmed ||
-                      currentLanding?.propertyName !== assetProperty))
+                  (assetMode === "TRADE_PROPERTY" && !targetPlayerId)
                 }
                 onClick={() => void submitAssetAction()}
               >

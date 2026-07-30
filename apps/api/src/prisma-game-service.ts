@@ -155,6 +155,9 @@ export class PrismaGameService {
     const visibleLedger = viewer.role === 'BANK' ? room.ledgerEntries : room.ledgerEntries.filter((entry) => entry.playerId === viewer.playerId);
     const visibleRequests = viewer.role === 'BANK' ? [...pendingRequests, ...room.requests] : room.requests.filter((request) => request.actorPlayerId === viewer.playerId || request.targetPlayerId === viewer.playerId);
     const tollBlockedPlayerIds = new Set(room.skipTurnEntries.map((entry) => entry.playerId));
+    const tollSettlementStates = new Map(await Promise.all(room.landingEvents
+      .filter((landing) => landing.status === 'CONFIRMED')
+      .map(async (landing) => [landing.id, (await this.tollSettlementState(tx, roomId, landing.id)).status] as const)));
       return {
       id: room.id, code: room.code, name: room.name, status: room.status, stateVersion: room.stateVersion, diceMode: room.diceMode, redemptionFee: room.redemptionFee, startReward: room.startReward,
       currentPlayerId: room.currentTurnPlayerId && playablePlayerIds.has(room.currentTurnPlayerId) ? room.currentTurnPlayerId : null,
@@ -162,10 +165,10 @@ export class PrismaGameService {
         id: player.id, name: player.member.displayNameSnapshot, characterId: player.characterId, balance: player.balance,
         remainingSkipTurns: player.remainingSkipTurns, version: player.version,
         tollCollectionBlocked: tollBlockedPlayerIds.has(player.id),
+        companionCashReward: room.skillEnabled && player.character?.skillCode === 'COMPANION_REWARD' ? int(asObject(player.character.skillConfig).cashReward) : 0,
         buildDiscount: room.skillEnabled && player.character?.skillCode === 'BUILD_DISCOUNT' ? int(asObject(player.character.skillConfig).discount) : 0,
         tollBonus: room.skillEnabled && player.character?.skillCode === 'TOLL_BONUS' ? int(asObject(player.character.skillConfig).bonus) : 0,
         plotFineReduction: room.skillEnabled && player.character?.skillCode === 'PLOT_FINE_REDUCTION' ? int(asObject(player.character.skillConfig).reduction) : 0,
-        companionCashReward: room.skillEnabled && player.character?.skillCode === 'COMPANION_REWARD' ? int(asObject(player.character.skillConfig).cashReward) : 0,
         coldPalaceSkipReduction: room.skillEnabled && player.character?.skillCode === 'COLD_PALACE_RELIEF' ? int(asObject(player.character.skillConfig).skipTurnsReduction) : 0,
         coldPalaceCashReward: room.skillEnabled && player.character?.skillCode === 'COLD_PALACE_RELIEF' ? int(asObject(player.character.skillConfig).cashReward) : 0,
       })),
@@ -190,7 +193,7 @@ export class PrismaGameService {
           createdAt: request.createdAt,
         };
       }),
-      landings: room.landingEvents.map((landing) => ({ id: landing.id, turnId: landing.turnId ?? undefined, playerId: landing.playerId, propertyName: landing.property?.definition.name, spaceType: landing.spaceType, status: landing.status, plotResolved: landing.plotResolved, propertyActionsCancelled: landing.propertyActionsCancelled })),
+      landings: room.landingEvents.map((landing) => ({ id: landing.id, turnId: landing.turnId ?? undefined, playerId: landing.playerId, propertyName: landing.property?.definition.name, spaceType: landing.spaceType, status: landing.status, plotResolved: landing.plotResolved, propertyActionsCancelled: landing.propertyActionsCancelled, tollSettled: tollSettlementStates.get(landing.id) === 'COMMITTED' })),
       audit: viewer.role === 'BANK' ? room.auditLogs : [],
       reversalCandidate: reversal ? {
         id: reversal.id,

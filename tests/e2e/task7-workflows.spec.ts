@@ -277,6 +277,70 @@ test('property actions use only the confirmed landing and never offer another pr
   ]);
 });
 
+test('landing-bound toll payment uses the confirmed landing and explains disabled states', async ({ page }) => {
+  const payableProperty = { name: '甘露寺', ownerId: 'player-2', level: 2, mortgaged: false, mortgage: 800, purchasePrice: 1600, build: 1000, buildingSell: 600, tolls: [300, 700, 1800, 5000, 7000, 9000] };
+  const otherProperty = { name: '景仁宫', ownerId: 'player-2', level: 0, mortgaged: false, mortgage: 1500, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800, 2000, 3900, 9000, 11000, 13000] };
+  const payablePlayers = [...snapshot.players, { id: 'player-2', name: '皇后', characterId: 'yixiu', balance: 5000, remainingSkipTurns: 0 }];
+  const landing = { id: 'landing-1', turnId: 'turn-1', playerId: 'player-1', propertyName: '甘露寺', spaceType: 'PROPERTY', status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false, tollSettled: false };
+  const disabledCases = {
+    'no-landing': { landings: [], property: payableProperty, players: payablePlayers, reason: '请先声明该地产落点，并由银行确认剧情已结算。' },
+    unowned: { landings: [{ ...landing, tollSettled: false }], property: { ...payableProperty, ownerId: null }, players: payablePlayers, reason: '当前落点为无主地产，无需支付过路费。' },
+    'self-owned': { landings: [{ ...landing, tollSettled: false }], property: { ...payableProperty, ownerId: 'player-1' }, players: payablePlayers, reason: '当前落点归你所有，无需支付过路费。' },
+    mortgaged: { landings: [{ ...landing, tollSettled: false }], property: { ...payableProperty, mortgaged: true }, players: payablePlayers, reason: '当前落点地产已抵押，无需支付过路费。' },
+    'owner-blocked': { landings: [{ ...landing, tollSettled: false }], property: payableProperty, players: [{ ...payablePlayers[0] }, { ...payablePlayers[1], tollCollectionBlocked: true }], reason: '地主正在冷宫中，本次免过路费。' },
+    settled: { landings: [{ ...landing, tollSettled: true }], property: payableProperty, players: payablePlayers, reason: '本次过路费已经结算。' },
+  } as const;
+  let tollCase: keyof typeof disabledCases | 'payable' = 'payable';
+  const tollRequests: string[] = [];
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => {
+    const fixture = tollCase === 'payable'
+      ? { landings: [landing], property: payableProperty, players: payablePlayers }
+      : disabledCases[tollCase];
+    return route.fulfill({ json: {
+      ...snapshot,
+      diceMode: 'ELECTRONIC',
+      turn: { id: 'turn-1', total: 7 },
+      properties: [fixture.property, otherProperty],
+      players: fixture.players,
+      landings: fixture.landings,
+    } });
+  });
+  await page.route('**/api/rooms/room-1/properties/**', (route) => {
+    tollRequests.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ json: { id: 'toll-1' } });
+  });
+
+  await openRoom(page);
+  await expect(page.getByRole('heading', { name: '玩家端', exact: true })).toBeVisible();
+  const quickLabels = await page.locator('.quick-grid .quick').evaluateAll((buttons) => buttons.map((button) => button.textContent?.trim()));
+  expect(quickLabels.indexOf('支付过路费')).toBe(quickLabels.indexOf('资产操作') - 1);
+
+  await page.getByRole('button', { name: '资产操作' }).click();
+  const assetSheet = page.getByRole('dialog', { name: '资产操作' });
+  await expect(assetSheet.getByRole('option', { name: '支付过路费' })).toHaveCount(0);
+  await assetSheet.getByRole('button', { name: '关闭' }).click();
+
+  await page.getByRole('button', { name: '支付过路费' }).click();
+  const tollSheet = page.getByRole('dialog', { name: '支付过路费' });
+  await expect(tollSheet.getByLabel('目标地产')).toHaveCount(0);
+  await expect(tollSheet.getByText('甘露寺', { exact: true })).toBeVisible();
+  await expect(tollSheet.getByText('皇后', { exact: true })).toBeVisible();
+  await expect(tollSheet.getByText('1,800 两', { exact: true })).toBeVisible();
+  await tollSheet.getByRole('button', { name: '确认支付过路费' }).click();
+  expect(tollRequests).toEqual(['/api/rooms/room-1/properties/%E7%94%98%E9%9C%B2%E5%AF%BA/toll']);
+
+  for (const [name, fixture] of Object.entries(disabledCases)) {
+    tollCase = name as keyof typeof disabledCases;
+    await page.reload();
+    await page.getByRole('button', { name: '支付过路费' }).click();
+    const sheet = page.getByRole('dialog', { name: '支付过路费' });
+    await expect(sheet.getByText(fixture.reason, { exact: true })).toBeVisible();
+    await expect(sheet.getByRole('button', { name: '确认支付过路费' })).toBeDisabled();
+  }
+});
+
 test('ROOM_CONTROL_LOST from a write refetches seats and routes to takeover', async ({ page }) => {
   let activeHere = true;
   let seatReads = 0;
