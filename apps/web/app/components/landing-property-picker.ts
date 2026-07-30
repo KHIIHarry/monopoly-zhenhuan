@@ -1,3 +1,5 @@
+import { match } from 'pinyin-pro';
+
 export type LandingProperty = {
   name: string;
   ownerId: string | null;
@@ -12,9 +14,25 @@ export type LandingProperty = {
 
 export type LandingPlayer = { id: string; name: string; tollBonus?: number; tollCollectionBlocked?: boolean };
 
-export function filterLandingProperties<T extends LandingProperty>(properties: T[], query: string): T[] {
-  const term = query.trim();
-  return term ? properties.filter((property) => property.name.includes(term)) : properties;
+function normalizedLandingQuery(query: string) {
+  return query.replaceAll(/\s/g, '').toLocaleLowerCase('en-US');
+}
+
+function matchesLandingName(name: string, query: string) {
+  return !query || name.includes(query) || Boolean(match(name, query));
+}
+
+export function filterLandingProperties<T extends LandingProperty>(
+  properties: T[],
+  query: string,
+  ownerId: string | null = null,
+): T[] {
+  const term = normalizedLandingQuery(query);
+  return properties.filter(
+    (property) =>
+      (ownerId === null || property.ownerId === ownerId) &&
+      matchesLandingName(property.name, term),
+  );
 }
 
 export function landingOwnership(property: LandingProperty, players: LandingPlayer[]) {

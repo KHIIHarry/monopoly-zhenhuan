@@ -11,6 +11,24 @@ describe('landing property picker model', () => {
     expect(filterLandingProperties(properties, ' 玉轩 ')).toEqual([properties[1]]);
   });
 
+  it('matches Chinese, a full-pinyin substring, initials, and mixed text', () => {
+    expect(filterLandingProperties(properties, '仁')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, 'ren')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, 'jrg')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, '景ren')).toEqual([properties[0]]);
+  });
+
+  it('ignores query case and whitespace', () => {
+    expect(filterLandingProperties(properties, ' Jing Ren ')).toEqual([properties[0]]);
+  });
+
+  it('filters by owner and intersects the owner with the query', () => {
+    expect(filterLandingProperties(properties, '', 'p1')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, 'ren', 'p1')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, 'yu', 'p1')).toEqual([]);
+    expect(filterLandingProperties(properties, '', null)).toEqual(properties);
+  });
+
   it('marks a property with an owner as purchased and resolves the owner name', () => {
     expect(landingOwnership(properties[0], [{ id: 'p1', name: '皇后' }])).toEqual({ label: '已购', ownerName: '皇后' });
   });
