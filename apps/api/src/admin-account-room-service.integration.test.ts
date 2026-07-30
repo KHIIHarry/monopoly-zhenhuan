@@ -813,21 +813,43 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(await db.roomMembership.findUniqueOrThrow({ where: { id: firstMember.id } })).toMatchObject({ status: 'LEFT', characterId: null, isBank: false, activeSessionId: null });
   });
 
-  it.each(['LOBBY', 'PLAYING'] as const)('permanently blocks an admin-removed membership from joining or selecting in %s', async (status) => {
+  it('restores an admin-removed membership when the account joins again', async () => {
     const account = await createAccount();
     const creator = await createAccount();
     const cookie = await loginCookie(account.account, account.password);
-    const room = await createRoom(creator.account.id, status);
-    if (status === 'PLAYING') await db.room.update({ where: { id: room.id }, data: { allowMidgameJoin: true } });
-    await db.roomMembership.create({ data: { roomId: room.id, accountId: account.account.id, displayNameSnapshot: account.account.displayName, status: 'LEFT', leftAt: new Date() } });
+    const room = await createRoom(creator.account.id);
+    const removed = await db.roomMembership.create({ data: { roomId: room.id, accountId: account.account.id, displayNameSnapshot: account.account.displayName, status: 'LEFT', leftAt: new Date() } });
 
-    const joined = await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/join`, headers: { cookie: cookie.header, 'idempotency-key': `removed-join-${status}` }, payload: {} });
-    const selected = await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/select-character`, headers: { cookie: cookie.header, 'idempotency-key': `removed-select-${status}` }, payload: { characterId: 'irrelevant' } });
+    const joined = await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/join`, headers: { cookie: cookie.header, 'idempotency-key': 'removed-member-rejoin' }, payload: {} });
+    expect(joined.statusCode).toBe(200);
+    expect(joined.json()).toMatchObject({ id: removed.id, status: 'ACTIVE', characterId: null, isBank: false });
+    expect(await db.roomMembership.count({ where: { roomId: room.id, accountId: account.account.id } })).toBe(1);
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: removed.id } })).toMatchObject({
+      status: 'ACTIVE',
+      characterId: null,
+      isBank: false,
+      leftAt: null,
+    });
+  });
+
+  it('keeps midgame admission disabled for an admin-removed membership', async () => {
+    const account = await createAccount();
+    const creator = await createAccount();
+    const cookie = await loginCookie(account.account, account.password);
+    const room = await createRoom(creator.account.id, 'PLAYING');
+    await db.roomMembership.create({ data: {
+      roomId: room.id,
+      accountId: account.account.id,
+      displayNameSnapshot: account.account.displayName,
+      status: 'LEFT',
+      leftAt: new Date(),
+    } });
+
+    const joined = await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/join`, headers: { cookie: cookie.header, 'idempotency-key': 'removed-member-midgame-rejoin' }, payload: {} });
+
     expect(joined.statusCode).toBe(409);
-    expect(joined.json()).toEqual({ error: 'ROOM_MEMBERSHIP_REMOVED' });
-    expect(selected.statusCode).toBe(409);
-    expect(selected.json()).toEqual({ error: 'ROOM_MEMBERSHIP_REMOVED' });
-    expect(await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: account.account.id } } })).toMatchObject({ status: 'LEFT', characterId: null });
+    expect(joined.json()).toEqual({ error: 'MIDGAME_JOIN_DISABLED' });
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: account.account.id } } })).toMatchObject({ status: 'LEFT' });
   });
 
   it('rejects removal of a current-turn player and terminalizes pending swaps on allowed removal', async () => {

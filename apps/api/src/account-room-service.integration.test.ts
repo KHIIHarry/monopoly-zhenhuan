@@ -1043,7 +1043,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.player.count({ where: { roomId: room.id } })).toBe(2);
   });
 
-  it('permanently rejects a LEFT membership without restoring or duplicating its retained row', async () => {
+  it('restores a LEFT membership without duplicating its retained row', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const member = await createAuth({ displayName: '流转成员' });
     const joiningDevice = await secondSession(member.auth);
@@ -1052,15 +1052,16 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     await db.roomMembership.update({ where: { id: joined.id }, data: { status: 'LEFT', leftAt: new Date() } });
 
     await expect(service.joinRoom(joiningDevice, room.id, 'wrong-restore-password', 'left-wrong-password'))
-      .rejects.toMatchObject({ code: 'ROOM_MEMBERSHIP_REMOVED' });
+      .rejects.toMatchObject({ code: 'ROOM_PASSWORD_INVALID' });
     expect(await db.roomMembership.findUniqueOrThrow({ where: { id: joined.id } })).toMatchObject({ status: 'LEFT' });
 
     await expect(service.joinRoom(joiningDevice, room.id, 'restore-password', 'left-valid-password'))
-      .rejects.toMatchObject({ code: 'ROOM_MEMBERSHIP_REMOVED' });
+      .resolves.toMatchObject({ id: joined.id, status: 'ACTIVE', characterId: null, isBank: false });
     expect(await db.roomMembership.count({ where: { roomId: room.id, accountId: member.account.id } })).toBe(1);
     expect(await db.roomMembership.findUniqueOrThrow({ where: { id: joined.id } })).toMatchObject({
-      status: 'LEFT',
-      activeSessionId: member.auth.session.id,
+      status: 'ACTIVE',
+      leftAt: null,
+      activeSessionId: joiningDevice.session.id,
     });
   });
 
