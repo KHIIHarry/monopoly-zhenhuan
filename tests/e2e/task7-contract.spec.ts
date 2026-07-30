@@ -1015,6 +1015,63 @@ test('伙伴卡放回 bank approval repeats the authoritative reward without an 
   await expect(dialog).not.toContainText('地产：无');
 });
 
+test('伙伴卡获得审批为甄嬛显示自动奖励且不显示通用字段', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+  const snapshot = {
+    ...gameSnapshot,
+    requests: [{
+      id: 'companion-request', type: 'COMPANION_EVENT', playerId: 'player-1',
+      amount: 0, status: 'PENDING',
+    }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: /审批/ }).click();
+  await page.locator('.approval-list article').filter({ hasText: '甄嬛' }).getByRole('button', { name: '批准事件', exact: true }).click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('玩家：甄嬛');
+  await expect(dialog).toContainText('自动奖励 500 两');
+  await expect(dialog).toContainText('伙伴卡事件批准后立即生效，不可撤销');
+  await expect(dialog).not.toContainText('地产：无');
+  await expect(dialog).not.toContainText('金额：0 两');
+  await expect(dialog).not.toContainText('数量：无');
+});
+
+test('伙伴卡获得审批不向非甄嬛显示奖励且不显示通用字段', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+  const snapshot = {
+    ...gameSnapshot,
+    players: [{ ...gameSnapshot.players[0], name: '宜修', characterId: 'yixiu' }],
+    requests: [{
+      id: 'companion-request', type: 'COMPANION_EVENT', playerId: 'player-1',
+      amount: 0, status: 'PENDING',
+    }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: /审批/ }).click();
+  await page.locator('.approval-list article').filter({ hasText: '宜修' }).getByRole('button', { name: '批准事件', exact: true }).click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('玩家：宜修');
+  await expect(dialog).not.toContainText('自动奖励 500 两');
+  await expect(dialog).toContainText('伙伴卡事件批准后立即生效，不可撤销');
+  await expect(dialog).not.toContainText('地产：无');
+  await expect(dialog).not.toContainText('金额：0 两');
+  await expect(dialog).not.toContainText('数量：无');
+});
+
 test('places skip consumption between physical events and end turn', async ({ page }) => {
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
   const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 1 }] };

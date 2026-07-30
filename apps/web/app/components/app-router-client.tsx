@@ -7051,6 +7051,13 @@ function BankView({
               <p>奖励 {formatMoney(approveTarget.amount)} 两</p>
               <p className="error">批准后不可撤销</p>
             </>
+          ) : approveTarget.type === "COMPANION_EVENT" ? (
+            <>
+              {snapshot.players.find(
+                (player) => player.id === approveTarget.playerId,
+              )?.characterId === "zhenhuan" && <p>自动奖励 500 两</p>}
+              <p className="error">伙伴卡事件批准后立即生效，不可撤销</p>
+            </>
           ) : (
             <>
               <p>地产：{approveTarget.propertyName ?? "无"}</p>
@@ -7060,9 +7067,6 @@ function BankView({
           )}
           {approveTarget.type === "COLD_PALACE_EVENT" && (
             <p className="error">冷宫事件批准后立即生效，且不可撤销。</p>
-          )}
-          {approveTarget.type === "COMPANION_EVENT" && (
-            <p className="error">伙伴卡事件批准后立即生效，且不可撤销。</p>
           )}
         </ConfirmDialog>
       )}
