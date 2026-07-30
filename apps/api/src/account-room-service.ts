@@ -1237,7 +1237,6 @@ export class AccountRoomService {
           await this.lockRoom(tx, roomId);
           const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
           const current = await tx.roomMembership.findUnique({ where: { roomId_accountId: { roomId, accountId: auth.account.id } } });
-          if (current?.status === 'LEFT') fail('ROOM_MEMBERSHIP_REMOVED');
           const previous = await tx.idempotencyRecord.findUnique({ where: { scope_key: { scope, key } } });
           if (previous) {
             await this.assertRequestHash(previous.requestHash, canonicalRequest);
