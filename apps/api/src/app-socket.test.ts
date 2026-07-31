@@ -55,7 +55,10 @@ function event<T>(socket: ClientSocket, name: string, predicate: (payload: T) =>
   });
 }
 
-async function socketHarness(authorizeRoomSession: (auth: AuthenticatedSession, roomId: string) => Promise<unknown>) {
+async function socketHarness(
+  authorizeRoomSession: (auth: AuthenticatedSession, roomId: string) => Promise<unknown>,
+  extraHeaders: Record<string, string> = {},
+) {
   const accounts = {
     authenticate: vi.fn(async (token: string) => {
       if (token !== 'cookie-token') throw new Error('AUTH_REQUIRED');
@@ -74,7 +77,7 @@ async function socketHarness(authorizeRoomSession: (auth: AuthenticatedSession, 
   openApps.push(app);
   const address = await app.listen({ host: '127.0.0.1', port: 0 });
   const client = createSocketClient(address, {
-    extraHeaders: { Cookie: `${sessionCookieName}=cookie-token` },
+    extraHeaders: { Cookie: `${sessionCookieName}=cookie-token`, ...extraHeaders },
     forceNew: true,
     reconnection: false,
     transports: ['websocket'],
@@ -85,6 +88,26 @@ async function socketHarness(authorizeRoomSession: (auth: AuthenticatedSession, 
 }
 
 describe('Socket.IO room subscription ownership', () => {
+  it('uses only the nearest forwarded hop as the production Socket client IP', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousAppOrigin = process.env.APP_ORIGIN;
+    process.env.NODE_ENV = 'production';
+    process.env.APP_ORIGIN = 'https://game.example.com';
+    try {
+      const { accounts } = await socketHarness(
+        async () => ({ membership: { player: { id: 'player-1' }, isBank: false } }),
+        { 'X-Forwarded-For': '198.51.100.44, 203.0.113.25' },
+      );
+
+      expect(accounts.authenticate).toHaveBeenCalledWith('cookie-token', '203.0.113.25');
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousAppOrigin === undefined) delete process.env.APP_ORIGIN;
+      else process.env.APP_ORIGIN = previousAppOrigin;
+    }
+  });
+
   it('targets fund and rejection Toasts only to their delivery Session channels', async () => {
     const createNotifier = (appModule as typeof appModule & {
       createPostCommitToastNotifier?: (...args: never[]) => {

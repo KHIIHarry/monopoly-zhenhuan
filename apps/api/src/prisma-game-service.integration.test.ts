@@ -936,16 +936,23 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect(await firstDb.idempotencyRecord.count({ where: { scope: `room:${room.id}:add-skip-turns` } })).toBe(0);
   });
 
-  it('rejects manual skip consumption in electronic mode', async () => {
+  it('allows bank skip consumption in electronic mode', async () => {
     const room = await first.createRoom({ name: '电子停轮人工扣减', initialBalance: 5000, diceMode: 'ELECTRONIC' });
     const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
     await first.joinPlayer(room.code, '乙', 'huashifei');
     const bank = await first.joinBank(room.code, '国库');
     await first.start(room.id, bank.token, 'start-room');
-    await first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'electronic-skip-entry', '测试电子模式人工停轮');
+    const entry = await first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'electronic-skip-entry', '测试电子模式人工停轮');
 
-    await expect(first.consumeSkip(room.id, a.playerId, 1, bank.token, 'manual-electronic-consume', '电子模式不能人工消费')).rejects.toThrow('PHYSICAL_DICE_MODE_REQUIRED');
-    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ remainingSkipTurns: 1 });
+    const consumed = await first.consumeSkip(room.id, a.playerId, 1, bank.token, 'manual-electronic-consume', '电子模式银行人工扣减');
+
+    expect(consumed).toMatchObject({ remainingSkipTurns: 0, stateVersion: expect.any(Number) });
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ remainingSkipTurns: 0 });
+    expect(await firstDb.skipTurnEntry.findUniqueOrThrow({ where: { id: entry.id } })).toMatchObject({ remainingCount: 0 });
+    expect(await firstDb.auditLog.findFirstOrThrow({ where: { roomId: room.id, action: 'MANUAL_SKIP_TURNS_CHANGE', reason: '电子模式银行人工扣减' } })).toMatchObject({
+      beforeJson: { remainingSkipTurns: 1 },
+      afterJson: { remainingSkipTurns: 0 },
+    });
   });
 
   it('replays concurrent same-key transfers and rejects a changed payload', async () => {
@@ -2050,9 +2057,86 @@ integration('PrismaGameService PostgreSQL transactions', () => {
 
     expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: false });
     const payment = await first.payToll(room.id, a.playerId, '甘露寺', 'snapshot-toll-payment');
+    await firstDb.idempotencyRecord.update({
+      where: { scope_key: { scope: `landing:${landing.id}:toll`, key: 'settled' } },
+      data: { response: { transactionId: '', requestKey: 'snapshot-toll-payment' } },
+    });
     expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: true });
     await first.reverseLatest(room.id, payment.id, bank.token, '测试冲正', 'reverse-snapshot-toll');
     expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: false });
+  });
+
+  it('loads visible toll settlement states with a constant number of idempotency queries', async () => {
+    const { room, a } = await physicalRoom();
+    const player = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId }, select: { memberId: true } });
+    const bankActor = state.roomBanks.get(room.id);
+    if (!bankActor) throw new Error('Missing bank actor for snapshot query test');
+    const bankMember = await firstDb.roomMembership.findUniqueOrThrow({
+      where: { roomId_accountId: { roomId: room.id, accountId: bankActor.accountId } },
+      select: { id: true },
+    });
+    const settlements = Array.from({ length: 10 }, (_, index) => ({
+      landingId: `snapshot-query-landing-${randomUUID()}`,
+      transactionId: `snapshot-query-transaction-${randomUUID()}`,
+      requestKey: `snapshot-query-request-${randomUUID()}`,
+      usesFallbackRecord: index % 2 === 1,
+    }));
+    await firstDb.landingEvent.createMany({
+      data: settlements.map(({ landingId }) => ({
+        id: landingId,
+        roomId: room.id,
+        playerId: a.playerId,
+        spaceType: 'OTHER',
+        status: 'CONFIRMED',
+        plotResolved: true,
+        declaredBy: player.memberId,
+        confirmedBy: bankMember.id,
+        confirmedAt: new Date(),
+      })),
+    });
+    await firstDb.gameTransaction.createMany({
+      data: settlements.map(({ landingId, transactionId }) => ({
+        id: transactionId,
+        roomId: room.id,
+        type: 'TOLL',
+        metadata: { landingId },
+      })),
+    });
+    await firstDb.idempotencyRecord.createMany({
+      data: settlements.flatMap(({ landingId, transactionId, requestKey, usesFallbackRecord }) => [
+        {
+          scope: `landing:${landingId}:toll`,
+          key: 'settled',
+          response: usesFallbackRecord ? { requestKey } : { transactionId },
+        },
+        ...(usesFallbackRecord ? [{
+          scope: `room:${room.id}:toll`,
+          key: requestKey,
+          response: { id: transactionId },
+        }] : []),
+      ]),
+    });
+
+    const observedQueries: string[] = [];
+    const observedDb = new PrismaClient({
+      datasources: { db: { url: url! } },
+      log: [{ emit: 'event', level: 'query' }],
+    });
+    observedDb.$on('query', ({ query }) => observedQueries.push(query));
+    try {
+      const snapshot = await new PrismaGameService(observedDb).snapshot(bankActor, room.id, 'BANK');
+      expect(snapshot.landings.filter((landing) => settlements.some(({ landingId }) => landingId === landing.id)))
+        .toHaveLength(settlements.length);
+      expect(snapshot.landings
+        .filter((landing) => settlements.some(({ landingId }) => landingId === landing.id))
+        .every((landing) => landing.tollSettled)).toBe(true);
+    } finally {
+      await observedDb.$disconnect();
+    }
+
+    const idempotencyReads = observedQueries.filter((query) =>
+      query.startsWith('SELECT') && query.includes('"IdempotencyRecord"'));
+    expect(idempotencyReads).toHaveLength(2);
   });
 
   it('records nonzero initial balances in the immutable ledger', async () => {
@@ -2189,6 +2273,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
   it('exposes the configured companion reward in snapshots only while skills are enabled', async () => {
     const room = await first.createRoom({ name: '伙伴卡技能快照', initialBalance: 5000, diceMode: 'PHYSICAL' });
     const zhenhuan = await first.joinPlayer(room.code, '甄嬛', 'zhenhuan');
+    await first.joinPlayer(room.code, '乙', 'huashifei');
     const bank = await first.joinBank(room.code, '国库');
     await first.start(room.id, bank.token, 'start-companion-snapshot-room');
 

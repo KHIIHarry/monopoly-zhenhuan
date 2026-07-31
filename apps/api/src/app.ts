@@ -1,5 +1,6 @@
 import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
+import { isIP } from 'node:net';
 import { Server } from 'socket.io';
 import { z } from 'zod';
 import { prisma } from '@zhenhuan/database';
@@ -83,9 +84,21 @@ export type BuildApiAppOptions = {
   notifier?: ApiNotifier;
 };
 
+function socketClientIp(
+  remoteAddress: string,
+  forwardedFor: string | string[] | undefined,
+  trustOneProxy: boolean,
+) {
+  if (!trustOneProxy) return remoteAddress;
+  const value = Array.isArray(forwardedFor) ? forwardedFor.at(-1) : forwardedFor;
+  const candidate = value?.split(',').at(-1)?.trim();
+  return candidate && isIP(candidate) ? candidate : remoteAddress;
+}
+
 export async function buildApiApp(options: BuildApiAppOptions = {}) {
 const database = options.database ?? prisma;
-const app = Fastify({ logger: options.logger ?? true });
+const trustOneProxy = process.env.NODE_ENV === 'production';
+const app = Fastify({ logger: options.logger ?? true, trustProxy: trustOneProxy ? 1 : false });
 const { originAllowed, secureCookie } = loadOriginPolicy(process.env);
 app.addHook('onRequest', async (request, reply) => {
   if (request.headers.origin && !originAllowed(request.headers.origin)) return reply.code(403).send({ error: 'ORIGIN_NOT_ALLOWED' });
@@ -147,7 +160,12 @@ const removeSessionFromRoom = (sessionId: string, roomId: string) => {
 
 io.use((socket, next) => {
   const rawToken = cookieToken(socket.handshake.headers.cookie);
-  void accounts.authenticate(rawToken, socket.handshake.address)
+  const clientIp = socketClientIp(
+    socket.handshake.address,
+    socket.handshake.headers['x-forwarded-for'],
+    trustOneProxy,
+  );
+  void accounts.authenticate(rawToken, clientIp)
     .then((authenticated) => {
       socket.data.auth = authenticated;
       next();

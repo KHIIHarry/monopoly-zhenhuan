@@ -35,14 +35,16 @@ COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build /app/甄嬛传大富翁_master-data.json ./甄嬛传大富翁_master-data.json
 
 FROM runtime AS api
+USER node
 EXPOSE 4000
 CMD ["node", "apps/api/dist/server.js"]
 
 FROM runtime AS web
-COPY --from=build /app/apps/web/package.json ./apps/web/package.json
-COPY --from=build /app/apps/web/.next ./apps/web/.next
-COPY --from=build /app/apps/web/public ./apps/web/public
-COPY --from=build /app/apps/web/next.config.ts ./apps/web/next.config.ts
+COPY --chown=node:node --from=build /app/apps/web/package.json ./apps/web/package.json
+COPY --chown=node:node --from=build /app/apps/web/.next ./apps/web/.next
+COPY --chown=node:node --from=build /app/apps/web/public ./apps/web/public
+COPY --chown=node:node --from=build /app/apps/web/next.config.ts ./apps/web/next.config.ts
 
+USER node
 EXPOSE 3000
 CMD ["npm", "run", "start", "-w", "@zhenhuan/web"]

@@ -63,21 +63,16 @@ HTTP 和 Socket.IO 都只从该 Cookie 认证。退出最早设备、退出其�
 
 ## 本地启动
 
-要求 Node.js 22+、npm 10+、Docker 和系统 Google Chrome（桌面 Chromium Playwright 项目使用 `channel: chrome`）。
+运行系统只要求 Docker Desktop，或 Docker Engine 与 Compose 插件。宿主机 Node.js、npm 和系统 Google Chrome 仅用于 lint、类型检查、测试与构建，不用于启动 Web 或 API。
 
 ```bash
-cp .env.example .env
-set -a
-. ./.env
-set +a
-
-docker compose up -d postgres
-npm install
-npm run db:generate
-npm run db:migrate
-npm run db:seed
-npm run dev
+test -f .env || cp .env.example .env
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 postgres api web
 ```
+
+首次启动会在容器内安装依赖、生成 Prisma Client、执行 migration、幂等 seed，并构建 API，因此需要等待日志显示 API 已开始监听。不要使用宿主机 `npm run dev`、`npm run start` 或 `npm run dev:lan` 启动服务。
 
 访问：
 
@@ -88,33 +83,35 @@ npm run dev
 
 如果本机 5432 已占用：
 
-```bash
-export POSTGRES_PORT=55432
-export DATABASE_URL='postgresql://zhenhuan:zhenhuan@localhost:55432/zhenhuan?schema=public'
-docker compose up -d postgres
-npm run db:migrate
-npm run db:seed
-npm run dev
+```dotenv
+POSTGRES_PORT=55432
+DATABASE_URL=postgresql://zhenhuan:zhenhuan@localhost:55432/zhenhuan?schema=public
 ```
+
+保存 `.env` 后重新执行 `docker compose up -d`。API 容器始终通过 Compose 内部网络访问 `postgres:5432`；这里的宿主机端口只用于本机数据库工具。
 
 ## 局域网 HTTP 启动
 
-该模式只适用于同一可信 Wi-Fi 内的实体桌游设备。数据库准备步骤与“本地启动”相同；完成后停止正在运行的普通开发服务，并执行：
+该模式只适用于同一可信 Wi-Fi 内的实体桌游设备。先确认主持电脑的 RFC1918 私网 IPv4；以下示例使用 `192.168.31.196`。在 `.env` 中设置：
 
-```bash
-npm run dev:lan
+```dotenv
+APP_BIND_ADDRESS=0.0.0.0
+LAN_HTTP_ORIGIN=http://192.168.31.196:3000
+NEXT_PUBLIC_API_URL=http://192.168.31.196:4000
+NEXT_ALLOWED_DEV_ORIGINS=192.168.31.196
 ```
 
-命令会优先检测常见 Wi-Fi 网卡上的 RFC1918 私有 IPv4，启动 H5 与 API，并打印玩家访问地址。例如电脑地址为 `192.168.31.196` 时，玩家手机和平板访问：
+保留 `POSTGRES_BIND_ADDRESS=127.0.0.1`，不要把数据库开放到局域网。然后只通过 Docker Compose 重建 Web 与 API：
+
+```bash
+docker compose up -d --force-recreate api web
+docker compose ps
+```
+
+玩家手机和平板访问：
 
 ```text
 http://192.168.31.196:3000
-```
-
-如果电脑同时存在虚拟网卡、多个私网地址，或自动选择的地址不正确，可明确指定：
-
-```bash
-LAN_HOST=192.168.31.196 npm run dev:lan
 ```
 
 局域网模式只允许 `http://192.168.31.196:3000` 这样的精确页面来源访问 API；相邻 IP、其他端口和其他私网来源仍会被拒绝。H5 会自动连接同一电脑的 `4000` 端口，玩家不需要单独打开 API 地址。
@@ -122,22 +119,23 @@ LAN_HOST=192.168.31.196 npm run dev:lan
 使用要求与排障：
 
 - 电脑和所有玩家设备必须处于同一 Wi-Fi，且路由器未启用客户端隔离。
-- macOS 防火墙首次询问 Node.js 是否允许入站连接时选择允许。
-- 如果休眠、切换 Wi-Fi 或 DHCP 续租造成 IP 地址变化，请停止命令并重新运行 `npm run dev:lan`，再把新地址发给玩家。
+- macOS 防火墙首次询问 Docker Desktop 是否允许入站连接时选择允许。
+- 如果休眠、切换 Wi-Fi 或 DHCP 续租造成 IP 地址变化，请更新 `.env` 中的 `LAN_HTTP_ORIGIN`、`NEXT_PUBLIC_API_URL` 和 `NEXT_ALLOWED_DEV_ORIGINS`，再执行 `docker compose up -d --force-recreate api web`，并把新地址发给玩家。
 - 需要长期保持地址不变时，在路由器 DHCP 设置中为主持电脑保留地址。
 - HTTP 流量未加密，只能用于可信局域网；不得将 `3000`、`4000` 或 `5432` 映射到公网。
-- `LAN_HTTP_ORIGIN` 由启动器自动生成，仅用于非生产环境；生产环境设置它会导致 API 拒绝启动。
+- `LAN_HTTP_ORIGIN` 仅用于非生产环境；生产环境设置它会导致 API 拒绝启动。
 
 ## 超管初始化
 
-seed 只在显式提供以下变量时幂等创建首个超级管理员：
+seed 只在 `.env` 显式提供以下变量时幂等创建首个超级管理员：
 
-```bash
-export BOOTSTRAP_ADMIN_USERNAME='admin'
-export BOOTSTRAP_ADMIN_PASSWORD='<至少 8 位的强密码>'
-export BOOTSTRAP_ADMIN_DISPLAY_NAME='超级管理员'
-npm run db:seed
+```dotenv
+BOOTSTRAP_ADMIN_USERNAME=admin
+BOOTSTRAP_ADMIN_PASSWORD=<至少 12 位的强密码>
+BOOTSTRAP_ADMIN_DISPLAY_NAME=超级管理员
 ```
+
+首次 `docker compose up -d` 会自动执行 seed；已运行的环境可执行 `docker compose exec api npm run db:seed` 重新运行幂等 seed。
 
 之后由该账号在 H5 超管后台创建普通账号、设置 `canCreateRoom`、管理设备和房间。系统不使用超管 Bearer Token 或银行授权码。
 
@@ -146,15 +144,6 @@ npm run db:seed
 仅当配置中的超级管理员忘记密码、无法登录后台时，可信服务器上的运维人员可交互式重置其密码。执行前必须正确配置 `DATABASE_URL` 和 `SUPER_ADMIN_USERNAMES`；后者只列出用户名，不创建账号，也不应包含空用户名或重复用户名。
 
 命令只接受用户名，绝不接受 `--password` 或其他明文密码参数。它会在可信终端隐藏输入新密码并再次确认；密码长度必须为 8 至 200 个字符。请勿通过 SSH 命令文本、管道、shell 历史、自动化变量或日志传递密码。
-
-本地开发环境：
-
-```bash
-set -a
-. ./.env
-set +a
-npm run admin:reset-password -- --username admin
-```
 
 开发 Docker Compose 环境：
 
@@ -176,13 +165,10 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml \
 
 ## Migration 与 seed
 
-部署和升级固定按以下顺序运行：
+数据库初始化与升级只随 Docker Compose 执行，不在宿主机直接运行数据库 npm 命令：
 
-```bash
-npm run db:generate
-npm run db:migrate
-npm run db:seed
-```
+- 本地 `docker compose up -d` 由 API 容器依次生成 Prisma Client、部署 migration、执行幂等 seed，再启动 API。
+- 生产 `docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d` 先由一次性 `migrate` 容器执行 migration 与 seed；该容器成功退出后 API 才启动。
 
 Prisma schema 和 forward-only migrations 位于 `packages/database/prisma/`。seed 从 `甄嬛传大富翁_master-data.json` 校验并写入 26 块地产和五名人物；不会通过清空数据库处理兼容问题。
 
@@ -221,8 +207,8 @@ cd /opt
 sudo git clone <repository-url> zhenhuan-monopoly
 sudo chown -R "$USER" /opt/zhenhuan-monopoly
 
-sudo install -d -m 700 /secure
-sudo install -d -m 700 /secure/backups
+sudo install -d -m 700 -o "$USER" -g "$(id -gn)" /secure
+sudo install -d -m 700 -o "$USER" -g "$(id -gn)" /secure/backups
 ```
 
 将证书和私钥复制或挂载到宿主机的固定绝对路径。例如使用 Certbot 时通常为：
@@ -232,16 +218,22 @@ sudo install -d -m 700 /secure/backups
 /etc/letsencrypt/live/game.example.com/privkey.pem
 ```
 
-Docker 守护进程必须有读取这两个文件的权限。证书更新后，执行下文的 Nginx 重启命令以加载新证书。
+Docker 守护进程必须有读取这两个文件的权限。证书更新后，执行下文的 Nginx 单服务重建命令以重新挂载新证书。
 
 ### 生产环境文件
 
 创建受保护的 `/secure/zhenhuan.prod.env`。替换所有示例密码、域名和证书路径；不要使用尖括号中的示例文本作为实际值。
 
+数据库密码和引导管理员密码应分别执行两次 `openssl rand -hex 24` 生成，分别使用两次独立输出。十六进制结果满足密码长度要求，也不会被 Compose 当作变量插值。
+
 ```bash
-sudo touch /secure/zhenhuan.prod.env
-sudo chmod 600 /secure/zhenhuan.prod.env
-sudoedit /secure/zhenhuan.prod.env
+openssl rand -hex 24
+openssl rand -hex 24
+```
+
+```bash
+test -f /secure/zhenhuan.prod.env || sudo install -m 600 -o "$USER" -g "$(id -gn)" /dev/null /secure/zhenhuan.prod.env
+nano /secure/zhenhuan.prod.env
 ```
 
 文件内容如下。`DATABASE_URL` 中的数据库密码必须与 `POSTGRES_PASSWORD` 相同；如果密码包含 `@`、`:`、`/`、`?`、`#` 或 `%`，必须先进行 URL 编码。`APP_ORIGIN` 和 `NEXT_PUBLIC_API_URL` 必须使用同一个公网 HTTPS 地址，且不带末尾斜杠。
@@ -254,6 +246,7 @@ DATABASE_URL=postgresql://zhenhuan:replace-with-a-strong-database-password@postg
 
 APP_ORIGIN=https://game.example.com
 NEXT_PUBLIC_API_URL=https://game.example.com
+APP_HOST=game.example.com
 
 BOOTSTRAP_ADMIN_USERNAME=admin
 BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-strong-bootstrap-password
@@ -264,7 +257,7 @@ TLS_CERT_PATH=/etc/letsencrypt/live/game.example.com/fullchain.pem
 TLS_KEY_PATH=/etc/letsencrypt/live/game.example.com/privkey.pem
 ```
 
-`migrate` 服务会在首次启动和每次需要重新创建服务时执行 Prisma migration 与幂等 seed。首次超管仅在提供 `BOOTSTRAP_ADMIN_*` 变量时创建；完成部署后，请通过 H5 超管后台创建其他账号。
+`APP_HOST` 只填写证书对应的域名，不带协议、端口、路径或尾斜杠。`migrate` 服务会在首次启动和每次需要重新创建服务时执行 Prisma migration 与幂等 seed。首次超管仅在提供 `BOOTSTRAP_ADMIN_*` 变量时创建；完成部署后，请通过 H5 超管后台创建其他账号。
 
 ### 首次部署
 
@@ -284,9 +277,11 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml u
 先确认所有长期服务均为运行状态，且 `migrate` 已成功退出：
 
 ```bash
-docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml ps
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml ps --all
 docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml logs --tail=100 migrate api web nginx
-curl --fail https://game.example.com/api/health
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml exec -T api wget -qO- http://127.0.0.1:4000/health
+curl -I https://game.example.com/
+curl -s -o /dev/null -w '%{http_code}\n' https://game.example.com/api/auth/me
 ```
 
 健康检查应返回成功状态。然后用浏览器打开 `https://game.example.com`，验证登录、一个 API 请求以及实时房间更新。若服务未启动，先查看对应日志；不要通过直接访问 `:3000`、`:4000` 或 `:5432` 排障，因为生产 Compose 不发布这些端口。
@@ -302,11 +297,11 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml l
 docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml logs -f nginx
 ```
 
-重启单个服务，或在证书更新后重新加载 Nginx：
+重启 API，或在证书更新后只重建 Nginx：
 
 ```bash
 docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml restart api
-docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml restart nginx
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
 ```
 
 停止应用但保留数据库数据：
@@ -327,7 +322,7 @@ git pull --ff-only
 docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml build
 docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d
 docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml ps
-curl --fail https://game.example.com/api/health
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml exec -T api wget -qO- http://127.0.0.1:4000/health
 ```
 
 代码回退可以检出上一份已验证的 Git 提交，再次执行构建与 `up -d`。数据库迁移是 forward-only：如果新版本已执行迁移，不能仅依靠代码回退恢复旧数据库结构；需要使用升级前创建的备份，并在维护窗口内制定单独的恢复方案。
@@ -383,13 +378,18 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml e
 
 ## 测试
 
+新克隆的工作区先执行 `npm ci` 安装宿主机检查工具；这不会启动 Web 或 API。运行系统仍只使用 Docker Compose。
+
 ```bash
+npm ci
 npm run lint
 npm run typecheck
 npm run test
 npm run build
-npm run test:e2e
+PLAYWRIGHT_EXTERNAL_STACK=1 npm run test:e2e
 ```
+
+端到端测试固定复用 Docker Compose 在 `3000` 端口运行的 Web；先确认 `docker compose ps` 中 Web 与 API 正常，不要让 Playwright 另起宿主机服务或改用其他端口。
 
 PostgreSQL 集成测试必须使用独立数据库，数据库名以 `_test` 结尾；如果同时设置 `DATABASE_URL`，测试数据库不得解析为同一主机、端口和数据库名。测试会创建隔离 schema，不能把开发或生产库配置为 `TEST_DATABASE_URL`。
 

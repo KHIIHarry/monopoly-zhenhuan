@@ -16,7 +16,7 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:integration": "node scripts/require-test-database.mjs && vitest run apps/api/src/prisma-game-service.integration.test.ts",
-    "test:e2e": "playwright test",
+    "test:e2e": "PLAYWRIGHT_EXTERNAL_STACK=1 playwright test",
     "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema packages/database/prisma/schema.prisma",
     "db:seed": "npm run build -w @zhenhuan/shared && tsx packages/database/src/seed.ts",
@@ -29,13 +29,13 @@
     "concurrently": "latest",
     "eslint": "latest",
     "globals": "latest",
-    "prisma": "6.19.0",
+    "prisma": "6.19.3",
     "tsx": "latest",
     "typescript": "latest",
     "typescript-eslint": "latest",
     "vitest": "latest"
   },
   "dependencies": {
-    "@prisma/client": "^6.19.0"
+    "@prisma/client": "6.19.3"
   }
 }

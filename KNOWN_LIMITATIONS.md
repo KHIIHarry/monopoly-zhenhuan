@@ -16,6 +16,7 @@
 - 不保存断线期间的增量事件，也不把 Socket 当作历史消息队列。REST snapshot 始终是恢复依据。
 - 玩家离线只表示 Socket 不在线，不释放人物、银行席位或房间成员关系。
 - 生产必须使用 HTTPS/WSS；HTTP 公网部署无法使用始终为 `Secure` 的 Session Cookie。
+- 截至 2026-08-01，`npm audit --omit=dev` 仍报告 Next.js 内置 PostCSS 与可选 Sharp 链上的 3 个 high。当前 H5 不接收用户提供的 CSS、source map 或图片处理输入，也未使用 `next/image`；npm 提供的自动方案会把 Next 破坏性降级到 9.3.3，因此未执行 `audit fix --force`。升级 Next 或其兼容依赖后必须重新审计并移除此项。
 
 ## 功能边界
 

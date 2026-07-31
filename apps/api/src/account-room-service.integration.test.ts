@@ -1140,6 +1140,29 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     });
   });
 
+  it('reactivates a retained Player only after a rejoined member selects a character again', async () => {
+    const admin = await createAuth({ superAdmin: true });
+    const creator = await createAuth({ canCreateRoom: true });
+    const member = await createAuth({ displayName: '重新入席成员' });
+    const [firstCharacter, nextCharacter] = await characters(2);
+    const room = await createRoom(creator.auth, 'Removed player reselects');
+    const joined = await service.joinRoom(member.auth, room.id, undefined, 'removed-player-first-join');
+    const selected = await service.selectCharacter(member.auth, room.id, firstCharacter!.id, 'removed-player-first-character');
+    const initialLedgerCount = await db.ledgerEntry.count({ where: { roomId: room.id, playerId: selected.player.id, type: 'INITIAL_BALANCE' } });
+
+    await service.removeAdminRoomMember(admin.auth, room.id, joined.id, 'remove-seated-member');
+    await expect(service.joinRoom(member.auth, room.id, undefined, 'removed-player-rejoin'))
+      .resolves.toMatchObject({ id: joined.id, status: 'ACTIVE', characterId: null, isBank: false });
+    expect(await db.player.findUniqueOrThrow({ where: { id: selected.player.id } })).toMatchObject({ status: 'LEFT', characterId: null });
+
+    const reselected = await service.selectCharacter(member.auth, room.id, nextCharacter!.id, 'removed-player-next-character');
+
+    expect(reselected.player).toMatchObject({ id: selected.player.id, status: 'ACTIVE', characterId: nextCharacter!.id });
+    expect(await db.player.findUniqueOrThrow({ where: { id: selected.player.id } })).toMatchObject({ status: 'ACTIVE', characterId: nextCharacter!.id });
+    expect(await db.player.count({ where: { roomId: room.id } })).toBe(1);
+    expect(await db.ledgerEntry.count({ where: { roomId: room.id, playerId: selected.player.id, type: 'INITIAL_BALANCE' } })).toBe(initialLedgerCount);
+  });
+
   it('replays one concurrent join winner for the same account, room, key, and payload', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const joiner = await createAuth();
@@ -1288,6 +1311,30 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.player.findUniqueOrThrow({ where: { id: playerA.player.id } })).toMatchObject({ characterId: freeCharacter!.id });
     expect(await db.player.findUniqueOrThrow({ where: { id: playerB.player.id } })).toMatchObject({ characterId: targetCharacter!.id });
     expect(await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: mutualRoom.id, accountId: mutualA.account.id } } })).toMatchObject({ isBank: true, activeSessionId: mutualA.auth.session.id });
+  });
+
+  it('reactivates a retained Player when a rejoined member acquires a character by role swap', async () => {
+    const admin = await createAuth({ superAdmin: true });
+    const creator = await createAuth({ canCreateRoom: true });
+    const requester = await createAuth({ displayName: '重新换角成员' });
+    const target = await createAuth({ displayName: '在席目标成员' });
+    const [requesterCharacter, targetCharacter] = await characters(2);
+    const room = await createRoom(creator.auth, 'Removed player role swap');
+    const requesterMembership = await service.joinRoom(requester.auth, room.id, undefined, 'removed-swap-requester-join');
+    await service.joinRoom(target.auth, room.id, undefined, 'removed-swap-target-join');
+    const requesterSeat = await service.selectCharacter(requester.auth, room.id, requesterCharacter!.id, 'removed-swap-requester-character');
+    await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'removed-swap-target-character');
+    const initialLedgerCount = await db.ledgerEntry.count({ where: { roomId: room.id, playerId: requesterSeat.player.id, type: 'INITIAL_BALANCE' } });
+
+    await service.removeAdminRoomMember(admin.auth, room.id, requesterMembership.id, 'remove-swap-requester');
+    await service.joinRoom(requester.auth, room.id, undefined, 'removed-swap-requester-rejoin');
+    const requested = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'removed-swap-request');
+    await service.acceptRoleSwap(target.auth, requested.id, 'removed-swap-accept');
+
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: requesterMembership.id } })).toMatchObject({ status: 'ACTIVE', characterId: targetCharacter!.id });
+    expect(await db.player.findUniqueOrThrow({ where: { id: requesterSeat.player.id } })).toMatchObject({ status: 'ACTIVE', characterId: targetCharacter!.id });
+    expect(await db.player.count({ where: { roomId: room.id, memberId: requesterMembership.id } })).toBe(1);
+    expect(await db.ledgerEntry.count({ where: { roomId: room.id, playerId: requesterSeat.player.id, type: 'INITIAL_BALANCE' } })).toBe(initialLedgerCount);
   });
 
   it('requires distinct target and bank actions in playing swaps and never grants playing-time assets', async () => {

@@ -1418,7 +1418,10 @@ export class AccountRoomService {
         await tx.roomMembership.update({ where: { id: membership.id }, data: { characterId } });
         let player = membership.player;
         if (player) {
-          player = await tx.player.update({ where: { id: player.id }, data: { characterId, ...allocation } });
+          player = await tx.player.update({
+            where: { id: player.id },
+            data: { characterId, status: player.status === 'LEFT' ? 'ACTIVE' : player.status, ...allocation },
+          });
         } else {
           player = await tx.player.create({ data: {
             roomId,
@@ -1718,7 +1721,13 @@ export class AccountRoomService {
     }
 
     await tx.roomMembership.update({ where: { id: requester.id }, data: { characterId: request.targetCharacterId } });
-    await tx.player.update({ where: { id: requesterPlayer.id }, data: { characterId: request.targetCharacterId } });
+    await tx.player.update({
+      where: { id: requesterPlayer.id },
+      data: {
+        characterId: request.targetCharacterId,
+        status: requesterPlayer.status === 'LEFT' ? 'ACTIVE' : requesterPlayer.status,
+      },
+    });
     if (request.requesterCharacterId) {
       const targetPlayer = target.player ?? fail('SWAP_CONFLICT');
       await tx.roomMembership.update({ where: { id: target.id }, data: { characterId: request.requesterCharacterId } });

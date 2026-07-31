@@ -1,12 +1,24 @@
 server {
+    listen 80 default_server;
+    server_name "";
+    return 444;
+}
+
+server {
     listen 80;
-    server_name _;
-    return 301 https://$host$request_uri;
+    server_name ${APP_HOST};
+    return 301 https://${APP_HOST}$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name "";
+    ssl_reject_handshake on;
 }
 
 server {
     listen 443 ssl;
-    server_name _;
+    server_name ${APP_HOST};
 
     ssl_certificate /etc/nginx/tls/fullchain.pem;
     ssl_certificate_key /etc/nginx/tls/privkey.pem;
@@ -16,7 +28,7 @@ server {
         proxy_pass http://api:4000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -29,7 +41,7 @@ server {
         proxy_pass http://api:4000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
@@ -37,7 +49,7 @@ server {
         proxy_pass http://web:3000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }

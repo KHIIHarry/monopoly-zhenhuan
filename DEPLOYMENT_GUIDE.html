@@ -1,0 +1,1105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#721f2b">
+  <title>甄嬛传大富翁 H5 - 完整部署教程</title>
+  <style>
+    :root {
+      --ivory: #f7f3ea;
+      --paper: #fffdfa;
+      --ink: #241b1d;
+      --muted: #6b6262;
+      --line: #d9d1c3;
+      --red: #7a2130;
+      --red-dark: #50141f;
+      --gold: #b58a31;
+      --gold-soft: #eee0b8;
+      --green: #25695c;
+      --green-soft: #e5f1ed;
+      --blue: #315c78;
+      --danger: #a42c38;
+      --code: #191719;
+      --shadow: 0 12px 34px rgba(53, 31, 25, 0.08);
+      --content: 1180px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--ivory);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.72;
+      letter-spacing: 0;
+    }
+    button, input { font: inherit; }
+    a { color: var(--red); text-underline-offset: 3px; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    :focus-visible { outline: 3px solid rgba(181, 138, 49, 0.55); outline-offset: 3px; }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      left: 12px;
+      top: 12px;
+      transform: translateY(-150%);
+      padding: 10px 14px;
+      background: var(--paper);
+      border: 1px solid var(--gold);
+      border-radius: 6px;
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .masthead {
+      color: #fff;
+      background: var(--red-dark);
+      border-bottom: 5px solid var(--gold);
+    }
+    .masthead-inner {
+      width: min(100% - 32px, var(--content));
+      margin: 0 auto;
+      padding: 54px 0 46px;
+    }
+    .eyebrow {
+      margin: 0 0 12px;
+      color: #efdca9;
+      font-size: 0.82rem;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 880px;
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4.35rem);
+      line-height: 1.08;
+      font-weight: 820;
+      letter-spacing: 0;
+    }
+    .lead {
+      max-width: 790px;
+      margin: 20px 0 0;
+      color: #f3e9e2;
+      font-size: clamp(1rem, 2vw, 1.18rem);
+    }
+    .release-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 26px;
+    }
+    .release-line span {
+      padding: 7px 10px;
+      color: #fff7e5;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 4px;
+      font-size: 0.84rem;
+    }
+
+    .mode-strip {
+      background: var(--paper);
+      border-bottom: 1px solid var(--line);
+    }
+    .mode-strip-inner {
+      width: min(100% - 32px, var(--content));
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+    }
+    .mode-link {
+      min-height: 88px;
+      padding: 17px 20px;
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      color: var(--ink);
+      text-decoration: none;
+      border-right: 1px solid var(--line);
+    }
+    .mode-link:first-child { border-left: 1px solid var(--line); }
+    .mode-link:hover { background: #fbf5e6; }
+    .mode-index {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      flex: 0 0 38px;
+      place-items: center;
+      color: #fff;
+      background: var(--red);
+      border-radius: 50%;
+      font-weight: 800;
+    }
+    .mode-link strong, .mode-link small { display: block; }
+    .mode-link small { color: var(--muted); line-height: 1.35; }
+
+    .page-shell {
+      width: min(100% - 32px, var(--content));
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 244px minmax(0, 1fr);
+      gap: 42px;
+      padding: 38px 0 90px;
+    }
+    .toc {
+      align-self: start;
+      position: sticky;
+      top: 18px;
+      padding: 18px 0;
+      border-top: 3px solid var(--gold);
+    }
+    .toc strong { display: block; margin-bottom: 10px; }
+    .toc a {
+      display: block;
+      min-height: 42px;
+      padding: 8px 10px;
+      color: var(--muted);
+      text-decoration: none;
+      border-left: 3px solid transparent;
+    }
+    .toc a:hover, .toc a.active {
+      color: var(--red);
+      background: #fff9eb;
+      border-left-color: var(--gold);
+    }
+    .progress-box {
+      margin-top: 20px;
+      padding: 14px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    .progress-box span, .progress-box strong { display: block; }
+    .progress-box span { color: var(--muted); font-size: 0.82rem; }
+    .progress-track {
+      height: 7px;
+      margin-top: 9px;
+      overflow: hidden;
+      background: #e7e0d5;
+      border-radius: 7px;
+    }
+    .progress-bar { width: 0; height: 100%; background: var(--green); transition: width 160ms ease; }
+
+    main { min-width: 0; }
+    .chapter {
+      scroll-margin-top: 20px;
+      padding: 10px 0 50px;
+      border-bottom: 1px solid var(--line);
+    }
+    .chapter:last-child { border-bottom: 0; }
+    .chapter-kicker {
+      margin: 0 0 5px;
+      color: var(--red);
+      font-size: 0.78rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: clamp(1.65rem, 3vw, 2.45rem);
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 34px 0 10px;
+      font-size: 1.24rem;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+    h4 { margin: 0; font-size: 1rem; }
+    p { margin: 9px 0 15px; }
+    .muted { color: var(--muted); }
+
+    .callout {
+      margin: 20px 0;
+      padding: 15px 17px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--blue);
+      border-radius: 5px;
+    }
+    .callout strong { display: block; margin-bottom: 3px; }
+    .callout.warning { border-left-color: var(--gold); background: #fff9e9; }
+    .callout.danger { border-left-color: var(--danger); background: #fff4f3; }
+    .callout.success { border-left-color: var(--green); background: var(--green-soft); }
+
+    .decision-table, .trouble-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 22px 0;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+    th, td {
+      padding: 13px 15px;
+      text-align: left;
+      vertical-align: top;
+      border: 1px solid var(--line);
+    }
+    th { background: #f1eadb; font-size: 0.86rem; }
+    td strong { color: var(--red-dark); }
+
+    .architecture {
+      margin: 25px 0;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      background: var(--paper);
+      border: 1px solid var(--line);
+    }
+    .architecture div {
+      min-height: 105px;
+      padding: 16px 12px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      text-align: center;
+      border-right: 1px solid var(--line);
+    }
+    .architecture div:last-child { border-right: 0; }
+    .architecture small { color: var(--muted); }
+    .architecture strong { color: var(--red-dark); }
+
+    .checklist {
+      margin: 18px 0;
+      padding: 0;
+      list-style: none;
+      background: var(--paper);
+      border: 1px solid var(--line);
+    }
+    .checklist li { border-bottom: 1px solid var(--line); }
+    .checklist li:last-child { border-bottom: 0; }
+    .checklist label {
+      min-height: 48px;
+      padding: 10px 13px;
+      display: flex;
+      align-items: flex-start;
+      gap: 11px;
+      cursor: pointer;
+    }
+    .checklist input {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 20px;
+      margin-top: 2px;
+      accent-color: var(--green);
+    }
+    .checklist input:checked + span { color: var(--muted); text-decoration: line-through; }
+
+    .steps { counter-reset: step; margin-top: 24px; }
+    .step {
+      counter-increment: step;
+      position: relative;
+      margin: 0 0 22px;
+      padding: 22px 22px 22px 70px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      box-shadow: 0 7px 22px rgba(53,31,25,0.045);
+    }
+    .step::before {
+      content: counter(step);
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: var(--red);
+      border-radius: 50%;
+      font-weight: 800;
+    }
+    .step h3 { margin: 0 0 8px; }
+    .step p:last-child { margin-bottom: 0; }
+
+    .command {
+      margin: 15px 0;
+      overflow: hidden;
+      color: #f8f4ed;
+      background: var(--code);
+      border: 1px solid #2f2b2f;
+      border-radius: 6px;
+    }
+    .command-head {
+      min-height: 44px;
+      padding: 0 8px 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: #cfc7c9;
+      background: #242124;
+      border-bottom: 1px solid #3a3539;
+      font-size: 0.8rem;
+    }
+    .copy-button {
+      min-width: 58px;
+      min-height: 36px;
+      padding: 5px 10px;
+      color: #fff;
+      background: transparent;
+      border: 1px solid #686067;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .copy-button:hover { background: #383238; }
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      font-size: 0.86rem;
+      line-height: 1.62;
+      white-space: pre;
+    }
+    :not(pre) > code {
+      padding: 2px 5px;
+      color: var(--red-dark);
+      background: #efe7db;
+      border-radius: 3px;
+      overflow-wrap: anywhere;
+    }
+
+    .two-column {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 18px 0;
+    }
+    .info-panel {
+      padding: 17px;
+      background: var(--paper);
+      border-top: 3px solid var(--gold);
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      border-radius: 5px;
+    }
+    .info-panel p { margin-bottom: 0; }
+
+    details {
+      margin: 10px 0;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+    }
+    summary {
+      min-height: 48px;
+      padding: 11px 14px;
+      cursor: pointer;
+      font-weight: 750;
+    }
+    details > div { padding: 0 15px 15px; }
+    details[open] summary { color: var(--red); }
+
+    .status-code {
+      display: inline-flex;
+      min-width: 43px;
+      min-height: 26px;
+      padding: 2px 7px;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      background: var(--green);
+      border-radius: 4px;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+    .status-code.warn { background: var(--gold); color: #231b0b; }
+
+    .final-check {
+      padding: 24px;
+      color: #fff;
+      background: var(--green);
+      border-radius: 7px;
+    }
+    .final-check h3 { margin-top: 0; }
+    .final-check .checklist { color: var(--ink); box-shadow: none; }
+
+    .page-footer {
+      padding: 34px 16px 44px;
+      color: #d7cbca;
+      background: #2a1f21;
+      text-align: center;
+      border-top: 4px solid var(--gold);
+    }
+    .page-footer strong { color: #fff; }
+
+    .print-button {
+      min-height: 44px;
+      margin-top: 10px;
+      padding: 8px 13px;
+      color: var(--red);
+      background: var(--paper);
+      border: 1px solid var(--red);
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    @media (max-width: 900px) {
+      .page-shell { grid-template-columns: 1fr; gap: 12px; }
+      .toc {
+        position: static;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+        padding-bottom: 24px;
+      }
+      .toc strong, .progress-box { grid-column: 1 / -1; }
+      .toc a { border-left: 0; border-bottom: 2px solid transparent; }
+      .toc a:hover, .toc a.active { border-left: 0; border-bottom-color: var(--gold); }
+      .architecture { grid-template-columns: 1fr 1fr; }
+      .architecture div { border-bottom: 1px solid var(--line); }
+    }
+
+    @media (max-width: 640px) {
+      .masthead-inner { padding: 38px 0 34px; }
+      .mode-strip-inner { grid-template-columns: 1fr; }
+      .mode-link, .mode-link:first-child { min-height: 72px; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      .page-shell { width: min(100% - 22px, var(--content)); padding-top: 24px; }
+      .toc { grid-template-columns: 1fr 1fr; }
+      .architecture, .two-column { grid-template-columns: 1fr; }
+      .architecture div { min-height: 78px; border-right: 0; }
+      .step { padding: 68px 14px 17px; }
+      .step::before { top: 17px; left: 14px; }
+      .decision-table, .trouble-table { display: block; overflow-x: auto; }
+      th, td { min-width: 142px; }
+      pre { font-size: 0.79rem; }
+    }
+
+    @media print {
+      body { background: #fff; font-size: 10pt; }
+      .masthead { color: #000; background: #fff; border-bottom: 2px solid #000; }
+      .lead, .eyebrow, .release-line span { color: #000; }
+      .mode-strip, .toc, .copy-button, .print-button, .progress-box { display: none !important; }
+      .page-shell { display: block; width: 100%; padding: 20px 0; }
+      .chapter { break-inside: auto; }
+      .step, .command, details, .callout { break-inside: avoid; box-shadow: none; }
+      details > div { display: block; }
+      a { color: #000; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+
+  <header class="masthead">
+    <div class="masthead-inner">
+      <p class="eyebrow">甄嬛传大富翁 H5 · Deployment Handbook</p>
+      <h1>从一台电脑，到一桌玩家，再到公网</h1>
+      <p class="lead">面向第一次部署的人，从环境准备、数据库初始化、局域网广播，到 Linux 服务器 HTTPS 上线、备份、升级和故障排查，逐步完成整个交付。</p>
+      <div class="release-line" aria-label="文档版本信息">
+        <span>仓库：monopoly-zhenhuan</span>
+        <span>基于 main · 2026-08-01</span>
+        <span>Web 3000 · API 4000 · PostgreSQL 5432</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="mode-strip" aria-label="选择部署方式">
+    <div class="mode-strip-inner">
+      <a class="mode-link" href="#local"><span class="mode-index">1</span><span><strong>本机开发</strong><small>一台电脑调试功能</small></span></a>
+      <a class="mode-link" href="#lan"><span class="mode-index">2</span><span><strong>局域网桌游</strong><small>同一可信 Wi-Fi，推荐现场使用</small></span></a>
+      <a class="mode-link" href="#production"><span class="mode-index">3</span><span><strong>公网生产</strong><small>域名 + HTTPS + Docker Compose</small></span></a>
+    </div>
+  </nav>
+
+  <div class="page-shell">
+    <aside class="toc" aria-label="本页目录">
+      <strong>部署目录</strong>
+      <a href="#choose">先选部署方式</a>
+      <a href="#prepare">环境准备</a>
+      <a href="#local">本机开发</a>
+      <a href="#lan">局域网 HTTP</a>
+      <a href="#production">公网 HTTPS</a>
+      <a href="#operations">日常运维</a>
+      <a href="#troubleshooting">故障排查</a>
+      <a href="#acceptance">上线验收</a>
+      <div class="progress-box" aria-live="polite">
+        <span>你的检查进度</span>
+        <strong id="progress-text">0 / 0</strong>
+        <div class="progress-track" aria-hidden="true"><div class="progress-bar" id="progress-bar"></div></div>
+      </div>
+      <button class="print-button" type="button" onclick="window.print()">打印 / 导出 PDF</button>
+    </aside>
+
+    <main id="main">
+      <section class="chapter" id="choose" data-section>
+        <p class="chapter-kicker">第一步不是敲命令</p>
+        <h2>先选对部署方式</h2>
+        <p>这三种方式的安全边界完全不同。实体桌游现场优先用局域网模式；跨地域玩家必须使用公网 HTTPS，不能把开发端口直接映射到互联网。</p>
+
+        <table class="decision-table">
+          <thead><tr><th>方式</th><th>适用场景</th><th>玩家地址</th><th>安全要求</th></tr></thead>
+          <tbody>
+            <tr><td><strong>本机开发</strong></td><td>工程师自己调试</td><td><code>http://localhost:3000</code></td><td>只监听本机</td></tr>
+            <tr><td><strong>局域网 HTTP</strong></td><td>同一桌、同一可信 Wi-Fi</td><td><code>http://192.168.x.x:3000</code></td><td>不可映射公网</td></tr>
+            <tr><td><strong>公网生产</strong></td><td>远程玩家、长期运行</td><td><code>https://game.example.com</code></td><td>必须 HTTPS/WSS</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout danger">
+          <strong>公网纯 HTTP 不能作为生产方案</strong>
+          登录 Cookie 在生产环境始终使用 <code>Secure</code>。公网 HTTP 会导致登录、身份恢复和 Socket.IO 认证异常，也会明文传输密码与设备令牌。
+        </div>
+
+        <div class="architecture" aria-label="生产请求链路">
+          <div><small>玩家设备</small><strong>HTTPS / WSS</strong></div>
+          <div><small>唯一公网入口</small><strong>Nginx :443</strong></div>
+          <div><small>H5 页面</small><strong>Next.js :3000</strong></div>
+          <div><small>业务与实时通知</small><strong>Fastify :4000</strong></div>
+          <div><small>唯一持久化状态</small><strong>PostgreSQL :5432</strong></div>
+        </div>
+      </section>
+
+      <section class="chapter" id="prepare" data-section>
+        <p class="chapter-kicker">共同准备</p>
+        <h2>确认项目与环境</h2>
+        <p>项目根目录是包含根级 <code>package.json</code>、<code>docker-compose.yml</code> 和 <code>甄嬛传大富翁_master-data.json</code> 的目录。</p>
+
+        <div class="command" data-copy><div class="command-head"><span>进入项目根目录</span></div><pre><code>cd "/path/to/monopoly-zhenhuan"
+pwd
+git status --short --branch</code></pre></div>
+
+        <ul class="checklist">
+          <li><label><input type="checkbox" data-check="repo"><span>已进入 <code>monopoly-zhenhuan</code>，而不是外层资料目录。</span></label></li>
+          <li><label><input type="checkbox" data-check="node"><span>运行系统只依赖 Docker；Node.js 22+、npm 10+ 与 Chrome 仅在执行源码检查和浏览器测试时需要。</span></label></li>
+          <li><label><input type="checkbox" data-check="docker"><span>已安装 Docker Desktop，或 Linux Docker Engine + Compose 插件。</span></label></li>
+          <li><label><input type="checkbox" data-check="changes"><span>运行 <code>git status</code>，确认不会覆盖尚未提交的修改。</span></label></li>
+        </ul>
+
+        <div class="command" data-copy><div class="command-head"><span>运行环境检查</span></div><pre><code>docker --version
+docker compose version</code></pre></div>
+
+        <div class="two-column">
+          <div class="info-panel"><h4>本机建议</h4><p>macOS 或 Windows 使用 Docker Desktop。Windows 建议在 WSL2 内执行项目命令，并确保代码位于 Linux 文件系统中。</p></div>
+          <div class="info-panel"><h4>服务器建议</h4><p>Ubuntu 22.04/24.04，至少 2 vCPU、4 GB 内存和 20 GB 可用磁盘。服务器区域尽量靠近主要玩家。</p></div>
+        </div>
+      </section>
+
+      <section class="chapter" id="local" data-section>
+        <p class="chapter-kicker">模式一</p>
+        <h2>本机开发部署</h2>
+        <p>适合开发、功能验证和单机演示。PostgreSQL、API 与 Web 全部由 Docker Compose 启动；宿主机不运行 npm 开发服务器。</p>
+
+        <div class="steps">
+          <article class="step">
+            <h3>准备环境文件</h3>
+            <div class="command" data-copy><div class="command-head"><span>项目根目录</span></div><pre><code>test -f .env || cp .env.example .env</code></pre></div>
+            <p>如果 <code>.env</code> 已存在，该命令会保留原文件，不会覆盖密码和端口配置。</p>
+            <p>打开 <code>.env</code>，至少把 <code>BOOTSTRAP_ADMIN_PASSWORD</code> 改成 12 位以上强密码。不要提交 <code>.env</code>。</p>
+          </article>
+
+          <article class="step">
+            <h3>通过 Docker 启动完整系统</h3>
+            <div class="command" data-copy><div class="command-head"><span>唯一启动方式</span></div><pre><code>docker compose up -d
+docker compose ps</code></pre></div>
+            <p>首次启动会在容器内安装依赖、生成 Prisma Client、执行 migration、幂等 seed 并构建 API，耗时会比后续启动长。不要在宿主机启动 Web 或 API。</p>
+          </article>
+
+          <article class="step">
+            <h3>检查初始化日志</h3>
+            <div class="command" data-copy><div class="command-head"><span>容器状态与日志</span></div><pre><code>docker compose logs --tail=100 postgres api web</code></pre></div>
+            <p>PostgreSQL 应为 <code>healthy</code>，API 日志应显示 migration 和 seed 成功。seed 会校验并幂等写入 26 块地产、五名人物和首个超级管理员，不会清空已有房间数据。</p>
+          </article>
+
+          <article class="step">
+            <h3>验证 Web 与 API</h3>
+            <div class="command" data-copy><div class="command-head"><span>本机健康检查</span></div><pre><code>curl --fail http://localhost:3000/
+curl --fail http://localhost:4000/health</code></pre></div>
+            <p>浏览器使用 <a href="http://localhost:3000">http://localhost:3000</a>，API 健康地址为 <a href="http://localhost:4000/health">http://localhost:4000/health</a>。</p>
+            <div class="callout warning"><strong>统一使用 localhost</strong>不要在一次登录流程里混用 <code>localhost</code> 与 <code>127.0.0.1</code>，否则 Cookie 与来源校验可能不一致。</div>
+          </article>
+
+          <article class="step">
+            <h3>第一次登录和创建账号</h3>
+            <p>使用 <code>.env</code> 中的 <code>BOOTSTRAP_ADMIN_USERNAME</code> 和密码登录。进入超管后台后创建普通账号，并按需要授予“可创建房间”。系统没有游客注册入口。</p>
+          </article>
+        </div>
+
+        <ul class="checklist">
+          <li><label><input type="checkbox" data-check="local-db"><span>PostgreSQL 显示 healthy。</span></label></li>
+          <li><label><input type="checkbox" data-check="local-health"><span><code>http://localhost:4000/health</code> 返回 <code>{"ok":true}</code>。</span></label></li>
+          <li><label><input type="checkbox" data-check="local-login"><span>超级管理员可以登录并打开账号管理。</span></label></li>
+        </ul>
+        <div class="callout warning"><strong>5432 被占用时</strong>在 <code>.env</code> 中把 <code>POSTGRES_PORT</code> 改为 <code>55432</code>，并把宿主机工具使用的 <code>DATABASE_URL</code> 端口同步改为 <code>55432</code>，然后重新执行 <code>docker compose up -d</code>。API 容器仍通过内部网络访问 <code>postgres:5432</code>。</div>
+      </section>
+
+      <section class="chapter" id="lan" data-section>
+        <p class="chapter-kicker">模式二 · 实体桌游推荐</p>
+        <h2>可信局域网 HTTP 部署</h2>
+        <p>玩家手机、平板和主持电脑处于同一可信 Wi-Fi 时使用。完整系统仍由 Docker Compose 启动，但必须在 <code>.env</code> 中写入精确的 CORS、Cookie 和 API 地址。</p>
+
+        <div class="steps">
+          <article class="step">
+            <h3>确认当前 Compose 与端口</h3>
+            <p>先查看本项目容器，再确认 3000 和 4000 的监听者。若已是本项目 Compose，可直接在后续步骤重建；若是仍在执行的测试，等待测试结束，不另开端口。</p>
+            <div class="command" data-copy><div class="command-head"><span>本项目状态</span></div><pre><code>docker compose ps</code></pre></div>
+            <div class="command" data-copy><div class="command-head"><span>macOS / Linux</span></div><pre><code>lsof -nP -iTCP:3000 -sTCP:LISTEN
+lsof -nP -iTCP:4000 -sTCP:LISTEN</code></pre></div>
+            <p>如有无关遗留进程，先确认工作目录和归属再处理。不要盲目使用 <code>kill -9</code>，也不要为测试另建端口。</p>
+          </article>
+
+          <article class="step">
+            <h3>确认电脑和玩家设备在同一 Wi-Fi</h3>
+            <div class="command" data-copy><div class="command-head"><span>查看当前私网地址</span></div><pre><code># macOS 常见 Wi-Fi 网卡
+ipconfig getifaddr en0
+
+# Linux
+hostname -I</code></pre></div>
+            <p>有效示例包括 <code>192.168.31.196</code>、<code>10.0.0.8</code>。手机必须能访问这个地址，路由器不能开启客户端隔离或访客网络隔离。</p>
+          </article>
+
+          <article class="step">
+            <h3>写入精确局域网配置</h3>
+            <p>以下示例假设主持电脑地址为 <code>192.168.31.196</code>。编辑 <code>.env</code>，保留 <code>POSTGRES_BIND_ADDRESS=127.0.0.1</code>，并设置：</p>
+            <div class="command" data-copy><div class="command-head"><span>.env</span></div><pre><code>APP_BIND_ADDRESS=0.0.0.0
+LAN_HTTP_ORIGIN=http://192.168.31.196:3000
+NEXT_PUBLIC_API_URL=http://192.168.31.196:4000
+NEXT_ALLOWED_DEV_ORIGINS=192.168.31.196</code></pre></div>
+          </article>
+
+          <article class="step">
+            <h3>重建容器并实机验证</h3>
+            <div class="command" data-copy><div class="command-head"><span>Docker Compose</span></div><pre><code>docker compose up -d --force-recreate api web
+docker compose ps</code></pre></div>
+            <p>macOS 防火墙首次提示 Docker Desktop 接收入站连接时选择“允许”。至少用一台真实手机完成登录、进入房间、刷新页面和一次需要实时同步的操作。</p>
+            <div class="command" data-copy><div class="command-head"><span>主持电脑验证</span></div><pre><code>curl --fail http://192.168.31.196:3000/
+curl --fail http://192.168.31.196:4000/health</code></pre></div>
+          </article>
+        </div>
+
+        <div class="callout danger">
+          <strong>局域网模式只允许可信 Wi-Fi</strong>
+          不得在路由器或云防火墙中把 3000、4000、5432 映射到公网。HTTP 不加密，离开可信局域网就必须改用后面的公网 HTTPS 方案。
+        </div>
+
+        <ul class="checklist">
+          <li><label><input type="checkbox" data-check="lan-same-wifi"><span>所有设备处于同一 Wi-Fi，未使用访客网络。</span></label></li>
+          <li><label><input type="checkbox" data-check="lan-address"><span>玩家使用当前 <code>.env</code> 中私网 IP 对应的新地址，而不是旧书签。</span></label></li>
+          <li><label><input type="checkbox" data-check="lan-device"><span>至少一台真实手机已完成登录、刷新和房间同步。</span></label></li>
+          <li><label><input type="checkbox" data-check="lan-reservation"><span>长期使用时已在路由器为主持电脑设置 DHCP 地址保留。</span></label></li>
+        </ul>
+      </section>
+
+      <section class="chapter" id="production" data-section>
+        <p class="chapter-kicker">模式三 · 远程玩家</p>
+        <h2>公网 HTTPS 生产部署</h2>
+        <p>以下步骤以 Ubuntu 22.04/24.04、域名 <code>game.example.com</code>、项目目录 <code>/opt/zhenhuan-monopoly</code> 和密钥目录 <code>/secure</code> 为例。请把示例域名替换成你自己的域名。</p>
+
+        <div class="callout warning">
+          <strong>当前版本必须知道的两点</strong>
+          当前系统使用账号 Session Cookie 和房间内独立银行能力，不使用旧版超管或银行令牌。公网 Nginx 没有把 <code>/api/health</code> 改写到 API 的 <code>/health</code>，健康检查要在 API 容器内部执行。
+        </div>
+
+        <div class="steps">
+          <article class="step">
+            <h3>购买服务器并选择区域</h3>
+            <p>选择靠近主要玩家的区域。建议 2 vCPU、4 GB 内存、20 GB 以上 SSD。一次玩家操作通常包含 HTTP 写入、Socket 通知和快照重拉，服务器跨洲会把延迟放大到数百毫秒。</p>
+          </article>
+
+          <article class="step">
+            <h3>配置 DNS</h3>
+            <p>在域名服务商添加 A 记录：</p>
+            <div class="command" data-copy><div class="command-head"><span>DNS 示例</span></div><pre><code>类型: A
+主机记录: game
+记录值: &lt;服务器公网 IPv4&gt;
+TTL: 300</code></pre></div>
+            <p>等待解析后，在本机检查：</p>
+            <div class="command" data-copy><div class="command-head"><span>DNS 验证</span></div><pre><code>dig +short game.example.com</code></pre></div>
+            <p>如果服务器未配置 IPv6，不要添加 AAAA 记录。</p>
+          </article>
+
+          <article class="step">
+            <h3>登录服务器并设置防火墙</h3>
+            <div class="command" data-copy><div class="command-head"><span>从本机连接服务器</span></div><pre><code>ssh &lt;server-user&gt;@&lt;server-ip&gt;</code></pre></div>
+            <div class="command" data-copy><div class="command-head"><span>Ubuntu 防火墙</span></div><pre><code>sudo apt update
+sudo apt install -y ca-certificates curl git ufw nano
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+sudo ufw status</code></pre></div>
+            <p>云服务商安全组也只开放 SSH、80 和 443。不要开放 3000、4000、5432。</p>
+          </article>
+
+          <article class="step">
+            <h3>安装 Docker Engine 与 Compose</h3>
+            <div class="command" data-copy><div class="command-head"><span>Ubuntu 官方 Docker 仓库</span></div><pre><code>sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release &amp;&amp; echo \"$VERSION_CODENAME\") stable" | sudo tee /etc/apt/sources.list.d/docker.list &gt; /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker compose version</code></pre></div>
+          </article>
+
+          <article class="step">
+            <h3>取得项目源码</h3>
+            <div class="command" data-copy><div class="command-head"><span>公开仓库使用 HTTPS</span></div><pre><code>sudo mkdir -p /opt
+sudo chown "$USER" /opt
+cd /opt
+git clone https://github.com/KHIIHarry/monopoly-zhenhuan.git zhenhuan-monopoly
+cd /opt/zhenhuan-monopoly
+git status --short --branch</code></pre></div>
+            <p>如果仓库是私有的，应先给服务器配置只读 SSH Deploy Key，再使用 <code>git@github.com:KHIIHarry/monopoly-zhenhuan.git</code> 克隆。不要把个人 GitHub 密码写入服务器脚本。</p>
+          </article>
+
+          <article class="step">
+            <h3>申请 HTTPS 证书</h3>
+            <p>确保 DNS 已生效、80 端口空闲，然后用 Certbot standalone 申请证书。</p>
+            <div class="command" data-copy><div class="command-head"><span>Let's Encrypt</span></div><pre><code>sudo apt install -y certbot
+sudo certbot certonly --standalone -d game.example.com
+sudo certbot renew --dry-run</code></pre></div>
+            <p>证书通常位于：</p>
+            <div class="command" data-copy><div class="command-head"><span>证书路径</span></div><pre><code>/etc/letsencrypt/live/game.example.com/fullchain.pem
+/etc/letsencrypt/live/game.example.com/privkey.pem</code></pre></div>
+          </article>
+
+          <article class="step">
+            <h3>生成两个独立的生产密码</h3>
+            <p>分别执行下面两条命令。第一份输出用于数据库密码，第二份输出用于引导超级管理员密码；两份输出不能相同。生成值只包含十六进制字符，不会被 Compose 插值。</p>
+            <div class="command" data-copy><div class="command-head"><span>生成数据库密码</span></div><pre><code>openssl rand -hex 24</code></pre></div>
+            <div class="command" data-copy><div class="command-head"><span>生成引导管理员密码</span></div><pre><code>openssl rand -hex 24</code></pre></div>
+          </article>
+
+          <article class="step">
+            <h3>创建受保护的生产环境文件</h3>
+            <div class="command" data-copy><div class="command-head"><span>创建目录与文件</span></div><pre><code>sudo install -d -m 700 -o "$USER" -g "$(id -gn)" /secure
+sudo install -d -m 700 -o "$USER" -g "$(id -gn)" /secure/backups
+test -f /secure/zhenhuan.prod.env || sudo install -m 600 -o "$USER" -g "$(id -gn)" /dev/null /secure/zhenhuan.prod.env
+nano /secure/zhenhuan.prod.env</code></pre></div>
+            <p><code>/secure</code>、环境文件和备份目录只归当前部署用户访问；后续 Docker Compose 与备份命令也必须使用同一用户执行。</p>
+            <p>填入以下内容。数据库密码在 <code>POSTGRES_PASSWORD</code> 与 <code>DATABASE_URL</code> 中必须完全相同；示例采用纯十六进制，可以避免 URL 编码问题。</p>
+            <div class="command" data-copy><div class="command-head"><span>/secure/zhenhuan.prod.env</span></div><pre><code>POSTGRES_DB=zhenhuan
+POSTGRES_USER=zhenhuan
+POSTGRES_PASSWORD=&lt;openssl-rand-hex-24 的输出&gt;
+DATABASE_URL=postgresql://zhenhuan:&lt;同一个数据库密码&gt;@postgres:5432/zhenhuan?schema=public
+
+APP_ORIGIN=https://game.example.com
+NEXT_PUBLIC_API_URL=https://game.example.com
+APP_HOST=game.example.com
+
+BOOTSTRAP_ADMIN_USERNAME=admin
+BOOTSTRAP_ADMIN_PASSWORD=&lt;至少 12 位的独立强密码&gt;
+BOOTSTRAP_ADMIN_DISPLAY_NAME=超级管理员
+SUPER_ADMIN_USERNAMES=admin
+
+TLS_CERT_PATH=/etc/letsencrypt/live/game.example.com/fullchain.pem
+TLS_KEY_PATH=/etc/letsencrypt/live/game.example.com/privkey.pem</code></pre></div>
+            <div class="callout danger"><strong>严格匹配来源</strong><code>APP_ORIGIN</code> 与 <code>NEXT_PUBLIC_API_URL</code> 必须是同一个公网 HTTPS 地址，不带末尾斜杠；<code>APP_HOST</code> 只填写同一证书域名，不带协议、端口或路径。不要在生产文件中设置 <code>LAN_HTTP_ORIGIN</code>。</div>
+          </article>
+
+          <article class="step">
+            <h3>校验生产 Compose 配置</h3>
+            <p>在真正构建前先解析配置。缺失必填变量时命令会直接报错，不会启动任何服务。</p>
+            <div class="command" data-copy><div class="command-head"><span>只读校验</span></div><pre><code>docker compose \
+  --env-file /secure/zhenhuan.prod.env \
+  -f docker-compose.prod.yml \
+  config &gt; /dev/null</code></pre></div>
+          </article>
+
+          <article class="step">
+            <h3>构建并首次启动</h3>
+            <div class="command" data-copy><div class="command-head"><span>生产 Compose</span></div><pre><code>cd /opt/zhenhuan-monopoly
+
+docker compose \
+  --env-file /secure/zhenhuan.prod.env \
+  -f docker-compose.prod.yml \
+  build
+
+docker compose \
+  --env-file /secure/zhenhuan.prod.env \
+  -f docker-compose.prod.yml \
+  up -d</code></pre></div>
+            <p><code>migrate</code> 会先执行 forward-only migration 和幂等 seed；它成功退出后 API 才启动。Web 和 API 只在 Docker 内部网络可见，公网只暴露 Nginx 的 80/443。</p>
+          </article>
+
+          <article class="step">
+            <h3>验证容器、内部健康与公网入口</h3>
+            <div class="command" data-copy><div class="command-head"><span>状态和日志</span></div><pre><code>cd /opt/zhenhuan-monopoly
+
+docker compose \
+  --env-file /secure/zhenhuan.prod.env \
+  -f docker-compose.prod.yml \
+  ps --all
+
+docker compose \
+  --env-file /secure/zhenhuan.prod.env \
+  -f docker-compose.prod.yml \
+  logs --tail=100 migrate api web nginx</code></pre></div>
+            <div class="command" data-copy><div class="command-head"><span>正确的健康检查</span></div><pre><code># API 容器内部，预期输出 {"ok":true}
+docker compose \
+  --env-file /secure/zhenhuan.prod.env \
+  -f docker-compose.prod.yml \
+  exec -T api wget -qO- http://127.0.0.1:4000/health
+
+# 公网首页，预期 200
+curl -I https://game.example.com/
+
+# 公网认证路由，未登录预期 401，证明 /api/ 已代理到 API
+curl -s -o /dev/null -w '%{http_code}\n' https://game.example.com/api/auth/me</code></pre></div>
+            <p>当前 Nginx 没有把 <code>/api/health</code> 改写到后端 <code>/health</code>，所以不要用旧文档中的公网 <code>/api/health</code> 作为成败判断。</p>
+          </article>
+
+          <article class="step">
+            <h3>完成首个业务验收</h3>
+            <p>打开 <code>https://game.example.com</code>，使用引导管理员登录，创建一个普通账号和测试房间。至少用第二台设备验证登录、选择人物、进入房间、刷新恢复和 Socket.IO 实时更新。</p>
+          </article>
+        </div>
+
+        <ul class="checklist">
+          <li><label><input type="checkbox" data-check="prod-dns"><span>域名 A 记录已经解析到服务器公网 IP。</span></label></li>
+          <li><label><input type="checkbox" data-check="prod-firewall"><span>公网只开放 SSH、80、443；3000、4000、5432 未开放。</span></label></li>
+          <li><label><input type="checkbox" data-check="prod-env"><span>生产环境文件权限为 600，所有示例密码均已替换。</span></label></li>
+          <li><label><input type="checkbox" data-check="prod-origin"><span>两个 Origin 变量完全一致，都是无尾斜杠 HTTPS 地址。</span></label></li>
+          <li><label><input type="checkbox" data-check="prod-api-count"><span>API 始终保持一个副本，没有扩容 replicas。</span></label></li>
+          <li><label><input type="checkbox" data-check="prod-device"><span>已用真实远程设备验证登录、刷新和实时房间同步。</span></label></li>
+        </ul>
+      </section>
+
+      <section class="chapter" id="operations" data-section>
+        <p class="chapter-kicker">上线之后</p>
+        <h2>日常运维、备份与升级</h2>
+
+        <h3>查看状态和实时日志</h3>
+        <div class="command" data-copy><div class="command-head"><span>常用运维命令</span></div><pre><code>cd /opt/zhenhuan-monopoly
+
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml ps
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml logs -f api
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml logs -f nginx</code></pre></div>
+
+        <h3>重启与停止</h3>
+        <div class="command" data-copy><div class="command-head"><span>保留数据库数据</span></div><pre><code># 重启 API
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml restart api
+
+# 证书更新后只重建 Nginx，重新挂载证书链接目标
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
+
+# 停止应用但保留 postgres_data
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml down</code></pre></div>
+        <div class="callout danger"><strong>不要随手执行 down -v</strong><code>docker compose down -v</code> 会删除包含生产数据库的命名卷。只有在确认永久销毁数据并拥有可验证备份时才能使用。</div>
+
+        <h3>数据库备份</h3>
+        <div class="command" data-copy><div class="command-head"><span>逻辑备份到宿主机</span></div><pre><code>cd /opt/zhenhuan-monopoly
+
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml exec -T postgres \
+  sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+  &gt; /secure/backups/zhenhuan-$(date +%F-%H%M%S).sql
+
+ls -lh /secure/backups</code></pre></div>
+        <p>至少保留一份异机或对象存储副本。恢复会覆盖现有数据，必须先停止写入、确认 migration 版本，并在隔离环境演练；不要把未经验证的恢复命令直接用于生产。</p>
+
+        <h3>安全升级流程</h3>
+        <div class="command" data-copy><div class="command-head"><span>先备份，再更新</span></div><pre><code>cd /opt/zhenhuan-monopoly
+git status --short --branch
+git pull --ff-only
+
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml build
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml ps</code></pre></div>
+        <p>数据库迁移是 forward-only。代码回退不等于数据库回退；新版本执行 migration 后，如需恢复旧结构，必须使用升级前备份并制定维护窗口。</p>
+
+        <h3>证书续期</h3>
+        <p>本教程使用 Certbot <code>standalone</code> 验证，它续期时必须临时占用 80 端口，所以要先停止 Nginx。证书文件是宿主机上的符号链接，续期成功后强制重建 Nginx 容器，确保新证书重新挂载。整个过程通常只造成几十秒入口中断。</p>
+        <div class="command" data-copy><div class="command-head"><span>手工续期与恢复</span></div><pre><code>cd /opt/zhenhuan-monopoly
+
+# 临时释放 80/443；即使续期失败，也要执行最后的恢复命令
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml stop nginx
+sudo certbot renew --standalone
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
+
+# 检查外部实际提供的证书日期
+echo | openssl s_client -connect game.example.com:443 -servername game.example.com 2&gt;/dev/null \
+  | openssl x509 -noout -dates -subject</code></pre></div>
+        <p>Ubuntu 安装 Certbot 后通常自带 <code>certbot.timer</code>，但它不知道如何释放 Docker Nginx 的端口。为自动续期增加以下钩子；<code>post</code> 钩子会在尝试结束后恢复入口。</p>
+        <div class="command" data-copy><div class="command-head"><span>配置 Certbot 自动续期钩子</span></div><pre><code>sudo tee /etc/letsencrypt/renewal-hooks/pre/zhenhuan-stop-nginx &gt; /dev/null &lt;&lt;'SH'
+#!/bin/sh
+cd /opt/zhenhuan-monopoly
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml stop nginx
+SH
+
+sudo tee /etc/letsencrypt/renewal-hooks/post/zhenhuan-start-nginx &gt; /dev/null &lt;&lt;'SH'
+#!/bin/sh
+cd /opt/zhenhuan-monopoly
+docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
+SH
+
+sudo chmod 700 \
+  /etc/letsencrypt/renewal-hooks/pre/zhenhuan-stop-nginx \
+  /etc/letsencrypt/renewal-hooks/post/zhenhuan-start-nginx
+sudo systemctl enable --now certbot.timer
+sudo certbot renew --dry-run
+systemctl list-timers certbot.timer</code></pre></div>
+        <div class="callout warning"><strong>先安排维护窗口</strong><code>renew --dry-run</code> 也会运行钩子并短暂停止公网入口。执行后立刻访问首页，并用上方 OpenSSL 命令确认服务和证书正常。</div>
+      </section>
+
+      <section class="chapter" id="troubleshooting" data-section>
+        <p class="chapter-kicker">先定位，再处理</p>
+        <h2>常见故障排查</h2>
+
+        <details open>
+          <summary>局域网昨天能开，今天地址打不开</summary>
+          <div><p>最常见原因是电脑休眠、切换 Wi-Fi 或 DHCP 续租后 IP 改变。更新 <code>.env</code> 中的 <code>LAN_HTTP_ORIGIN</code>、<code>NEXT_PUBLIC_API_URL</code> 和 <code>NEXT_ALLOWED_DEV_ORIGINS</code>，执行 <code>docker compose up -d --force-recreate api web</code>，再把新地址发给玩家。旧书签不会自动更新。</p></div>
+        </details>
+        <details>
+          <summary>3000 或 4000 端口已被占用</summary>
+          <div><div class="command" data-copy><div class="command-head"><span>查找监听者</span></div><pre><code>docker compose ps
+lsof -nP -iTCP:3000 -sTCP:LISTEN
+lsof -nP -iTCP:4000 -sTCP:LISTEN
+lsof -a -p &lt;PID&gt; -d cwd -Fn</code></pre></div><p>如果是本项目 Compose，复用现有 3000/4000；若测试正在运行则等待结束。只有确认是无关遗留进程后才终止，不要另开测试端口。</p></div>
+        </details>
+        <details>
+          <summary>页面能打开，但登录后又回到登录页</summary>
+          <div><p>检查是否把公网生产部署成了 HTTP、是否混用了 <code>localhost</code> 和 <code>127.0.0.1</code>，以及 <code>APP_ORIGIN</code> 是否与浏览器地址完全一致。生产 Cookie 是 Secure，公网必须 HTTPS。</p></div>
+        </details>
+        <details>
+          <summary>API 返回 ORIGIN_NOT_ALLOWED 或浏览器显示 CORS 错误</summary>
+          <div><p>局域网必须使用 <code>LAN_HTTP_ORIGIN</code> 配置的精确私网 IP 和 3000 端口，并确保 H5 使用同一 IP 的 4000 端口。生产的 <code>APP_ORIGIN</code> 只能是一个精确 HTTPS Origin，不得包含路径、尾斜杠或备用域名。</p></div>
+        </details>
+        <details>
+          <summary>操作成功，但其他设备没有实时刷新</summary>
+          <div><p>检查 Nginx 的 <code>/socket.io/</code> 是否保留 Upgrade 头，API 是否只有一个副本。当前系统使用 Socket.IO 内存 Adapter，不支持多 API 副本。即使通知丢失，重新显示页面或重连会重新拉取 REST 快照。</p></div>
+        </details>
+        <details>
+          <summary>公网 /api/health 返回 404</summary>
+          <div><p>这是当前代理配置的已知差异，不代表业务 API 已损坏。使用容器内 <code>http://127.0.0.1:4000/health</code>；公网用首页 200 和 <code>/api/auth/me</code> 的预期 401 验证路由。</p></div>
+        </details>
+        <details>
+          <summary>migrate 失败，API 一直没有启动</summary>
+          <div><p>先查看 <code>migrate</code> 与 <code>postgres</code> 日志。核对 <code>POSTGRES_PASSWORD</code> 与 <code>DATABASE_URL</code> 密码一致；不要通过删除数据库卷来绕过 migration 错误。</p></div>
+        </details>
+        <details>
+          <summary>Nginx 因证书文件无法启动</summary>
+          <div><p>检查 <code>TLS_CERT_PATH</code>、<code>TLS_KEY_PATH</code> 是否是服务器上的绝对路径，文件是否存在，以及 Docker 守护进程是否能读取 Let's Encrypt 的符号链接目标。</p></div>
+        </details>
+        <details>
+          <summary>Docker 构建被系统杀死或服务器失联</summary>
+          <div><p>通常是内存不足。选择 4 GB 以上内存，构建时查看 <code>free -h</code> 与 <code>dmesg</code>。不要在生产高峰期同时构建多个 Next.js 镜像。</p></div>
+        </details>
+
+        <table class="trouble-table">
+          <thead><tr><th>检查点</th><th>正常表现</th><th>异常时先看</th></tr></thead>
+          <tbody>
+            <tr><td>PostgreSQL</td><td><span class="status-code">healthy</span></td><td><code>logs postgres</code></td></tr>
+            <tr><td>migrate</td><td><span class="status-code">Exited 0</span></td><td><code>logs migrate</code></td></tr>
+            <tr><td>API 内部健康</td><td><span class="status-code">200</span></td><td>环境变量、数据库连接</td></tr>
+            <tr><td>公网未登录认证</td><td><span class="status-code warn">401</span></td><td>Nginx <code>/api/</code> 代理</td></tr>
+            <tr><td>Socket.IO</td><td><span class="status-code">Connected</span></td><td>Nginx Upgrade、单 API</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="chapter" id="acceptance" data-section>
+        <p class="chapter-kicker">最后一关</p>
+        <h2>上线验收清单</h2>
+        <div class="final-check">
+          <h3>全部勾选后再交给玩家</h3>
+          <ul class="checklist">
+            <li><label><input type="checkbox" data-check="accept-https"><span>公网地址为 HTTPS，证书域名、有效期和浏览器锁标识正常。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-admin"><span>超级管理员可以登录、创建普通账号和管理设备。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-room"><span>两个普通账号可以加入同一房间，玩家与银行身份正常。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-ledger"><span>完成一次转帐，余额和不可删除账本在两台设备一致。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-socket"><span>一台设备操作后，另一台无需手动刷新即可收到状态更新。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-reconnect"><span>关闭页面再打开、断网恢复后，身份和房间快照可以恢复。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-backup"><span>已生成第一份数据库备份，并复制到服务器之外。</span></label></li>
+            <li><label><input type="checkbox" data-check="accept-limit"><span>确认 API 只有一个副本，3000、4000、5432 未暴露公网。</span></label></li>
+          </ul>
+        </div>
+
+        <div class="callout success">
+          <strong>部署完成的判断标准</strong>
+          不是“首页能打开”，而是 HTTPS 登录、数据库写入、跨设备实时通知、刷新重连和可恢复备份全部经过真实设备验证。
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="page-footer">
+    <strong>甄嬛传大富翁 H5 部署教程</strong><br>
+    本文件无外部依赖，可直接打开、打印或导出 PDF。生产部署以仓库当前 Compose、Nginx 与 API 安全校验为准。
+  </footer>
+
+  <noscript><div class="callout warning">JavaScript 已关闭：教程内容仍可阅读，但复制按钮与进度保存不可用。</div></noscript>
+  <script>
+    (() => {
+      const copyText = async (text) => {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+      };
+
+      document.querySelectorAll('.command[data-copy]').forEach((block) => {
+        const head = block.querySelector('.command-head');
+        const code = block.querySelector('pre code');
+        if (!head || !code) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'copy-button';
+        button.textContent = '复制';
+        button.setAttribute('aria-label', `复制命令：${head.textContent.trim()}`);
+        button.addEventListener('click', async () => {
+          const original = button.textContent;
+          try {
+            await copyText(code.textContent);
+            button.textContent = '已复制';
+          } catch {
+            button.textContent = '复制失败';
+          }
+          window.setTimeout(() => { button.textContent = original; }, 1400);
+        });
+        head.appendChild(button);
+      });
+
+      const checks = [...document.querySelectorAll('[data-check]')];
+      const progressText = document.getElementById('progress-text');
+      const progressBar = document.getElementById('progress-bar');
+      const storageKey = 'zhenhuan-deployment-guide-progress-v1';
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch { saved = {}; }
+
+      const updateProgress = () => {
+        const completed = checks.filter((item) => item.checked).length;
+        progressText.textContent = `${completed} / ${checks.length}`;
+        progressBar.style.width = checks.length ? `${(completed / checks.length) * 100}%` : '0%';
+        const value = Object.fromEntries(checks.map((item) => [item.dataset.check, item.checked]));
+        try { localStorage.setItem(storageKey, JSON.stringify(value)); } catch { /* private mode */ }
+      };
+      checks.forEach((item) => {
+        item.checked = saved[item.dataset.check] === true;
+        item.addEventListener('change', updateProgress);
+      });
+      updateProgress();
+
+      const tocLinks = [...document.querySelectorAll('.toc a[href^="#"]')];
+      const sectionMap = new Map(tocLinks.map((link) => [link.getAttribute('href').slice(1), link]));
+      if ('IntersectionObserver' in window) {
+        const observer = new IntersectionObserver((entries) => {
+          const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+          if (!visible) return;
+          tocLinks.forEach((link) => link.classList.remove('active'));
+          sectionMap.get(visible.target.id)?.classList.add('active');
+        }, { rootMargin: '-15% 0px -68% 0px', threshold: [0, 0.1, 0.5] });
+        document.querySelectorAll('[data-section]').forEach((section) => observer.observe(section));
+      }
+    })();
+  </script>
+</body>
+</html>

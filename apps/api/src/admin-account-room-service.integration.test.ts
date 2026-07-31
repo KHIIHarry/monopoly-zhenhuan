@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
+import { io as createSocketClient, type Socket as ClientSocket } from 'socket.io-client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApiApp } from './app.js';
 import { hashPassword, sessionCookieName, verifyPassword } from './auth-domain.js';
@@ -127,6 +128,21 @@ async function createRoom(creatorId: string, status: 'LOBBY' | 'PLAYING' | 'FINI
 
 function expectNoSecrets(value: unknown) {
   expect(JSON.stringify(value)).not.toMatch(/password|passwordHash|sessionTokenHash|activeSessionId|120\.31\.22\.36/);
+}
+
+function socketEvent<T>(socket: ClientSocket, name: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.off(name, listener);
+      reject(new Error(`Timed out waiting for ${name}`));
+    }, 2_000);
+    const listener = (payload: T) => {
+      clearTimeout(timeout);
+      socket.off(name, listener);
+      resolve(payload);
+    };
+    socket.on(name, listener);
+  });
 }
 
 integration('Task 6 real-Cookie admin routes', () => {
@@ -692,8 +708,8 @@ integration('Task 6 real-Cookie admin routes', () => {
   });
 
   it('force revokes only one target device and emits one post-commit notification', async () => {
-    const notifications: Array<{ roomId: string; event: string; payload?: Record<string, unknown> }> = [];
-    const notifyingApp = await buildApiApp({ database: db, logger: false, accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)), notifier: (roomId, event, payload) => notifications.push({ roomId, event, payload }) });
+    const notifyingApp = await buildApiApp({ database: db, logger: false, accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)) });
+    let targetSocket: ClientSocket | undefined;
     try {
       const admin = await createAccount({ superAdmin: true });
       const target = await createAccount();
@@ -701,6 +717,16 @@ integration('Task 6 real-Cookie admin routes', () => {
       const first = await loginCookie(target.account, target.password, '10.1.2.3');
       const second = await loginCookie(target.account, target.password, '10.1.2.4');
       const targetSession = await db.accountSession.findFirstOrThrow({ where: { accountId: target.account.id, sessionTokenHash: { not: '' } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+      const address = await notifyingApp.listen({ host: '127.0.0.1', port: 0 });
+      targetSocket = createSocketClient(address, {
+        extraHeaders: { Cookie: first.header },
+        forceNew: true,
+        reconnection: false,
+        transports: ['websocket'],
+      });
+      if (!targetSocket.connected) await socketEvent(targetSocket, 'connect');
+      const revoked = socketEvent<{ reason: string }>(targetSocket, 'account.session.revoked');
+      const disconnected = socketEvent(targetSocket, 'disconnect');
       const response = await notifyingApp.inject({
         method: 'POST',
         url: `/api/admin/accounts/${target.account.id}/sessions/${targetSession.id}/revoke`,
@@ -718,10 +744,11 @@ integration('Task 6 real-Cookie admin routes', () => {
       expect(await db.accountSession.count({ where: { accountId: target.account.id, revokedAt: null } })).toBe(1);
       expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: first.header } })).statusCode).toBe(401);
       expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: second.header } })).statusCode).toBe(200);
-      expect(notifications.filter((item) => item.event === 'account.session.revoked')).toHaveLength(1);
-      expect(notifications.find((item) => item.event === 'account.session.revoked')?.roomId).toBe(`session:${targetSession.id}`);
+      await expect(revoked).resolves.toEqual({ reason: 'device review' });
+      await disconnected;
       expect(await db.securityLog.count({ where: { accountId: target.account.id, actorAccountId: admin.account.id, action: 'ACCOUNT_SESSION_REVOKED' } })).toBe(1);
     } finally {
+      targetSocket?.disconnect();
       await notifyingApp.close();
     }
   });
@@ -1158,9 +1185,11 @@ integration('Task 6 real-Cookie admin routes', () => {
     const cookie = await loginCookie(admin.account, admin.password);
     const definition = await db.propertyDefinition.create({ data: { name: `Dashboard Property ${randomUUID()}`, displayOrder: Math.floor(Math.random() * 1_000_000), mortgagePrice: 100, purchasePrice: 200, buildCost: 50, buildingSellPrice: 25, tollEmpty: 10, tollLevel1: 20, tollLevel2: 30, tollLevel3: 40, tollLevel4: 50, tollPalace: 60 } });
     const character = await db.character.create({ data: { id: `dashboard-${randomUUID()}`, name: 'Current Character Name', skillCode: `dashboard-skill-${randomUUID()}`, skillConfig: {}, initialPropertyId: definition.id } });
+    const firstSelectionRoom = await createRoom(firstWinner.account.id);
+    const secondSelectionRoom = await createRoom(secondWinner.account.id);
     await db.securityLog.createMany({ data: [
-      { accountId: firstWinner.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: 'historic-room-a', characterId: character.id, characterNameSnapshot: 'Historic Selection Name' } },
-      { accountId: secondWinner.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: 'historic-room-b', characterId: character.id, characterNameSnapshot: 'Historic Selection Name' } },
+      { accountId: firstWinner.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: firstSelectionRoom.id, characterId: character.id, characterNameSnapshot: 'Historic Selection Name' } },
+      { accountId: secondWinner.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: secondSelectionRoom.id, characterId: character.id, characterNameSnapshot: 'Historic Selection Name' } },
     ] });
 
     const older = await createRoom(admin.account.id, 'PLAYING');
@@ -1249,9 +1278,9 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(JSON.stringify(page.json())).not.toContain('must-not-leak');
   });
 
-  it('delegates forced finish to Task 5 and emits create-only settlement events with actor reason logging', async () => {
-    const notifications: Array<{ roomId: string; event: string }> = [];
-    const notifyingApp = await buildApiApp({ database: db, logger: false, accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)), notifier: (roomId, event) => notifications.push({ roomId, event }) });
+  it('delegates forced finish to Task 5 and emits one create-only versioned invalidation with actor reason logging', async () => {
+    const notifications: Array<{ roomId: string; event: string; payload?: Record<string, unknown> }> = [];
+    const notifyingApp = await buildApiApp({ database: db, logger: false, accounts: new AccountRoomService(db, (username) => configuredSuperAdmins.has(username)), notifier: (roomId, event, payload) => notifications.push({ roomId, event, payload }) });
     try {
       const admin = await createAccount({ superAdmin: true });
       const creator = await createAccount();
@@ -1266,8 +1295,7 @@ integration('Task 6 real-Cookie admin routes', () => {
       expect(replay.json()).toMatchObject({ created: false });
       expect(await db.gameSettlement.count({ where: { roomId: room.id } })).toBe(1);
       expect(notifications.filter((item) => item.roomId === room.id)).toEqual([
-        { roomId: room.id, event: 'room.finished' },
-        { roomId: room.id, event: 'settlement.created' },
+        { roomId: room.id, event: 'room.updated', payload: { stateVersion: expect.any(Number) } },
       ]);
       expect(await db.securityLog.count({ where: { actorAccountId: admin.account.id, action: 'ROOM_FORCE_FINISHED', detailsJson: { path: ['forceReason'], equals: 'administrative closure' } } })).toBe(1);
     } finally {

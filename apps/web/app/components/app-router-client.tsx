@@ -11,7 +11,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { realtimeToastEventSchema } from "@zhenhuan/shared";
+import {
+  realtimeToastEventSchema,
+  type RealtimeToastEvent,
+} from "@zhenhuan/shared";
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
 import { createToastQueue, type ToastInput, type ToastItem } from "./toast-queue";
@@ -218,6 +221,10 @@ type RoomActionResult<T, B extends WriteBody> =
 type ActionRunner = <T = unknown, B extends WriteBody = WriteBody>(
   spec: StableWriteSpec<B>,
 ) => Promise<RoomActionResult<T, B>>;
+type PendingWriteIntent = { key: string; body: WriteBody; payload?: string };
+type PendingRoomToast = { event: RealtimeToastEvent; generation: number };
+
+const pendingWriteIntents = new Map<string, PendingWriteIntent>();
 
 const API_ERROR_MESSAGES: Record<string, string> = {
   AUTH_REQUIRED: "请先登录账号",
@@ -387,9 +394,6 @@ function requestKey() {
 }
 
 function useStableWrite(runAction: TaskRunner) {
-  type PendingIntent = { key: string; body: WriteBody; payload?: string };
-  const pendingIntents = useRef(new Map<string, PendingIntent>());
-
   const write: StableWriter = async <T, B extends WriteBody>(
     spec: StableWriteSpec<B>,
     options: StableWriteOptions = {},
@@ -401,7 +405,7 @@ function useStableWrite(runAction: TaskRunner) {
       spec.intentKey === undefined
         ? `${method}\n${spec.path}\n${initialPayload ?? ""}`
         : `${method}\n${spec.path}\nintent:${spec.intentKey}`;
-    let pending = pendingIntents.current.get(intent);
+    let pending = pendingWriteIntents.get(intent);
     if (!pending) {
       const body = spec.createBody ? spec.createBody() : spec.body;
       pending = {
@@ -409,7 +413,7 @@ function useStableWrite(runAction: TaskRunner) {
         body,
         payload: body === undefined ? undefined : JSON.stringify(body),
       };
-      pendingIntents.current.set(intent, pending);
+      pendingWriteIntents.set(intent, pending);
     }
     const ownedPending = pending;
     const result = await runAction(
@@ -423,13 +427,13 @@ function useStableWrite(runAction: TaskRunner) {
     );
     if (!result.ok) return result;
     const confirm = () => {
-      if (pendingIntents.current.get(intent) === ownedPending)
-        pendingIntents.current.delete(intent);
+      if (pendingWriteIntents.get(intent) === ownedPending)
+        pendingWriteIntents.delete(intent);
     };
     return { ...result, body: ownedPending.body as B, confirm };
   };
 
-  return { write, clear: () => pendingIntents.current.clear() };
+  return { write, clear: () => pendingWriteIntents.clear() };
 }
 
 function booleanRoomAction(action: ActionRunner) {
@@ -974,6 +978,7 @@ export default function AppRouterClient({
     requestedView: null,
     workbench: null,
   });
+  const pendingRoomToasts = useRef(new Map<string, PendingRoomToast>());
   const { write, clear: clearPendingIntents } = useStableWrite(run);
 
   const roomPath = (
@@ -1093,16 +1098,26 @@ export default function AppRouterClient({
     setLoginIntent((current) => ({ ...current, password: "" }));
   }
 
-  function beginRoomTransition(roomId: string): RoomOwner {
+  function beginRoomTransition(
+    roomId: string,
+    requestedView: "PLAYER" | "BANK" | null = null,
+  ): RoomOwner {
     toastQueue.current?.clear();
+    pendingRoomToasts.current.clear();
     roomGeneration.current += 1;
     roomTarget.current = roomId;
     snapshotRequestGeneration.current += 1;
     roomStateVersion.current = -1;
+    roomRuntime.current = {
+      ...roomRuntime.current,
+      roomId,
+      requestedView,
+    };
     return { roomId, generation: roomGeneration.current };
   }
 
   function invalidateRoomTransition() {
+    pendingRoomToasts.current.clear();
     roomGeneration.current += 1;
     roomTarget.current = null;
     snapshotRequestGeneration.current += 1;
@@ -1399,7 +1414,7 @@ export default function AppRouterClient({
     preferredView?: "PLAYER" | "BANK",
     intent: SeatsRouteIntent = "AUTO",
   ) {
-    const owner = beginRoomTransition(roomId);
+    const owner = beginRoomTransition(roomId, preferredView ?? null);
     await runRoomTransition(owner, () =>
       fetchSeats(owner, preferredView, intent),
     );
@@ -1465,7 +1480,7 @@ export default function AppRouterClient({
     if (!seats) return;
     const roomId = seats.room.id;
     const path = `/api/rooms/${roomId}/${kind === "BANK" ? "select-bank" : "select-character"}`;
-    const owner = beginRoomTransition(roomId);
+    const owner = beginRoomTransition(roomId, kind);
     await runRoomTransition(owner, async () => {
       const result = await write(
         { path, body: kind === "PLAYER" ? { characterId } : {} },
@@ -1698,6 +1713,7 @@ export default function AppRouterClient({
         { owner },
       );
       if (!result.ok || !ownsRoom(owner)) return;
+      if (!(await fetchSettlement(owner)) || !ownsRoom(owner)) return;
       go(roomPath("settlement", roomId), true);
       result.confirm();
       await loadRooms(owner);
@@ -1754,7 +1770,20 @@ export default function AppRouterClient({
       if (!parsed.success) return;
       const runtime = roomRuntime.current;
       if (parsed.data.roomId !== runtime.roomId) return;
-      if (parsed.data.audience !== runtime.workbench?.view) return;
+      const targetView = runtime.requestedView;
+      if (targetView === null || parsed.data.audience !== targetView) return;
+      if (
+        !runtime.workbench ||
+        runtime.workbench.roomId !== parsed.data.roomId ||
+        runtime.workbench.view !== targetView
+      ) {
+        pendingRoomToasts.current.set(parsed.data.eventId, {
+          event: parsed.data,
+          generation: roomGeneration.current,
+        });
+        return;
+      }
+      if (parsed.data.audience !== runtime.workbench.view) return;
       enqueue({ id: parsed.data.eventId, message: parsed.data.message });
     };
     roomInvalidator.current = refresh;
@@ -1838,7 +1867,23 @@ export default function AppRouterClient({
       socketRoomSubscription.current = activeRoomId;
       roomInvalidator.current?.();
     }
-  }, [account?.id, roomId, screen, workbench]);
+  }, [account?.id, roomId, page, screen, workbench]);
+
+  useEffect(() => {
+    if (!workbench) return;
+    for (const pending of pendingRoomToasts.current.values()) {
+      const toast = pending.event;
+      pendingRoomToasts.current.delete(toast.eventId);
+      if (
+        pending.generation !== roomGeneration.current ||
+        toast.roomId !== workbench.roomId ||
+        roomRuntime.current.requestedView !== workbench.view ||
+        toast.audience !== workbench.view
+      )
+        continue;
+      enqueue({ id: toast.eventId, message: toast.message });
+    }
+  }, [enqueue, workbench]);
 
   if (screen === "LANDING")
     return <LandingPoster onJoin={() => go(account ? "/rooms" : "/login")} />;
@@ -5358,6 +5403,12 @@ function PlayerView({
               onClick={() => setPanel("TOLL")}
             />
             <Quick
+              icon={<Landmark />}
+              label="资产操作"
+              disabled={busy || !canAct}
+              onClick={() => setPanel("ASSET")}
+            />
+            <Quick
               icon={<Building2 />}
               label="购买 / 建造"
               disabled={busy || !canAct || mustSkipCurrentTurn || !landingConfirmed}
@@ -5368,12 +5419,6 @@ function PlayerView({
               label="起点奖励"
               disabled={busy || !canAct || mustSkipCurrentTurn}
               onClick={() => setPanel("START")}
-            />
-            <Quick
-              icon={<Landmark />}
-              label="资产操作"
-              disabled={busy || !canAct}
-              onClick={() => setPanel("ASSET")}
             />
             <Quick
               icon={<ArrowLeftRight />}
@@ -6428,6 +6473,14 @@ function BankView({
     0,
     plotFineOriginalAmount - plotFineReduction,
   );
+  const companionCashReward = Math.max(
+    0,
+    (approveTarget
+      ? snapshot.players.find(
+          (player) => player.id === approveTarget.playerId,
+        )?.companionCashReward
+      : 0) ?? 0,
+  );
 
   return (
     <>
@@ -7203,9 +7256,9 @@ function BankView({
             </>
           ) : approveTarget.type === "COMPANION_EVENT" ? (
             <>
-              {snapshot.players.find(
-                (player) => player.id === approveTarget.playerId,
-              )?.characterId === "zhenhuan" && <p>自动奖励 500 两</p>}
+              {companionCashReward > 0 && (
+                <p>自动奖励 {formatMoney(companionCashReward)} 两</p>
+              )}
               <p className="error">伙伴卡事件批准后立即生效，不可撤销</p>
             </>
           ) : (

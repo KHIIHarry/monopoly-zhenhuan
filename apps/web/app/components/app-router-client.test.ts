@@ -80,7 +80,7 @@ describe('realtime Toast integration', () => {
 
     expect(component).toContain('realtimeToastEventSchema.safeParse(payload)');
     expect(component).toMatch(/parsed\.data\.roomId !== runtime\.roomId/);
-    expect(component).toMatch(/parsed\.data\.audience !== runtime\.workbench\?\.view/);
+    expect(component).toMatch(/parsed\.data\.audience !== runtime\.workbench\.view/);
     expect(component).toMatch(/enqueue\(\{ id: parsed\.data\.eventId, message: parsed\.data\.message \}\)/);
     expect(component).toContain('socket.on("room.toast", onRoomToast)');
   });
@@ -94,5 +94,74 @@ describe('realtime Toast integration', () => {
     expect(component).not.toMatch(/useEffect\(\(\) => \{\s*useEffect\(\(\) => \(\) => toastQueue\.current\?\.dispose\(\)/);
     expect(component).not.toContain('if (!toastQueue.current) toastQueue.current = createToastQueue(setCurrentToast)');
     expect(component).toMatch(/useEffect\(\(\) => \{\s*const queue = createToastQueue\(setCurrentToast\);\s*toastQueue\.current = queue;[\s\S]*?queue\.dispose\(\);[\s\S]*?toastQueue\.current = null;/);
+  });
+
+  test('buffers only the requested role before the workbench is ready', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/const pendingRoomToasts = useRef\(new Map/);
+    expect(component).toMatch(/const targetView = runtime\.requestedView;/);
+    expect(component).toMatch(/if \(targetView === null \|\| parsed\.data\.audience !== targetView\) return;/);
+    expect(component).toMatch(/pendingRoomToasts\.current\.set\(parsed\.data\.eventId, \{\s*event: parsed\.data,\s*generation: roomGeneration\.current,\s*\}\)/);
+    expect(component).toMatch(/pending\.generation !== roomGeneration\.current/);
+    expect(component).not.toContain('targetView === null || parsed.data.audience === targetView');
+  });
+
+  test('buffers a same-role Toast while the retained workbench belongs to another room', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/!runtime\.workbench \|\|\s*runtime\.workbench\.roomId !== parsed\.data\.roomId \|\|\s*runtime\.workbench\.view !== targetView/);
+  });
+
+  test('updates the Toast audience when player and bank routes share the game screen', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/\}, \[account\?\.id, roomId, page, screen, workbench\]\);/);
+  });
+});
+
+describe('room completion regressions', () => {
+  test('keeps finish intent until its authoritative settlement has loaded', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const finishRoom = component.slice(
+      component.indexOf('async function finishRoom'),
+      component.indexOf('async function manageSeats'),
+    );
+
+    expect(finishRoom).toMatch(/if \(!result\.ok \|\| !ownsRoom\(owner\)\) return;\s*if \(!\(await fetchSettlement\(owner\)\) \|\| !ownsRoom\(owner\)\) return;\s*go\(roomPath\("settlement", roomId\), true\);\s*result\.confirm\(\);/);
+  });
+
+  test('places toll immediately before asset actions in the player quick grid', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const quickGrid = component.slice(
+      component.indexOf('<div className="quick-grid">'),
+      component.indexOf('<SectionTitle title="我的地产"'),
+    );
+
+    const labels = [...quickGrid.matchAll(/label="([^"]+)"/g)].map(
+      ([, label]) => label,
+    );
+
+    expect(labels.indexOf('支付过路费')).toBe(
+      labels.indexOf('资产操作') - 1,
+    );
+    expect(labels.indexOf('购买 / 建造')).toBe(
+      labels.indexOf('资产操作') + 1,
+    );
+    expect(labels.indexOf('起点奖励')).toBe(
+      labels.indexOf('购买 / 建造') + 1,
+    );
+  });
+
+  test('uses the snapshot companion reward in the approval dialog', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const companionApproval = component.slice(
+      component.indexOf('approveTarget.type === "COMPANION_EVENT"'),
+      component.indexOf(') : (', component.indexOf('approveTarget.type === "COMPANION_EVENT"')),
+    );
+
+    expect(companionApproval).toContain('companionCashReward');
+    expect(companionApproval).toContain('formatMoney(');
+    expect(companionApproval).not.toContain('自动奖励 500 两');
   });
 });

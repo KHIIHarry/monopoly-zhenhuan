@@ -1100,6 +1100,7 @@ test('伙伴卡获得审批为甄嬛显示自动奖励且不显示通用字段',
   const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
   const snapshot = {
     ...gameSnapshot,
+    players: [{ ...gameSnapshot.players[0], companionCashReward: 750 }],
     requests: [{
       id: 'companion-request', type: 'COMPANION_EVENT', playerId: 'player-1',
       amount: 0, status: 'PENDING',
@@ -1117,7 +1118,7 @@ test('伙伴卡获得审批为甄嬛显示自动奖励且不显示通用字段',
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('玩家：甄嬛');
-  await expect(dialog).toContainText('自动奖励 500 两');
+  await expect(dialog).toContainText('自动奖励 750 两');
   await expect(dialog).toContainText('伙伴卡事件批准后立即生效，不可撤销');
   await expect(dialog).not.toContainText('地产：无');
   await expect(dialog).not.toContainText('金额：0 两');

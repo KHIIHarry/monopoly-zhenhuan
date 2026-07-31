@@ -14,7 +14,7 @@ export default {
   retries: process.env.CI ? 2 : 0,
   reporter: 'list',
   use: {
-    baseURL: realStack ? 'http://localhost:3000' : 'http://127.0.0.1:3000',
+    baseURL: realStack || externalStack ? 'http://localhost:3000' : 'http://127.0.0.1:3000',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
