@@ -1,3 +1,16 @@
+import { z } from 'zod';
+
+export const realtimeToastEventSchema = z.object({
+  eventId: z.string().min(1),
+  roomId: z.string().min(1),
+  audience: z.enum(['PLAYER', 'BANK']),
+  kind: z.enum(['FUNDS', 'REQUEST_REJECTED']),
+  message: z.string().trim().min(1).max(240),
+}).strict();
+
+export type RealtimeToastEvent = z.infer<typeof realtimeToastEventSchema>;
+export type RealtimeToastAudience = RealtimeToastEvent['audience'];
+
 export type SkillInput = { skipTurns: number; amount: number };
 
 export type MasterCharacter = {

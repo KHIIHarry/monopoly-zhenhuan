@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import masterData from '../../../甄嬛传大富翁_master-data.json';
-import { applySkill, calculateToll, loadMasterData, roll2d6 } from './index.js';
+import { applySkill, calculateToll, loadMasterData, realtimeToastEventSchema, roll2d6 } from './index.js';
 
 describe('master data', () => {
   it('loads exactly 26 properties without recalculating values', () => {
@@ -31,5 +31,29 @@ describe('configured skills', () => {
 
   it('blocks toll on mortgaged property', () => {
     expect(() => calculateToll({ tolls: [200, 400, 900, 2700, 4000, 5500], level: 0, mortgaged: true })).toThrow('MORTGAGED_PROPERTY');
+  });
+});
+
+describe('realtime toast event', () => {
+  const validEvent = {
+    eventId: 'transaction-1:PLAYER:player-1',
+    roomId: 'room-1',
+    audience: 'PLAYER',
+    kind: 'FUNDS',
+    message: '银行向你发放起点奖励 1000 两',
+  };
+
+  it('accepts the funds wire envelope', () => {
+    expect(realtimeToastEventSchema.parse(validEvent)).toMatchObject({ audience: 'PLAYER', kind: 'FUNDS' });
+  });
+
+  it.each([
+    ['an empty event ID', { ...validEvent, eventId: '' }],
+    ['an empty room ID', { ...validEvent, roomId: '' }],
+    ['an empty message', { ...validEvent, message: '   ' }],
+    ['an unknown audience', { ...validEvent, audience: 'OTHER' }],
+    ['an unknown event kind', { ...validEvent, kind: 'OTHER' }],
+  ])('rejects %s', (_description, event) => {
+    expect(() => realtimeToastEventSchema.parse(event)).toThrow();
   });
 });
