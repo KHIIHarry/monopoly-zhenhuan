@@ -311,9 +311,17 @@
 * { box-sizing: border-box; }
 
 html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html,
 body {
   margin: 0;
-  min-height: 100%;
   background: var(--paper);
   color: var(--ink);
   font-family: "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
@@ -503,8 +511,19 @@ label textarea { display: block; margin-top: 7px; }
 .recovery-actions { width: min(100%, 360px); display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 8px; }
 .recovery-actions .primary { min-width: 0; }
 
-.app-shell { width: 100%; max-width: 760px; height: 100dvh; min-height: 0; margin: auto; padding-bottom: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; background: var(--paper); }
+.app-shell { width: 100%; max-width: 760px; height: 100%; min-height: 0; margin: auto; padding-bottom: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; background: var(--paper); }
 .workbench-scroll { min-height: 0; overflow-x: hidden; overflow-y: auto; padding-bottom: 18px; }
+.v2-page,
+.landing-page,
+.center,
+.workbench-scroll {
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
 .app-shell header {
   min-height: 76px;
   background: var(--red);
