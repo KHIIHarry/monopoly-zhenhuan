@@ -93,7 +93,7 @@ export function LandingPropertyCardPicker({
             const accessibleName = `${property.name}，${ownership.label}，所有者 ${ownerName}${property.mortgaged ? '，已抵押' : ''}`;
             const owner = ownership.player;
             const tollBlocked = Boolean(owner?.tollCollectionBlocked);
-            const cardContents = (
+            const summaryContents = (
               <>
                 <span className={`landing-property-badge ${ownership.label === '已持有' ? 'owned' : 'unowned'}`}>{ownership.label}</span>
                 <span className="landing-property-card-title">{property.name}</span>
@@ -121,7 +121,10 @@ export function LandingPropertyCardPicker({
                   </span>
                   <span>建筑<strong>{buildingLabel(property.level)}</strong></span>
                 </span>
-                <details className="property-details">
+              </>
+            );
+            const details = (
+              <details className="property-details">
                   <summary>查看完整价格与租金</summary>
                   <div className="property-prices">
                     <span>抵押价<strong>{formatAmount(property.mortgage)} 两</strong></span>
@@ -132,25 +135,31 @@ export function LandingPropertyCardPicker({
                   <div className="toll-table" aria-label={`${property.name} 0 至 5 级租金`}>
                     {property.tolls.map((amount, level) => <span key={level}>{level} 级 {formatAmount(amount)} 两</span>)}
                   </div>
-                </details>
-                {property.mortgaged && <span className="property-mortgaged-tag">已抵押</span>}
-              </>
+              </details>
             );
 
-              return mode === 'landing' ? (
-              <button
-                type="button"
+            return mode === 'landing' ? (
+              <article
                 key={property.name}
                 className={`landing-property-card property-theme-${ownership.theme}${selected ? ' selected' : ''}`}
-                aria-label={accessibleName}
-                aria-pressed={selected}
-                onClick={() => onChange?.(property.name)}
               >
-                {cardContents}
-              </button>
+                <button
+                  type="button"
+                  className="landing-property-select"
+                  aria-label={accessibleName}
+                  aria-pressed={selected}
+                  onClick={() => onChange?.(property.name)}
+                >
+                  {summaryContents}
+                </button>
+                {details}
+                {property.mortgaged && <span className="property-mortgaged-tag">已抵押</span>}
+              </article>
             ) : (
               <article key={property.name} className={`landing-property-card property-theme-${ownership.theme}`} aria-label={accessibleName}>
-                {cardContents}
+                {summaryContents}
+                {details}
+                {property.mortgaged && <span className="property-mortgaged-tag">已抵押</span>}
               </article>
             );
           })}

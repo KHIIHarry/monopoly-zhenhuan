@@ -37,6 +37,7 @@ describe('LandingPropertyCardPicker', () => {
     expect(html).not.toContain('>银行</button>');
     expect(html).toContain('landing-owner-filter property-owner-filter property-theme-treasury selected');
     expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('</button><details class="property-details">');
   });
 
   it('renders character-only filters and a themed owner label in browse mode', () => {
