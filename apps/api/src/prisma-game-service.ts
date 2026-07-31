@@ -143,7 +143,7 @@ export class PrismaGameService {
       turns: { where: { status: 'ACTIVE' }, orderBy: { turnNumber: 'desc' }, take: 1 },
       ledgerEntries: { where: viewer.role === 'PLAYER' ? { playerId: viewer.playerId } : undefined, orderBy: { createdAt: 'desc' }, take: 100 },
       requests: { where: viewer.role === 'PLAYER' ? { OR: [{ actorPlayerId: viewer.playerId }, { targetPlayerId: viewer.playerId }] } : { status: { not: 'PENDING' } }, orderBy: { createdAt: 'desc' }, take: 100, include: { property: { include: { definition: true } } } },
-      landingEvents: { where: { status: { in: ['DECLARED', 'CONFIRMED'] } }, orderBy: { declaredAt: 'desc' }, take: 30, include: { property: { include: { definition: true } } } },
+      landingEvents: { where: { status: { in: ['DECLARED', 'CONFIRMED'] } }, orderBy: { declaredAt: 'desc' }, take: 30, include: { property: { include: { definition: true } }, player: { select: { member: { select: { accountId: true } } } } } },
       skipTurnEntries: { where: { remainingCount: { gt: 0 }, blocksTollCollection: true }, select: { playerId: true } },
       auditLogs: { orderBy: { createdAt: 'desc' }, take: 100 }
     } });
@@ -164,7 +164,9 @@ export class PrismaGameService {
     const tollSettlementStates = await this.tollSettlementStatuses(
       tx,
       roomId,
-      room.landingEvents.filter((landing) => landing.status === 'CONFIRMED').map((landing) => landing.id),
+      room.landingEvents
+        .filter((landing) => landing.status === 'CONFIRMED')
+        .map((landing) => ({ landingId: landing.id, accountId: landing.player.member.accountId })),
     );
       return {
       id: room.id, code: room.code, name: room.name, status: room.status, stateVersion: room.stateVersion, diceMode: room.diceMode, redemptionFee: room.redemptionFee, startReward: room.startReward,
@@ -247,7 +249,7 @@ export class PrismaGameService {
       if (turn.diceValue === null) fail('ROLL_REQUIRED');
       const tollLanding = await tx.landingEvent.findFirst({ where: { roomId, turnId: turn.id, playerId, spaceType: 'PROPERTY', status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false }, include: { property: true } });
       const tollProperty = tollLanding?.property;
-      const settlement = tollLanding ? await this.tollSettlementState(tx, roomId, tollLanding.id) : null;
+      const settlement = tollLanding ? await this.tollSettlementState(tx, roomId, tollLanding.id, actor.accountId) : null;
       const tollOwner = tollProperty?.ownerPlayerId
         ? (await this.playablePlayers(tx, roomId, [tollProperty.ownerPlayerId]))[0]
         : null;
@@ -723,7 +725,7 @@ export class PrismaGameService {
         const turn = room.diceMode === 'ELECTRONIC' ? await tx.turn.findFirst({ where: { roomId, playerId: payerId, status: 'ACTIVE' } }) : null;
         const landing = await tx.landingEvent.findFirst({ where: { roomId, playerId: payerId, propertyId: property.id, status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false, ...(room.diceMode === 'ELECTRONIC' ? { turnId: turn?.id } : { turnId: null }) }, orderBy: { confirmedAt: 'desc' } }); if (!landing) fail('CONFIRMED_LANDING_REQUIRED');
         const settlementScope = `landing:${landing.id}:toll`;
-        const settlement = await this.tollSettlementState(tx, roomId, landing.id);
+        const settlement = await this.tollSettlementState(tx, roomId, landing.id, actor.accountId);
         if (settlement.record && settlement.status !== 'REVERSED') fail('TOLL_ALREADY_SETTLED');
         const blocked = await tx.skipTurnEntry.findFirst({ where: { roomId, playerId: property.ownerPlayerId, remainingCount: { gt: 0 }, blocksTollCollection: true } }); if (blocked) fail('OWNER_CANNOT_COLLECT_TOLL');
         const tolls = [property.definition.tollEmpty, property.definition.tollLevel1, property.definition.tollLevel2, property.definition.tollLevel3, property.definition.tollLevel4, property.definition.tollPalace]; let amount = tolls[property.buildingLevel] ?? fail('INVALID_BUILDING_LEVEL');
@@ -1025,110 +1027,135 @@ export class PrismaGameService {
     const executedRequest = await tx.gameRequest.findFirst({ where: { roomId, turnId, status: 'EXECUTED' }, select: { id: true } });
     if (executedRequest) fail('ROLL_HAS_SETTLED_ACTIONS');
 
-    const landings = await tx.landingEvent.findMany({ where: { roomId, turnId }, select: { id: true } });
+    const landings = await tx.landingEvent.findMany({
+      where: { roomId, turnId },
+      select: { id: true, player: { select: { member: { select: { accountId: true } } } } },
+    });
     if (!landings.length) return;
-    const settlements = await tx.idempotencyRecord.findMany({
-      where: { scope: { in: landings.map((landing) => `landing:${landing.id}:toll`) }, key: 'settled' },
-      select: { response: true },
-    });
-    if (!settlements.length) return;
+    const settlements = await this.tollSettlementResolutions(tx, roomId, landings.map((landing) => ({
+      landingId: landing.id,
+      accountId: landing.player.member.accountId,
+    })));
+    if (!settlements.size) return;
 
-    const requestKeys = settlements
-      .map((settlement) => asObject(settlement.response).requestKey)
-      .filter(nonEmptyString);
-    const requestRecords = requestKeys.length ? await tx.idempotencyRecord.findMany({
-      where: { scope: { endsWith: `room:${roomId}:toll` }, key: { in: requestKeys } },
-      select: { key: true, response: true },
-    }) : [];
-    const transactionByRequestKey = new Map(requestRecords.map((record) => [record.key, asObject(record.response).id]));
-    const transactionIds = settlements.map((settlement) => {
-      const response = asObject(settlement.response);
-      const directId = response.transactionId;
-      const fallbackId = nonEmptyString(response.requestKey) ? transactionByRequestKey.get(response.requestKey) : undefined;
-      return nonEmptyString(directId) ? directId : nonEmptyString(fallbackId) ? fallbackId : null;
-    });
+    const transactionIds = [...settlements.values()].map((settlement) => settlement.transactionId);
     if (transactionIds.some((transactionId) => transactionId === null)) fail('ROLL_HAS_SETTLED_ACTIONS');
-    const committed = await tx.gameTransaction.count({ where: { roomId, id: { in: transactionIds as string[] }, status: 'COMMITTED' } });
-    if (committed > 0) fail('ROLL_HAS_SETTLED_ACTIONS');
+    if ([...settlements.values()].some((settlement) => settlement.status === 'COMMITTED')) fail('ROLL_HAS_SETTLED_ACTIONS');
   }
 
   private async tollSettlementState(
     tx: Prisma.TransactionClient,
     roomId: string,
     landingId: string,
+    accountId: string,
   ): Promise<{ record: { id: string } | null; status: 'COMMITTED' | 'REVERSED' | 'UNKNOWN' | null; transactionId: string | null }> {
-    const record = await tx.idempotencyRecord.findUnique({
-      where: { scope_key: { scope: `landing:${landingId}:toll`, key: 'settled' } },
-    });
-    if (!record) return { record: null, status: null, transactionId: null };
-
-    const response = asObject(record.response);
-    let transactionId = nonEmptyString(response.transactionId) ? response.transactionId : null;
-    if (!transactionId && nonEmptyString(response.requestKey)) {
-      const requestRecord = await tx.idempotencyRecord.findFirst({
-        where: { scope: { endsWith: `room:${roomId}:toll` }, key: response.requestKey },
-      });
-      const requestResponse = asObject(requestRecord?.response);
-      transactionId = nonEmptyString(requestResponse.id) ? requestResponse.id : null;
-    }
-    if (!transactionId) return { record: { id: record.id }, status: 'UNKNOWN', transactionId: null };
-
-    const transaction = await tx.gameTransaction.findFirst({
-      where: { id: transactionId, roomId },
-      select: { status: true },
-    });
-    return { record: { id: record.id }, status: transaction?.status ?? 'UNKNOWN', transactionId };
+    return (await this.tollSettlementResolutions(tx, roomId, [{ landingId, accountId }])).get(landingId)
+      ?? { record: null, status: null, transactionId: null };
   }
 
   private async tollSettlementStatuses(
     tx: Prisma.TransactionClient,
     roomId: string,
-    landingIds: string[],
+    landings: Array<{ landingId: string; accountId: string }>,
   ): Promise<Map<string, 'COMMITTED' | 'REVERSED' | 'UNKNOWN'>> {
-    if (!landingIds.length) return new Map();
+    const resolutions = await this.tollSettlementResolutions(tx, roomId, landings);
+    return new Map([...resolutions].map(([landingId, settlement]) => [landingId, settlement.status]));
+  }
 
-    const landingIdByScope = new Map(landingIds.map((landingId) => [`landing:${landingId}:toll`, landingId]));
+  private async tollSettlementResolutions(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    landings: Array<{ landingId: string; accountId: string }>,
+  ): Promise<Map<string, {
+    record: { id: string };
+    status: 'COMMITTED' | 'REVERSED' | 'UNKNOWN';
+    transactionId: string | null;
+  }>> {
+    if (!landings.length) return new Map();
+
+    const landingByScope = new Map(landings.map((landing) => [`landing:${landing.landingId}:toll`, landing]));
     const settlementRecords = await tx.idempotencyRecord.findMany({
-      where: { scope: { in: [...landingIdByScope.keys()] }, key: 'settled' },
-      select: { scope: true, response: true },
+      where: { scope: { in: [...landingByScope.keys()] }, key: 'settled' },
+      select: { id: true, scope: true, response: true },
     });
-    const requestKeys = settlementRecords
-      .map(({ response }) => asObject(response))
-      .filter((response) => !nonEmptyString(response.transactionId))
-      .map((response) => response.requestKey)
-      .filter(nonEmptyString);
-    const requestRecords = requestKeys.length ? await tx.idempotencyRecord.findMany({
-      where: { scope: { endsWith: `room:${roomId}:toll` }, key: { in: [...new Set(requestKeys)] } },
-      select: { key: true, response: true },
-    }) : [];
-    const transactionIdByRequestKey = new Map(requestRecords.map((record) => {
-      const transactionId = asObject(record.response).id;
-      return [record.key, nonEmptyString(transactionId) ? transactionId : null] as const;
-    }));
-    const transactionIdByLandingId = new Map(settlementRecords.flatMap((record) => {
-      const landingId = landingIdByScope.get(record.scope);
-      if (!landingId) return [];
+    const fallbackRecords = settlementRecords.flatMap((record) => {
+      const landing = landingByScope.get(record.scope);
       const response = asObject(record.response);
-      const transactionId = nonEmptyString(response.transactionId)
-        ? response.transactionId
-        : nonEmptyString(response.requestKey)
-          ? transactionIdByRequestKey.get(response.requestKey) ?? null
-          : null;
-      return [[landingId, transactionId] as const];
+      return landing && !nonEmptyString(response.transactionId) && nonEmptyString(response.requestKey)
+        ? [{ landing, requestKey: response.requestKey }]
+        : [];
+    });
+    const legacyScope = `room:${roomId}:toll`;
+    const requestScopes = [...new Set(fallbackRecords.flatMap(({ landing }) => [
+      `account:${landing.accountId}:room:${roomId}:toll`,
+      legacyScope,
+    ]))];
+    const requestKeys = [...new Set(fallbackRecords.map(({ requestKey }) => requestKey))];
+    const requestRecords = requestKeys.length ? await tx.idempotencyRecord.findMany({
+      where: { scope: { in: requestScopes }, key: { in: requestKeys } },
+      select: { scope: true, key: true, response: true },
+    }) : [];
+    const transactionIdByScopeAndKey = new Map(requestRecords.map((record) => {
+      const transactionId = asObject(record.response).id;
+      return [`${record.scope}\n${record.key}`, nonEmptyString(transactionId) ? transactionId : null] as const;
     }));
+    const transactionCandidatesByLandingId = new Map<string, {
+      recordId: string;
+      candidates: string[];
+      direct: boolean;
+    }>();
+    for (const record of settlementRecords) {
+      const landing = landingByScope.get(record.scope);
+      if (!landing) continue;
+      const response = asObject(record.response);
+      if (nonEmptyString(response.transactionId)) {
+        transactionCandidatesByLandingId.set(landing.landingId, {
+          recordId: record.id,
+          candidates: [response.transactionId],
+          direct: true,
+        });
+        continue;
+      }
+      if (!nonEmptyString(response.requestKey)) {
+        transactionCandidatesByLandingId.set(landing.landingId, {
+          recordId: record.id,
+          candidates: [],
+          direct: false,
+        });
+        continue;
+      }
+      const accountScope = `account:${landing.accountId}:room:${roomId}:toll`;
+      const candidates = [
+        transactionIdByScopeAndKey.get(`${accountScope}\n${response.requestKey}`),
+        transactionIdByScopeAndKey.get(`${legacyScope}\n${response.requestKey}`),
+      ].filter((transactionId): transactionId is string => nonEmptyString(transactionId));
+      transactionCandidatesByLandingId.set(landing.landingId, {
+        recordId: record.id,
+        candidates: [...new Set(candidates)],
+        direct: false,
+      });
+    }
     const transactionIds = [...new Set(
-      [...transactionIdByLandingId.values()].filter((transactionId): transactionId is string => transactionId !== null),
+      [...transactionCandidatesByLandingId.values()].flatMap(({ candidates }) => candidates),
     )];
     const transactions = transactionIds.length ? await tx.gameTransaction.findMany({
       where: { roomId, id: { in: transactionIds } },
-      select: { id: true, status: true },
+      select: { id: true, status: true, metadata: true },
     }) : [];
-    const statusByTransactionId = new Map(transactions.map((transaction) => [transaction.id, transaction.status]));
+    const transactionById = new Map(transactions.map((transaction) => [transaction.id, transaction]));
 
-    return new Map([...transactionIdByLandingId].map(([landingId, transactionId]) => [
-      landingId,
-      transactionId ? statusByTransactionId.get(transactionId) ?? 'UNKNOWN' : 'UNKNOWN',
-    ]));
+    return new Map([...transactionCandidatesByLandingId].map(([landingId, resolution]) => {
+      const transactionId = resolution.direct
+        ? resolution.candidates[0] ?? null
+        : resolution.candidates.find((candidate) => asObject(transactionById.get(candidate)?.metadata).landingId === landingId)
+          ?? resolution.candidates.find((candidate) => !nonEmptyString(asObject(transactionById.get(candidate)?.metadata).landingId))
+          ?? null;
+      return [landingId, {
+        record: { id: resolution.recordId },
+        status: transactionId ? transactionById.get(transactionId)?.status ?? 'UNKNOWN' : 'UNKNOWN',
+        transactionId,
+      }];
+    }));
   }
 
   private assertRequestHash(storedHash: string | null, expectedHash: string) {

@@ -165,6 +165,7 @@ io.use((socket, next) => {
     socket.handshake.headers['x-forwarded-for'],
     trustOneProxy,
   );
+  socket.data.clientIp = clientIp;
   void accounts.authenticate(rawToken, clientIp)
     .then((authenticated) => {
       socket.data.auth = authenticated;
@@ -419,6 +420,7 @@ app.post('/api/rooms/:id/transactions/reverse-latest', async (request) => { cons
 
 io.on('connection', (socket) => {
   const rawToken = cookieToken(socket.handshake.headers.cookie);
+  const clientIp = typeof socket.data.clientIp === 'string' ? socket.data.clientIp : socket.handshake.address;
   const connectedAuth = socket.data.auth as AuthenticatedSession;
   let roomSubscriptionIntent = 0;
   let roomSubscriptionCommit: Promise<void> = Promise.resolve();
@@ -440,7 +442,7 @@ io.on('connection', (socket) => {
     const subscription = parseRoomSubscriptionPayload(payload);
     if (!subscription) { socket.emit('room.subscription-rejected', {}); return; }
     const intent = ++roomSubscriptionIntent;
-    void accounts.authenticate(rawToken, socket.handshake.address)
+    void accounts.authenticate(rawToken, clientIp)
       .then((auth) => accounts.authorizeRoomSession(auth, subscription.roomId))
       .then((membership) => commitRoomSubscription(async () => {
         if (await applyRoomSubscriptionIntent(intent, subscription.roomId)) {

@@ -2066,6 +2066,97 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await first.snapshot(room.id)).landings.find((item) => item.id === landing.id)).toMatchObject({ tollSettled: false });
   });
 
+  it('keeps fallback toll request keys isolated by payer account', async () => {
+    const { room, a, b } = await physicalRoom();
+    const [landingA, landingB, playerA, playerB] = await Promise.all([
+      firstDb.landingEvent.findFirstOrThrow({ where: { roomId: room.id, playerId: a.playerId, status: 'CONFIRMED' } }),
+      firstDb.landingEvent.findFirstOrThrow({ where: { roomId: room.id, playerId: b.playerId, status: 'CONFIRMED' } }),
+      firstDb.player.findUniqueOrThrow({ where: { id: a.playerId }, include: { member: { select: { accountId: true } } } }),
+      firstDb.player.findUniqueOrThrow({ where: { id: b.playerId }, include: { member: { select: { accountId: true } } } }),
+    ]);
+    const sharedRequestKey = `shared-toll-request-${randomUUID()}`;
+    const committedTransactionId = `committed-toll-${randomUUID()}`;
+    const reversedTransactionId = `reversed-toll-${randomUUID()}`;
+
+    await firstDb.gameTransaction.createMany({ data: [
+      {
+        id: committedTransactionId,
+        roomId: room.id,
+        type: 'TOLL',
+        status: 'COMMITTED',
+        metadata: { landingId: landingA.id },
+      },
+      {
+        id: reversedTransactionId,
+        roomId: room.id,
+        type: 'TOLL',
+        status: 'REVERSED',
+        metadata: { landingId: landingB.id },
+      },
+    ] });
+    await firstDb.idempotencyRecord.createMany({ data: [
+      {
+        scope: `landing:${landingA.id}:toll`,
+        key: 'settled',
+        response: { requestKey: sharedRequestKey },
+      },
+      {
+        scope: `landing:${landingB.id}:toll`,
+        key: 'settled',
+        response: { requestKey: sharedRequestKey },
+      },
+      {
+        scope: `account:${playerA.member.accountId}:room:${room.id}:toll`,
+        key: sharedRequestKey,
+        response: { id: committedTransactionId },
+      },
+      {
+        scope: `account:${playerB.member.accountId}:room:${room.id}:toll`,
+        key: sharedRequestKey,
+        response: { id: reversedTransactionId },
+      },
+    ] });
+
+    const snapshot = await first.snapshot(room.id);
+    expect(snapshot.landings.find((landing) => landing.id === landingA.id)).toMatchObject({ tollSettled: true });
+    expect(snapshot.landings.find((landing) => landing.id === landingB.id)).toMatchObject({ tollSettled: false });
+  });
+
+  it('does not attach a legacy toll transaction that explicitly belongs to another landing', async () => {
+    const { room, a, b } = await physicalRoom();
+    const [landingA, landingB] = await Promise.all([
+      firstDb.landingEvent.findFirstOrThrow({ where: { roomId: room.id, playerId: a.playerId, status: 'CONFIRMED' } }),
+      firstDb.landingEvent.findFirstOrThrow({ where: { roomId: room.id, playerId: b.playerId, status: 'CONFIRMED' } }),
+    ]);
+    const requestKey = `legacy-colliding-toll-${randomUUID()}`;
+    const transactionId = `legacy-colliding-transaction-${randomUUID()}`;
+
+    await firstDb.gameTransaction.create({
+      data: {
+        id: transactionId,
+        roomId: room.id,
+        type: 'TOLL',
+        status: 'COMMITTED',
+        metadata: { landingId: landingB.id },
+      },
+    });
+    await firstDb.idempotencyRecord.createMany({ data: [
+      {
+        scope: `landing:${landingA.id}:toll`,
+        key: 'settled',
+        response: { requestKey },
+      },
+      {
+        scope: `room:${room.id}:toll`,
+        key: requestKey,
+        response: { id: transactionId },
+      },
+    ] });
+
+    const snapshot = await first.snapshot(room.id);
+    expect(snapshot.landings.find((landing) => landing.id === landingA.id)).toMatchObject({ tollSettled: false });
+  });
+
   it('loads visible toll settlement states with a constant number of idempotency queries', async () => {
     const { room, a } = await physicalRoom();
     const player = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId }, select: { memberId: true } });

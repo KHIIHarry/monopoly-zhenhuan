@@ -94,12 +94,17 @@ describe('Socket.IO room subscription ownership', () => {
     process.env.NODE_ENV = 'production';
     process.env.APP_ORIGIN = 'https://game.example.com';
     try {
-      const { accounts } = await socketHarness(
+      const { accounts, client } = await socketHarness(
         async () => ({ membership: { player: { id: 'player-1' }, isBank: false } }),
         { 'X-Forwarded-For': '198.51.100.44, 203.0.113.25' },
       );
+      const subscribed = event<{ roomId: string }>(client, 'room.snapshot-required');
+      client.emit('room.subscribe', { roomId: 'room-a' });
+      await subscribed;
 
-      expect(accounts.authenticate).toHaveBeenCalledWith('cookie-token', '203.0.113.25');
+      expect(accounts.authenticate).toHaveBeenCalledTimes(2);
+      expect(accounts.authenticate).toHaveBeenNthCalledWith(1, 'cookie-token', '203.0.113.25');
+      expect(accounts.authenticate).toHaveBeenNthCalledWith(2, 'cookie-token', '203.0.113.25');
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;
