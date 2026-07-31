@@ -56,7 +56,7 @@ export function LandingPropertyCardPicker({
       <div className="landing-property-owner-filters" role="group" aria-label="按地产所有者筛选">
         <button
           type="button"
-          className={`landing-owner-filter${selectedOwnerId === null ? ' selected' : ''}`}
+          className={`landing-owner-filter property-owner-filter property-theme-treasury${selectedOwnerId === null ? ' selected' : ''}`}
           aria-pressed={selectedOwnerId === null}
           onClick={() => setSelectedOwnerId(null)}
         >

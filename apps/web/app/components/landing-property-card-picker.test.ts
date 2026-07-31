@@ -35,6 +35,7 @@ describe('LandingPropertyCardPicker', () => {
     expect(html).toContain('钮祜禄·甄嬛');
     expect(html).not.toContain('>皇后</button>');
     expect(html).not.toContain('>银行</button>');
+    expect(html).toContain('landing-owner-filter property-owner-filter property-theme-treasury selected');
     expect(html).toContain('aria-pressed="true"');
   });
 

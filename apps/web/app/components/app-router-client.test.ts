@@ -24,3 +24,13 @@ describe('confirmation dialog', () => {
     expect(component).toMatch(/title=\{selectedAccount\.isSuperAdmin \? "超级管理员账号不能删除" : undefined\}[\s\S]*?disabled=\{busy \|\| selectedAccount\.isSuperAdmin\}[\s\S]*?删除账号/);
   });
 });
+
+describe('property explorer integration', () => {
+  test('uses the shared property explorer for player and bank property views', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component.match(/<LandingPropertyCardPicker\s+mode="browse"/g)).toHaveLength(3);
+    expect(component).toContain('mode="landing"');
+    expect(component).not.toContain('function PropertyList(');
+  });
+});

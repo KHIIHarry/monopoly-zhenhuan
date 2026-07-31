@@ -5350,7 +5350,11 @@ function PlayerView({
             />
           </div>
           <SectionTitle title="我的地产" action={`${mine.length} 块`} />
-          <PropertyList properties={mine} players={snapshot.players} />
+          <LandingPropertyCardPicker
+            mode="browse"
+            properties={mine}
+            players={snapshot.players}
+          />
           <SectionTitle title="最近交易" action="近 3 笔" />
           <Ledger
             entries={snapshot.ledger
@@ -5366,7 +5370,8 @@ function PlayerView({
             title="全局地产"
             action={`${snapshot.properties.length} 块`}
           />
-          <PropertyList
+          <LandingPropertyCardPicker
+            mode="browse"
             properties={snapshot.properties}
             players={snapshot.players}
           />
@@ -5392,6 +5397,7 @@ function PlayerView({
             请选择棋子精确停留的地产。系统不会追踪棋盘位置。
           </p>
           <LandingPropertyCardPicker
+            mode="landing"
             properties={snapshot.properties}
             players={snapshot.players}
             value={landing}
@@ -6494,7 +6500,8 @@ function BankView({
             title="全地图地产"
             action={`${snapshot.properties.length} 块`}
           />
-          <PropertyList
+          <LandingPropertyCardPicker
+            mode="browse"
             properties={snapshot.properties}
             players={snapshot.players}
           />
@@ -7391,96 +7398,6 @@ function PlayerList({ players }: { players: Player[] }) {
           <ChevronRight />
         </div>
       ))}
-    </div>
-  );
-}
-
-function PropertyList({
-  properties,
-  players,
-}: {
-  properties: Property[];
-  players: Player[];
-}) {
-  if (!properties.length) return <div className="empty">暂无地产</div>;
-  return (
-    <div className="property-list">
-      {properties.map((property) => {
-        const owner = players.find((player) => player.id === property.ownerId);
-        const toll = currentPropertyToll(property, players);
-        const tollBlocked = Boolean(owner?.tollCollectionBlocked);
-        return (
-          <article
-            key={property.name}
-            className={property.mortgaged ? "mortgaged" : ""}
-          >
-            <div className="property-heading">
-              <div>
-                <span>
-                  {property.mortgaged ? "已抵押" : owner ? "已持有" : "国库"}
-                </span>
-                <h3>{property.name}</h3>
-              </div>
-              <b>
-                {formatMoney(toll)}
-                <small> 过路费</small>
-              </b>
-            </div>
-            {tollBlocked && <p className="toll-blocked">冷宫中，免过路费</p>}
-            <div className="property-meta">
-              <span>
-                所有者<strong>{owner?.name ?? "无主"}</strong>
-              </span>
-              <span>
-                建筑
-                <strong>
-                  {property.level === 5 ? "大宫殿" : `${property.level} 级`}
-                </strong>
-              </span>
-              <span>
-                {owner ? "下级费用" : "购买价"}
-                <strong>
-                  {owner
-                    ? property.level < 5
-                      ? `${formatMoney(property.build)} 两`
-                      : "满级"
-                    : `${formatMoney(property.purchasePrice)} 两`}
-                </strong>
-              </span>
-            </div>
-            <details className="property-details">
-              <summary>查看完整价格与租金</summary>
-              <div className="property-prices">
-                <span>
-                  抵押价
-                  <strong>{formatMoney(property.mortgage ?? 0)} 两</strong>
-                </span>
-                <span>
-                  购买 / 卖回价
-                  <strong>{formatMoney(property.purchasePrice)} 两</strong>
-                </span>
-                <span>
-                  建筑费<strong>{formatMoney(property.build)} 两</strong>
-                </span>
-                <span>
-                  建筑出售价
-                  <strong>{formatMoney(property.buildingSell ?? 0)} 两</strong>
-                </span>
-              </div>
-              <div
-                className="toll-table"
-                aria-label={`${property.name} 0 至 5 级租金`}
-              >
-                {property.tolls.map((amount, level) => (
-                  <span key={level}>
-                    {level} 级 {formatMoney(amount)} 两
-                  </span>
-                ))}
-              </div>
-            </details>
-          </article>
-        );
-      })}
     </div>
   );
 }
