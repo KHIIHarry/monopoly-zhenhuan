@@ -1779,9 +1779,9 @@ export default function AppRouterClient({
     };
   }, [account?.id]);
 
-  useEffect(() => {
   useEffect(() => () => toastQueue.current?.dispose(), []);
 
+  useEffect(() => {
     if (!account) return;
     const refresh = () => {
       roomInvalidator.current?.();

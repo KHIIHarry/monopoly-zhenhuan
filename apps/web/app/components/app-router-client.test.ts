@@ -66,5 +66,6 @@ describe('realtime Toast integration', () => {
     expect(component).toMatch(/toast=\{currentToast\}[\s\S]*?showNotice=\{showNotice\}/);
     expect(component).toMatch(/<div className="toast" role="status" aria-live="polite" aria-atomic="true">[\s\S]*?<Check aria-hidden="true" \/>[\s\S]*?<span>\{toast\.message\}<\/span>/);
     expect(component).not.toContain('window.setTimeout(() => setNotice(""), 3500)');
+    expect(component).not.toMatch(/useEffect\(\(\) => \{\s*useEffect\(\(\) => \(\) => toastQueue\.current\?\.dispose\(\)/);
   });
 });
