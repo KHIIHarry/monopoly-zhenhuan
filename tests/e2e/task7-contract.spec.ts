@@ -572,7 +572,7 @@ test('a delayed room A game action cannot refresh over later room B navigation',
 
   await page.goto('/');
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
-  await expect(page.getByText('房间 A 初始快照')).toBeVisible();
+  await expect(page.getByText('房间 A 初始快照', { exact: true })).toHaveCount(1);
   await page.getByRole('button', { name: '转帐' }).click();
   await page.getByLabel('转帐金额').fill('100');
   await page.getByRole('button', { name: '确认转帐' }).click();
@@ -581,12 +581,12 @@ test('a delayed room A game action cannot refresh over later room B navigation',
   await page.getByRole('button', { name: '退出' }).click();
   await page.getByRole('button', { name: '确认返回' }).click();
   await page.getByRole('button', { name: /当前的翊坤宫/ }).click();
-  await expect(page.getByText('房间 B 最新快照')).toBeVisible();
+  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
 
   releaseTransfer();
   await page.waitForTimeout(300);
 
-  await expect(page.getByText('房间 B 最新快照')).toBeVisible();
+  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
   await expect(page.getByText('房间 A 过期快照')).toHaveCount(0);
 
   await page.getByRole('button', { name: '退出' }).click();
@@ -646,7 +646,7 @@ test('a delayed room A game action error cannot surface in later room B', async 
 
   await page.goto('/');
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
-  await expect(page.getByText('房间 A 初始快照')).toBeVisible();
+  await expect(page.getByText('房间 A 初始快照', { exact: true })).toHaveCount(1);
   await page.getByRole('button', { name: '转帐' }).click();
   await page.getByLabel('转帐金额').fill('100');
   await page.getByRole('button', { name: '确认转帐' }).click();
@@ -655,12 +655,12 @@ test('a delayed room A game action error cannot surface in later room B', async 
   await page.getByRole('button', { name: '退出' }).click();
   await page.getByRole('button', { name: '确认返回' }).click();
   await page.getByRole('button', { name: /当前的翊坤宫/ }).click();
-  await expect(page.getByText('房间 B 最新快照')).toBeVisible();
+  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
 
   releaseTransfer();
   await page.waitForTimeout(300);
 
-  await expect(page.getByText('房间 B 最新快照')).toBeVisible();
+  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
   await expect(page.getByText('转帐信息无效，请检查收款对象和金额')).toHaveCount(0);
 });
 
