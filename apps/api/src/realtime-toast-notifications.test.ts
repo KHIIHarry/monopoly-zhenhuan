@@ -2,9 +2,9 @@ import { PrismaClient } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { buildFundToastDeliveries, buildRejectionToastDelivery } from './realtime-toast-notifications.js';
 
-function entry(playerId: string, name: string, activeSessionId: string | null, amount: number, description: string) {
+function entry(playerId: string, name: string, activeSessionId: string | null, amount: number, description: string, id = `entry-${playerId}`) {
   return {
-    id: `entry-${playerId}`,
+    id,
     playerId,
     amount,
     description,
@@ -107,6 +107,25 @@ describe('fund Toast deliveries', () => {
     ]);
     expect(new Set(bankDeliveries.map(({ event }) => event.eventId)).size).toBe(3);
     expect(deliveries.every(({ event }) => event.message.length <= 240)).toBe(true);
+  });
+
+  it('gives repeated player effects stable, distinct event IDs', async () => {
+    const database = databaseFor({
+      id: 'tx-repeat-player', roomId: 'room-1', type: 'MANUAL_BALANCE_CHANGE', metadata: {},
+      ledgerEntries: [
+        entry('payer', '钮祜禄·甄嬛', 'payer-session', 100, '剧情补偿', 'entry-first'),
+        entry('payer', '钮祜禄·甄嬛', 'payer-session', 200, '银行奖励', 'entry-second'),
+      ],
+    });
+
+    const playerDeliveries = (await buildFundToastDeliveries(database, 'tx-repeat-player'))
+      .filter(({ event }) => event.audience === 'PLAYER');
+
+    expect(playerDeliveries).toHaveLength(2);
+    expect(playerDeliveries.map(({ event }) => event.eventId)).toEqual([
+      'tx-repeat-player:PLAYER:payer:entry-first',
+      'tx-repeat-player:PLAYER:payer:entry-second',
+    ]);
   });
 
   it('skips inactive participants while delivering non-zero effects to active participants and the bank', async () => {

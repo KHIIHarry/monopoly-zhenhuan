@@ -980,6 +980,25 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect(committed).toEqual([{ roomId: room.id, transactionId: result.id }]);
   });
 
+  it('emits a committed funds callback once for START_REWARD approval and never for its replay', async () => {
+    const { room, a, bank } = await physicalRoom();
+    const committed: Array<{ roomId: string; transactionId: string }> = [];
+    const game = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
+      requestRejected: () => undefined,
+    });
+    const landing = await first.declareStartLanding(room.id, a.playerId, 'notify-start-reward-landing', a.token, 'notify-start-reward-landing');
+    await first.confirmLanding(room.id, landing.id, bank.token, true);
+    const request = await first.createRequest(room.id, a.playerId, { type: 'START_REWARD', landingId: landing.id }, 'notify-start-reward-request');
+    const bankActor = state.banks.get(bank.token)!;
+
+    const approved = await game.approve(bankActor, room.id, request.id, 'notify-start-reward-approval');
+    const replay = await game.approve(bankActor, room.id, request.id, 'notify-start-reward-approval');
+
+    expect(replay).toEqual(approved);
+    expect(committed).toEqual([{ roomId: room.id, transactionId: approved.transactionId }]);
+  });
+
   it('emits post-commit callbacks once for every money command and for a rejection', async () => {
     const { room, a, b, bank } = await physicalRoom();
     const committed: Array<{ roomId: string; transactionId: string }> = [];

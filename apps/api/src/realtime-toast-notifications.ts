@@ -102,6 +102,10 @@ export async function buildFundToastDeliveries(
   const paid = entries.find((entry) => entry.amount < 0);
   const received = entries.find((entry) => entry.amount > 0);
   const paired = entries.length === 2 && paid && received && -paid.amount === received.amount;
+  const playerEntryCounts = new Map<string, number>();
+  for (const entry of entries) {
+    playerEntryCounts.set(entry.playerId, (playerEntryCounts.get(entry.playerId) ?? 0) + 1);
+  }
   const deliveries: ToastDelivery[] = [];
 
   for (const entry of entries) {
@@ -118,7 +122,7 @@ export async function buildFundToastDeliveries(
     deliveries.push({
       sessionId,
       event: {
-        eventId: `${transaction.id}:PLAYER:${entry.playerId}`,
+        eventId: `${transaction.id}:PLAYER:${entry.playerId}${playerEntryCounts.get(entry.playerId)! > 1 ? `:${entry.id}` : ''}`,
         roomId: transaction.roomId,
         audience: 'PLAYER',
         kind: 'FUNDS',
