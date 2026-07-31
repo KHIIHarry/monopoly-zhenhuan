@@ -326,7 +326,8 @@ test('landing-bound toll payment uses the confirmed landing and explains disable
   const tollSheet = page.getByRole('dialog', { name: '支付过路费' });
   await expect(tollSheet.getByLabel('目标地产')).toHaveCount(0);
   await expect(tollSheet.getByText('甘露寺', { exact: true })).toBeVisible();
-  await expect(tollSheet.getByText('皇后', { exact: true })).toBeVisible();
+  await expect(tollSheet.getByText('乌拉那拉·宜修', { exact: true })).toBeVisible();
+  await expect(tollSheet.getByText('皇后', { exact: true })).toHaveCount(0);
   await expect(tollSheet.getByText('1,800 两', { exact: true })).toBeVisible();
   await tollSheet.getByRole('button', { name: '确认支付过路费' }).click();
   expect(tollRequests).toEqual(['/api/rooms/room-1/properties/%E7%94%98%E9%9C%B2%E5%AF%BA/toll']);
@@ -336,6 +337,7 @@ test('landing-bound toll payment uses the confirmed landing and explains disable
     await page.reload();
     await page.getByRole('button', { name: '支付过路费' }).click();
     const sheet = page.getByRole('dialog', { name: '支付过路费' });
+    if (name === 'unowned') await expect(sheet.getByText('国库', { exact: true })).toBeVisible();
     await expect(sheet.getByText(fixture.reason, { exact: true })).toBeVisible();
     await expect(sheet.getByRole('button', { name: '确认支付过路费' })).toBeDisabled();
   }

@@ -4796,6 +4796,11 @@ function PlayerView({
   const tollOwner = landingProperty?.ownerId
     ? snapshot.players.find((player) => player.id === landingProperty.ownerId)
     : undefined;
+  const tollOwnerLabel = !landingProperty?.ownerId
+    ? "国库"
+    : tollOwner?.characterId
+      ? characterName(tollOwner.characterId)
+      : "角色信息缺失";
   const tollAmount = landingProperty && tollOwner
     ? currentPropertyToll(landingProperty, snapshot.players)
     : 0;
@@ -5542,7 +5547,7 @@ function PlayerView({
               </p>
               <p className="cost-line">
                 <span>地产主人</span>
-                <strong>{tollOwner?.name ?? "未知玩家"}</strong>
+                <strong>{tollOwnerLabel}</strong>
               </p>
               <p className="cost-line">
                 <span>建筑等级</span>
