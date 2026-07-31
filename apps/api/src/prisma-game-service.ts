@@ -239,8 +239,9 @@ export class PrismaGameService {
       const room = await tx.room.findUnique({ where: { id: roomId } });
       if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING'); if (room.diceMode !== 'ELECTRONIC') fail('PHYSICAL_DICE_MODE'); if (room.currentTurnPlayerId !== playerId) fail('NOT_CURRENT_PLAYER');
       const players = await this.playablePlayers(tx, roomId); if (!players.length) fail('PLAYER_COUNT_OUT_OF_RANGE');
-      const turn = await tx.turn.findFirst({ where: { roomId, status: 'ACTIVE' } }); if (!turn) fail('TURN_NOT_FOUND'); if (turn.diceValue === null) fail('ROLL_REQUIRED');
+      const turn = await tx.turn.findFirst({ where: { roomId, status: 'ACTIVE' } }); if (!turn) fail('TURN_NOT_FOUND');
       const index = players.findIndex((player) => player.id === playerId); if (index < 0) fail('PLAYER_NOT_FOUND');
+      if (turn.diceValue === null) fail('ROLL_REQUIRED');
       const tollLanding = await tx.landingEvent.findFirst({ where: { roomId, turnId: turn.id, playerId, spaceType: 'PROPERTY', status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false }, include: { property: true } });
       const tollProperty = tollLanding?.property;
       const settlement = tollLanding ? await this.tollSettlementState(tx, roomId, tollLanding.id) : null;
@@ -264,13 +265,43 @@ export class PrismaGameService {
     });
   }
 
+  async skipTurn(actor: GameActor, roomId: string, playerId: string, key: string) {
+    return this.executeIdempotent(actor, roomId, 'PLAYER', playerId, 'skip-turn', key, { roomId, playerId }, async (tx, member) => {
+      const room = await tx.room.findUnique({ where: { id: roomId } });
+      if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
+      if (room.diceMode !== 'ELECTRONIC') fail('PHYSICAL_DICE_MODE');
+      if (room.currentTurnPlayerId !== playerId) fail('NOT_CURRENT_PLAYER');
+      const players = await this.playablePlayers(tx, roomId);
+      const index = players.findIndex((player) => player.id === playerId);
+      if (index < 0) fail('PLAYER_NOT_FOUND');
+      const turn = await tx.turn.findFirst({ where: { roomId, playerId, status: 'ACTIVE' } });
+      if (!turn) fail('TURN_NOT_FOUND');
+      if (turn.diceValue !== null) fail('SKIP_TURN_NOT_ALLOWED');
+      if (players[index].remainingSkipTurns <= 0) fail('SKIP_TURN_NOT_ALLOWED');
+      const consumed = await this.consumeSkipTurns(tx, roomId, playerId, 1);
+      await tx.turn.update({ where: { id: turn.id }, data: { status: 'ENDED', endedAt: new Date() } });
+      const created = await this.createNextActionableTurn(tx, roomId, players, (index + 1) % players.length, turn.turnNumber + 1);
+      await tx.auditLog.create({ data: {
+        roomId,
+        actorMemberId: member.id,
+        actorRole: 'PLAYER',
+        action: 'SKIP_TURN',
+        entityType: 'Turn',
+        entityId: turn.id,
+        beforeJson: { remainingSkipTurns: consumed.before },
+        afterJson: { remainingSkipTurns: consumed.after, nextTurnId: created.id },
+      } });
+      return { id: created.id, number: created.turnNumber, playerId: created.playerId };
+    });
+  }
+
   async declareLanding(actor: GameActor, roomId: string, playerId: string, propertyName: string, key: string) {
     return this.executeIdempotent(actor, roomId, 'PLAYER', playerId, 'declare-property-landing', key, { roomId, playerId, propertyName }, async (tx, member) => {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
       const property = await tx.roomProperty.findFirst({ where: { roomId, definition: { name: propertyName } } }); if (!property) fail('PROPERTY_NOT_FOUND');
       const turn = room.diceMode === 'ELECTRONIC' ? await tx.turn.findFirst({ where: { roomId, playerId, status: 'ACTIVE' } }) : null;
       if (room.diceMode === 'ELECTRONIC' && (!turn || turn.diceValue === null || room.currentTurnPlayerId !== playerId)) fail('ROLL_REQUIRED');
-      if (turn && await tx.landingEvent.findFirst({ where: { turnId: turn.id, status: { in: ['DECLARED', 'CONFIRMED'] } } })) fail('LANDING_ALREADY_DECLARED');
+      if (turn) await this.replaceDeclaredElectronicLanding(tx, turn.id);
       if (room.diceMode === 'PHYSICAL') await this.invalidatePhysicalLandings(tx, roomId, playerId);
       return tx.landingEvent.create({ data: { roomId, turnId: turn?.id, playerId, spaceType: 'PROPERTY', propertyId: property.id, declaredBy: member.id } });
     });
@@ -281,7 +312,7 @@ export class PrismaGameService {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
       const turn = room.diceMode === 'ELECTRONIC' ? await tx.turn.findFirst({ where: { roomId, playerId, status: 'ACTIVE' } }) : null;
       if (room.diceMode === 'ELECTRONIC' && (!turn || turn.diceValue === null || room.currentTurnPlayerId !== playerId)) fail('ROLL_REQUIRED');
-      if (turn && await tx.landingEvent.findFirst({ where: { turnId: turn.id, status: { in: ['DECLARED', 'CONFIRMED'] } } })) fail('LANDING_ALREADY_DECLARED');
+      if (turn) await this.replaceDeclaredElectronicLanding(tx, turn.id);
       if (room.diceMode === 'PHYSICAL') await this.invalidatePhysicalLandings(tx, roomId, playerId);
       return tx.landingEvent.create({ data: { id: landingId, roomId, turnId: turn?.id, playerId, spaceType: 'START', declaredBy: member.id } });
     });
@@ -355,7 +386,6 @@ export class PrismaGameService {
       if (skipRequest && (action.propertyName || action.amount !== undefined || action.targetPlayerId || action.landingId)) fail('INVALID_SKIP_REQUEST_PAYLOAD');
       if (action.type === 'PLOT_REST_EVENT' && (!Number.isInteger(action.count) || (action.count ?? 0) <= 0 || !action.reason?.trim())) fail('INVALID_PLOT_REST');
       if (action.type === 'CONSUME_SKIP_TURNS') {
-        if (room.diceMode !== 'PHYSICAL') fail('PHYSICAL_DICE_MODE_REQUIRED');
         if (action.reason !== undefined || !Number.isInteger(action.count) || (action.count ?? 0) <= 0 || (action.count ?? 0) > player.remainingSkipTurns) fail('INSUFFICIENT_SKIP_TURNS');
       }
       if (landing) {
@@ -584,7 +614,7 @@ export class PrismaGameService {
         }
         case 'CONSUME_SKIP_TURNS': {
           const count = request.quantity;
-          if (!actorId || request.room.diceMode !== 'PHYSICAL' || !Number.isInteger(count) || !count) fail('INSUFFICIENT_SKIP_TURNS');
+          if (!actorId || !Number.isInteger(count) || !count) fail('INSUFFICIENT_SKIP_TURNS');
           await this.consumeSkipTurns(tx, roomId, actorId, count);
           break;
         }
@@ -803,7 +833,7 @@ export class PrismaGameService {
   async consumeSkip(actor: GameActor, roomId: string, playerId: string, count: number, key: string, reason: string) {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED'); if (!reason?.trim()) fail('REASON_REQUIRED'); if (!Number.isInteger(count) || count <= 0) fail('INSUFFICIENT_SKIP_TURNS');
     return this.executeIdempotent(actor, roomId, 'BANK', undefined, 'consume-skip-turn', key, { roomId, playerId, count, reason }, async (tx, bank) => {
-      const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING'); if (room.diceMode !== 'PHYSICAL') fail('PHYSICAL_DICE_MODE_REQUIRED');
+      const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
       const consumed = await this.consumeSkipTurns(tx, roomId, playerId, count); const response = { remainingSkipTurns: consumed.after };
       await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'MANUAL_SKIP_TURNS_CHANGE', entityType: 'Player', entityId: playerId, beforeJson: { remainingSkipTurns: consumed.before }, afterJson: response, reason } });
       return response;
@@ -949,6 +979,15 @@ export class PrismaGameService {
     if (!active.length) return;
     for (const landing of active) await this.cancelPendingRequests(tx, roomId, { landingEventId: landing.id }, 'PHYSICAL_LANDING_REPLACED');
     await tx.landingEvent.updateMany({ where: { id: { in: active.map((landing) => landing.id) }, status: { in: ['DECLARED', 'CONFIRMED'] } }, data: { status: 'INVALIDATED', invalidatedAt: new Date() } });
+  }
+
+  private async replaceDeclaredElectronicLanding(tx: Prisma.TransactionClient, turnId: string) {
+    const confirmed = await tx.landingEvent.findFirst({ where: { turnId, status: 'CONFIRMED' } });
+    if (confirmed) fail('LANDING_ALREADY_DECLARED');
+    await tx.landingEvent.updateMany({
+      where: { turnId, status: 'DECLARED' },
+      data: { status: 'INVALIDATED', invalidatedAt: new Date() },
+    });
   }
 
   private async changeBalance(tx: Prisma.TransactionClient, playerId: string, amount: number) {

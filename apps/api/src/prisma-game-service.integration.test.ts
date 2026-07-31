@@ -295,6 +295,7 @@ class V2GameFixtureFacade {
   start(roomId: string, fixtureKey: string, key: string) { return this.games.start(this.actor(fixtureKey), roomId, key); }
   roll(roomId: string, playerId: string, key: string) { return this.games.roll(this.playerActor(playerId), roomId, playerId, key); }
   endTurn(roomId: string, playerId: string, key: string) { return this.games.endTurn(this.playerActor(playerId), roomId, playerId, key); }
+  skipTurn(roomId: string, playerId: string, key: string) { return this.games.skipTurn(this.playerActor(playerId), roomId, playerId, key); }
   declareLanding(roomId: string, playerId: string, propertyName: string, _fixtureKey: string, key: string) { return this.games.declareLanding(this.playerActor(playerId), roomId, playerId, propertyName, key); }
   declareStartLanding(roomId: string, playerId: string, landingId: string, _fixtureKey: string, key: string) { return this.games.declareStartLanding(this.playerActor(playerId), roomId, playerId, landingId, key); }
   confirmLanding(roomId: string, landingId: string, fixtureKey: string, plotResolved = true, key = randomUUID()) { return this.games.confirmLanding(this.actor(fixtureKey), roomId, landingId, plotResolved, key); }
@@ -1405,22 +1406,44 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, definition: { name: '甘露寺' } } })).lockedByRequestId).toBeNull();
   });
 
-  it('skips electronic turns with persisted skip records and prevents rolling while blocked', async () => {
+  it('skips an electronic turn through the dedicated command', async () => {
     const room = await first.createRoom({ name: '电子停轮测试', initialBalance: 5000, diceMode: 'ELECTRONIC' });
     const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
     const b = await first.joinPlayer(room.code, '乙', 'huashifei');
     const bank = await first.joinBank(room.code, '国库');
     await first.start(room.id, bank.token, 'start-room');
-    await first.addSkipTurns(room.id, b.playerId, 2, 'PLOT_REST', bank.token, 'skip-b-twice', '测试连续停轮两次');
+    await first.addSkipTurns(room.id, b.playerId, 1, 'PLOT_REST', bank.token, 'skip-b-once', '测试停轮');
 
     await first.roll(room.id, a.playerId, 'roll-before-skipped-player');
     const advanced = await first.endTurn(room.id, a.playerId, 'advance-over-skipped-player');
     expect(advanced).toMatchObject({ number: 3, playerId: a.playerId });
-    expect((await firstDb.player.findUniqueOrThrow({ where: { id: b.playerId } })).remainingSkipTurns).toBe(1);
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: b.playerId } })).remainingSkipTurns).toBe(0);
     expect(await firstDb.turn.findFirst({ where: { roomId: room.id, turnNumber: 2 } })).toMatchObject({ playerId: b.playerId, status: 'ENDED', diceValue: null });
 
     await first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'block-current-player', '测试当前玩家停轮');
     await expect(first.roll(room.id, a.playerId, 'blocked-roll')).rejects.toThrow('PLAYER_MUST_SKIP_TURN');
+    await expect(first.endTurn(room.id, a.playerId, 'end-blocked-current-player')).rejects.toThrow('ROLL_REQUIRED');
+    const skipped = await first.skipTurn(room.id, a.playerId, 'skip-blocked-current-player');
+    expect(skipped).toMatchObject({ number: 4, playerId: b.playerId });
+    expect(await firstDb.turn.findFirst({ where: { roomId: room.id, turnNumber: 3 } })).toMatchObject({ playerId: a.playerId, status: 'ENDED', diceValue: null });
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(0);
+  });
+
+  it('allows a stopwheel deduction request in an electronic game', async () => {
+    const room = await first.createRoom({ name: '电子扣减停轮测试', initialBalance: 5000, diceMode: 'ELECTRONIC' });
+    const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
+    await first.joinPlayer(room.code, '乙', 'huashifei');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, 'start-room');
+    await first.addSkipTurns(room.id, a.playerId, 1, 'PLOT_REST', bank.token, 'add-skip', '剧情停留');
+
+    const request = await first.createRequest(room.id, a.playerId, { type: 'CONSUME_SKIP_TURNS', count: 1 }, 'electronic-consume-request');
+    expect(request).toMatchObject({
+      type: 'CONSUME_SKIP_TURNS',
+      status: 'PENDING',
+    });
+    await expect(first.approve(room.id, request.id, bank.token, 'approve-electronic-consume')).resolves.toMatchObject({ status: 'EXECUTED' });
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).remainingSkipTurns).toBe(0);
   });
 
   it('requires settling an actual toll before ending the electronic turn', async () => {
@@ -1529,16 +1552,23 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect((await firstDb.player.findUniqueOrThrow({ where: { id: outsider.playerId } })).balance).toBe(5000);
   });
 
-  it('rejects a second landing of any type in one electronic turn', async () => {
+  it('replaces an unconfirmed electronic landing when the player corrects it', async () => {
     const room = await first.createRoom({ name: '单落点测试', initialBalance: 5000, diceMode: 'ELECTRONIC' });
     const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
     await first.joinPlayer(room.code, '乙', 'huashifei');
     const bank = await first.joinBank(room.code, '国库');
     await first.start(room.id, bank.token, 'start-room');
     await first.roll(room.id, a.playerId, 'roll-for-one-landing');
-    await first.declareLanding(room.id, a.playerId, '甘露寺', a.token, 'first-electronic-landing');
+    const firstLanding = await first.declareLanding(room.id, a.playerId, '甘露寺', a.token, 'first-electronic-landing');
+    const correctedLanding = await first.declareLanding(room.id, a.playerId, '景仁宫', a.token, 'corrected-electronic-landing');
 
-    await expect(first.declareStartLanding(room.id, a.playerId, 'second-landing', a.token, 'second-landing-key')).rejects.toThrow('LANDING_ALREADY_DECLARED');
+    expect(correctedLanding).toMatchObject({ status: 'DECLARED' });
+    expect(correctedLanding.id).not.toBe(firstLanding.id);
+    expect(await firstDb.landingEvent.findUniqueOrThrow({ where: { id: firstLanding.id } })).toMatchObject({ status: 'INVALIDATED' });
+    expect(await firstDb.landingEvent.findUniqueOrThrow({ where: { id: correctedLanding.id }, include: { property: { include: { definition: true } } } })).toMatchObject({
+      status: 'DECLARED',
+      property: { definition: { name: '景仁宫' } },
+    });
   });
 
   it('refuses to confirm an electronic landing after its roll is no longer valid', async () => {

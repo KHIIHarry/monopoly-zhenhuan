@@ -266,6 +266,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   SAME_PLAYER_TRANSFER: "不能向自己转帐，请选择其他玩家",
   NOT_CURRENT_PLAYER: "现在不是你的回合，请等待轮到你",
   PLAYER_MUST_SKIP_TURN: "该玩家本轮需要停轮，不能执行此操作",
+  SKIP_TURN_NOT_ALLOWED: "当前回合不能跳过，请刷新后重试",
   ALREADY_ROLLED: "本轮已经掷过骰子，不能重复掷骰",
   ROLL_REQUIRED: "请先完成本轮掷骰",
   ROLL_NOT_FOUND: "没有找到本轮骰子结果，请刷新后重试",
@@ -942,7 +943,6 @@ export default function AppRouterClient({
   });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
   const [currentToast, setCurrentToast] = useState<ToastItem | null>(null);
   const toastQueue = useRef<ReturnType<typeof createToastQueue> | null>(null);
   const enqueue = useCallback((toast: ToastInput) => {
@@ -959,6 +959,7 @@ export default function AppRouterClient({
       if (toastQueue.current === queue) toastQueue.current = null;
     };
   }, []);
+  const busyRef = useRef(false);
   const roomGeneration = useRef(0);
   const roomTarget = useRef<string | null>(null);
   const activeRoomTransition = useRef<number | null>(null);
@@ -1093,8 +1094,8 @@ export default function AppRouterClient({
   }
 
   function beginRoomTransition(roomId: string): RoomOwner {
-    roomGeneration.current += 1;
     toastQueue.current?.clear();
+    roomGeneration.current += 1;
     roomTarget.current = roomId;
     snapshotRequestGeneration.current += 1;
     roomStateVersion.current = -1;
@@ -1116,8 +1117,8 @@ export default function AppRouterClient({
   }
 
   function clearRoomState() {
-    invalidateRoomTransition();
     toastQueue.current?.clear();
+    invalidateRoomTransition();
     setSelectedRoom(null);
     setSeats(null);
     setWorkbench(null);
@@ -1181,8 +1182,8 @@ export default function AppRouterClient({
 
   async function handleRoomControlLost(failedOwner: RoomOwner) {
     if (!ownsRoom(failedOwner)) return;
-    const owner = beginRoomTransition(failedOwner.roomId);
     toastQueue.current?.clear();
+    const owner = beginRoomTransition(failedOwner.roomId);
     setSnapshot(null);
     setWorkbench(null);
     setSettlementPreview(null);
@@ -1748,7 +1749,6 @@ export default function AppRouterClient({
       snapshotRequestGeneration.current += 1;
       refresh();
     };
-    roomInvalidator.current = refresh;
     const onRoomToast = (payload: unknown) => {
       const parsed = realtimeToastEventSchema.safeParse(payload);
       if (!parsed.success) return;
@@ -1757,6 +1757,7 @@ export default function AppRouterClient({
       if (parsed.data.audience !== runtime.workbench?.view) return;
       enqueue({ id: parsed.data.eventId, message: parsed.data.message });
     };
+    roomInvalidator.current = refresh;
     socket.on("connect", () => {
       socketRoomSubscription.current = null;
       const { roomId } = roomRuntime.current;
@@ -1772,8 +1773,8 @@ export default function AppRouterClient({
     socket.on("room.snapshot-required", onRoomEvent);
     socket.on("room.subscription-rejected", onRoomSubscriptionLost);
     socket.on("room.control.changed", onRoomSubscriptionLost);
-    socket.on("account.session.revoked", () => invalidateLogin());
     socket.on("room.toast", onRoomToast);
+    socket.on("account.session.revoked", () => invalidateLogin());
     return () => {
       const subscribedRoom = socketRoomSubscription.current;
       if (subscribedRoom && socket.connected)
@@ -2110,9 +2111,9 @@ export default function AppRouterClient({
         busy={busy}
         error={error}
         action={gameAction}
-        refresh={refreshGame}
         toast={currentToast}
         showNotice={showNotice}
+        refresh={refreshGame}
         switchView={(view) => void chooseWorkbench(view)}
         manageSeats={() => void manageSeats()}
         finish={() => void openFinish()}
@@ -4454,9 +4455,9 @@ function Workbench({
   busy,
   error,
   action,
-  refresh,
   toast,
   showNotice,
+  refresh,
   switchView,
   manageSeats,
   finish,
@@ -4467,9 +4468,9 @@ function Workbench({
   busy: boolean;
   error: string;
   action: ActionRunner;
-  refresh: () => Promise<boolean>;
   toast: ToastItem | null;
   showNotice: (message: string) => void;
+  refresh: () => Promise<boolean>;
   switchView: (view: "PLAYER" | "BANK") => void;
   manageSeats: () => void;
   finish: () => void;
@@ -4489,20 +4490,26 @@ function Workbench({
   return (
     <main className="app-shell" aria-busy={busy}>
       <div className="workbench-scroll">
-        <header>
-          <div>
-            {context.view === "PLAYER" ? (
+        <header
+          className={
+            context.view === "BANK" ? "bank-workbench-header" : undefined
+          }
+        >
+          {context.view === "PLAYER" ? (
+            <div className="workbench-header-title">
               <h1 aria-label="玩家端">{playerName}</h1>
-            ) : (
-              <>
-                <p>
-                  {snapshot.name} · {snapshot.code}
-                </p>
+            </div>
+          ) : (
+            <>
+              <div className="workbench-room-info">
+                <div className="workbench-room-meta">
+                  <strong title={snapshot.name}>{snapshot.name}</strong>
+                  <small>{" \u2022 "}{snapshot.code}</small>
+                </div>
                 <h1>银行端</h1>
-                <small>审批、轮次与资产管理</small>
-              </>
-            )}
-          </div>
+              </div>
+            </>
+          )}
           <div className="workbench-tools">
             <button onClick={manageSeats}>管理席位</button>
             <button
@@ -4825,6 +4832,11 @@ function PlayerView({
   );
   const landingConfirmed =
     currentLanding?.status === "CONFIRMED" && currentLanding.plotResolved;
+  const mustSkipCurrentTurn =
+    snapshot.diceMode === "ELECTRONIC" &&
+    canAct &&
+    (me?.remainingSkipTurns ?? 0) > 0 &&
+    snapshot.turn?.total === undefined;
   const landingProperty = snapshot.properties.find(
     (property) => property.name === currentLanding?.propertyName,
   );
@@ -5054,12 +5066,13 @@ function PlayerView({
   }
 
   async function endTurn() {
-    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/turn/end`, {
+    const actionName = mustSkipCurrentTurn ? "skip" : "end";
+    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/turn/${actionName}`, {
       playerId,
     });
     if (ok) {
       setPanel(null);
-      showNotice("回合已结束");
+      showNotice(mustSkipCurrentTurn ? "已跳过回合" : "回合已结束");
     }
   }
 
@@ -5310,7 +5323,7 @@ function PlayerView({
                 </strong>
               </div>
             </div>
-            {snapshot.diceMode === "ELECTRONIC" && (
+            {snapshot.diceMode === "ELECTRONIC" && !mustSkipCurrentTurn && (
               <button
                 className="primary compact"
                 disabled={busy || !canAct || snapshot.turn?.total !== undefined}
@@ -5334,27 +5347,27 @@ function PlayerView({
           <div className="quick-grid">
             <Quick
               icon={<MapPin />}
-              label="声明落点"
-              disabled={busy || !canAct}
+              label={currentLanding?.status === "DECLARED" ? "更正落点" : "声明落点"}
+              disabled={busy || !canAct || mustSkipCurrentTurn}
               onClick={() => setPanel("LANDING")}
-            />
-            <Quick
-              icon={<Banknote />}
-              label="起点奖励"
-              disabled={busy || !canAct}
-              onClick={() => setPanel("START")}
-            />
-            <Quick
-              icon={<Building2 />}
-              label="购买 / 建造"
-              disabled={busy || !canAct || !landingConfirmed}
-              onClick={() => setPanel("PROPERTY")}
             />
             <Quick
               icon={<CircleDollarSign />}
               label="支付过路费"
-              disabled={busy || !canAct}
+              disabled={busy || !canAct || mustSkipCurrentTurn}
               onClick={() => setPanel("TOLL")}
+            />
+            <Quick
+              icon={<Building2 />}
+              label="购买 / 建造"
+              disabled={busy || !canAct || mustSkipCurrentTurn || !landingConfirmed}
+              onClick={() => setPanel("PROPERTY")}
+            />
+            <Quick
+              icon={<Banknote />}
+              label="起点奖励"
+              disabled={busy || !canAct || mustSkipCurrentTurn}
+              onClick={() => setPanel("START")}
             />
             <Quick
               icon={<Landmark />}
@@ -5390,13 +5403,15 @@ function PlayerView({
               }
               onClick={() => setPanel("SKIP_CONSUME")}
             />
-            <Quick
-              icon={<Play />}
-              label="结束回合"
-              danger
-              disabled={busy || !canAct || snapshot.diceMode !== "ELECTRONIC"}
-              onClick={() => setPanel("END")}
-            />
+            {snapshot.diceMode === "ELECTRONIC" && (
+              <Quick
+                icon={<Play />}
+                label={mustSkipCurrentTurn ? "跳过回合" : "结束回合"}
+                danger
+                disabled={busy || !canAct}
+                onClick={() => setPanel("END")}
+              />
+            )}
           </div>
           <SectionTitle title="我的地产" action={`${mine.length} 块`} />
           <LandingPropertyCardPicker
@@ -5443,7 +5458,11 @@ function PlayerView({
       )}
 
       {panel === "LANDING" && (
-        <ActionSheet title="声明实体落点" onClose={() => setPanel(null)}>
+        <ActionSheet
+          title={currentLanding?.status === "DECLARED" ? "更正实体落点" : "声明实体落点"}
+          className="landing-action-sheet"
+          onClose={() => setPanel(null)}
+        >
           <p className="sheet-copy">
             请选择棋子精确停留的地产。系统不会追踪棋盘位置。
           </p>
@@ -5459,7 +5478,8 @@ function PlayerView({
             disabled={busy || !landing}
             onClick={() => void confirmLanding()}
           >
-            {busy ? <LoaderCircle className="spin" /> : <MapPin />}确认落点
+            {busy ? <LoaderCircle className="spin" /> : <MapPin />}
+            {currentLanding?.status === "DECLARED" ? "确认更正" : "确认落点"}
           </button>
         </ActionSheet>
       )}
@@ -5559,13 +5579,15 @@ function PlayerView({
 
       {panel === "END" && (
         <ConfirmDialog
-          title="结束当前回合"
-          confirmLabel="确认结束"
+          title={mustSkipCurrentTurn ? "跳过当前回合" : "结束当前回合"}
+          confirmLabel={mustSkipCurrentTurn ? "确认跳过" : "确认结束"}
           busy={busy}
           onCancel={() => setPanel(null)}
           onConfirm={() => void endTurn()}
         >
-          结束后操作权将交给下一位玩家，骰子结果不能继续使用。
+          {mustSkipCurrentTurn
+            ? "本次将消耗 1 次停轮，操作权将交给下一位玩家。"
+            : "结束后操作权将交给下一位玩家，骰子结果不能继续使用。"}
         </ConfirmDialog>
       )}
 
@@ -6050,6 +6072,9 @@ function BankView({
   const [skipPlayerId, setSkipPlayerId] = useState(
     snapshot.players[0]?.id ?? "",
   );
+  const [skipAdjustmentMode, setSkipAdjustmentMode] = useState<
+    "ADD" | "REMOVE"
+  >("ADD");
   const [skipCount, setSkipCount] = useState("1");
   const [skipSource, setSkipSource] = useState("PLOT_REST");
   const [skipReason, setSkipReason] = useState("");
@@ -6250,14 +6275,25 @@ function BankView({
     }
   }
 
-  function prepareSkipAdjustment(event: FormEvent) {
-    event.preventDefault();
+  function prepareSkipAdjustment() {
     setSkipAdjustment({
       playerId: skipPlayerId,
       count: Number(skipCount),
       source: skipSource,
       reason: skipReason.trim(),
     });
+  }
+
+  function submitSkipAdjustment(event: FormEvent) {
+    event.preventDefault();
+    if (skipAdjustmentMode === "ADD") prepareSkipAdjustment();
+    else prepareSkipConsumption();
+  }
+
+  function selectSkipAdjustmentMode(mode: "ADD" | "REMOVE") {
+    setSkipAdjustmentMode(mode);
+    if (mode === "ADD") setSkipConsumeReason("");
+    else setSkipReason("");
   }
 
   async function executeSkipAdjustment() {
@@ -6626,51 +6662,46 @@ function BankView({
             </button>
           </form>
 
-          <SectionTitle
-            title="轮次控制"
-            action={
-              snapshot.diceMode === "ELECTRONIC"
-                ? `第 ${snapshot.turn?.number ?? "-"} 轮`
-                : "实体骰子模式"
-            }
-          />
-          <section className="tool-section">
-            <div className="tool-heading">
-              <Dices />
-              <div>
-                <h2>现场裁定</h2>
-                <p>所有强制操作都会记录原因</p>
-              </div>
-            </div>
-            <div className="control-actions">
-              <button
-                disabled={
-                  busy ||
-                  snapshot.status !== "PLAYING" ||
-                  snapshot.diceMode !== "ELECTRONIC" ||
-                  snapshot.turn?.total === undefined
-                }
-                onClick={() => openControl("INVALIDATE")}
-              >
-                <Dices />
-                判定骰子无效
-              </button>
-              <button
-                disabled={
-                  busy ||
-                  snapshot.status !== "PLAYING" ||
-                  snapshot.diceMode !== "ELECTRONIC"
-                }
-                onClick={() => openControl("FORCE_NEXT")}
-              >
-                <Play />
-                强制下一位
-              </button>
-            </div>
-          </section>
+          {snapshot.diceMode === "ELECTRONIC" && (
+            <>
+              <SectionTitle
+                title="轮次控制"
+                action={`第 ${snapshot.turn?.number ?? "-"} 轮`}
+              />
+              <section className="tool-section">
+                <div className="tool-heading">
+                  <Dices />
+                  <div>
+                    <h2>现场裁定</h2>
+                    <p>所有强制操作都会记录原因</p>
+                  </div>
+                </div>
+                <div className="control-actions">
+                  <button
+                    disabled={
+                      busy ||
+                      snapshot.status !== "PLAYING" ||
+                      snapshot.turn?.total === undefined
+                    }
+                    onClick={() => openControl("INVALIDATE")}
+                  >
+                    <Dices />
+                    判定骰子无效
+                  </button>
+                  <button
+                    disabled={busy || snapshot.status !== "PLAYING"}
+                    onClick={() => openControl("FORCE_NEXT")}
+                  >
+                    <Play />
+                    强制下一位
+                  </button>
+                </div>
+              </section>
+            </>
+          )}
 
           <SectionTitle title="停轮管理" action="按玩家调整" />
-          <form className="tool-section" onSubmit={prepareSkipAdjustment}>
+          <form className="tool-section" onSubmit={submitSkipAdjustment}>
             <div className="tool-heading">
               <Crown />
               <div>
@@ -6692,56 +6723,71 @@ function BankView({
                 ))}
               </select>
             </label>
-            <div className="form-grid">
-              <label>
-                增加次数
-                <input
-                  required
-                  type="number"
-                  min="1"
-                  step="1"
-                  inputMode="numeric"
-                  value={skipCount}
-                  onChange={(event) => setSkipCount(event.target.value)}
-                />
-              </label>
-              <label>
-                停轮来源
-                <select
-                  value={skipSource}
-                  onChange={(event) => setSkipSource(event.target.value)}
-                >
-                  <option value="PLOT_REST">剧情原地停留</option>
-                  <option value="COLD_PALACE">冷宫</option>
-                  <option value="MANUAL">现场裁定</option>
-                </select>
-              </label>
+            <div className="segments two skip-adjustment-mode" aria-label="停轮操作">
+              <button
+                type="button"
+                className={skipAdjustmentMode === "ADD" ? "active add" : "add"}
+                aria-pressed={skipAdjustmentMode === "ADD"}
+                onClick={() => selectSkipAdjustmentMode("ADD")}
+              >
+                增加
+              </button>
+              <button
+                type="button"
+                className={skipAdjustmentMode === "REMOVE" ? "active remove" : "remove"}
+                aria-pressed={skipAdjustmentMode === "REMOVE"}
+                onClick={() => selectSkipAdjustmentMode("REMOVE")}
+              >
+                扣减
+              </button>
             </div>
-            <label>
-              停轮说明
-              <input
-                required
-                value={skipReason}
-                onChange={(event) => setSkipReason(event.target.value)}
-                placeholder="例：剧情卡原地停留"
-              />
-            </label>
-            {snapshot.diceMode === "PHYSICAL" && (
+            {skipAdjustmentMode === "ADD" ? (
+              <>
+                <div className="form-grid">
+                  <label>
+                    次数
+                    <input
+                      required
+                      type="number"
+                      min="1"
+                      step="1"
+                      inputMode="numeric"
+                      value={skipCount}
+                      onChange={(event) => setSkipCount(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    停轮来源
+                    <select
+                      value={skipSource}
+                      onChange={(event) => setSkipSource(event.target.value)}
+                    >
+                      <option value="PLOT_REST">剧情原地停留</option>
+                      <option value="COLD_PALACE">冷宫</option>
+                      <option value="MANUAL">现场裁定</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  停轮说明
+                  <input
+                    required
+                    value={skipReason}
+                    onChange={(event) => setSkipReason(event.target.value)}
+                    placeholder="例：剧情卡原地停留"
+                  />
+                </label>
+              </>
+            ) : (
               <>
                 <label>
                   扣减次数
                   <select
                     value={skipConsumeCount}
-                    onChange={(event) =>
-                      setSkipConsumeCount(event.target.value)
-                    }
+                    onChange={(event) => setSkipConsumeCount(event.target.value)}
                   >
                     {Array.from(
-                      {
-                        length:
-                          selectedSkipConsumptionPlayer?.remainingSkipTurns ??
-                          0,
-                      },
+                      { length: selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0 },
                       (_, index) => index + 1,
                     ).map((count) => (
                       <option value={count} key={count}>
@@ -6749,10 +6795,7 @@ function BankView({
                       </option>
                     ))}
                     <option value="ALL">
-                      全部（
-                      {selectedSkipConsumptionPlayer?.remainingSkipTurns ??
-                        0}{" "}
-                      次）
+                      全部（{selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0} 次）
                     </option>
                   </select>
                 </label>
@@ -6761,48 +6804,29 @@ function BankView({
                   <input
                     required
                     value={skipConsumeReason}
-                    onChange={(event) =>
-                      setSkipConsumeReason(event.target.value)
-                    }
-                    placeholder="填写本次实体回合确认依据"
+                    onChange={(event) => setSkipConsumeReason(event.target.value)}
+                    placeholder="填写停轮调整依据"
                   />
                 </label>
               </>
             )}
-            <div
-              className={`split-actions ${snapshot.diceMode === "PHYSICAL" ? "" : "single"}`}
-            >
-              {snapshot.diceMode === "PHYSICAL" && (
-                <button
-                  type="button"
-                  className="secondary danger-text"
-                  disabled={
-                    busy ||
-                    !skipPlayerId ||
-                    !skipConsumeReason.trim() ||
+            <button
+              className={`primary ${skipAdjustmentMode === "REMOVE" ? "jade" : ""}`}
+              type="submit"
+              disabled={
+                busy ||
+                !skipPlayerId ||
+                (skipAdjustmentMode === "ADD"
+                  ? Number(skipCount) <= 0 || !skipReason.trim()
+                  : !skipConsumeReason.trim() ||
                     !Number.isInteger(selectedSkipConsumptionCount) ||
                     selectedSkipConsumptionCount <= 0 ||
                     selectedSkipConsumptionCount >
-                      (selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0)
-                  }
-                  onClick={prepareSkipConsumption}
-                >
-                  扣减停轮
-                </button>
-              )}
-              <button
-                className="primary"
-                type="submit"
-                disabled={
-                  busy ||
-                  !skipPlayerId ||
-                  Number(skipCount) <= 0 ||
-                  !skipReason.trim()
-                }
-              >
-                增加停轮
-              </button>
-            </div>
+                      (selectedSkipConsumptionPlayer?.remainingSkipTurns ?? 0))
+              }
+            >
+              提交
+            </button>
           </form>
 
           <SectionTitle title="账务修正" action="产生审计账本" />
@@ -7602,10 +7626,12 @@ function useDialogFocus(onClose: () => void) {
 function ActionSheet({
   title,
   children,
+  className,
   onClose,
 }: {
   title: string;
   children: ReactNode;
+  className?: string;
   onClose: () => void;
 }) {
   const titleId = useId();
@@ -7621,7 +7647,7 @@ function ActionSheet({
       <section
         ref={dialogRef}
         tabIndex={-1}
-        className="action-sheet"
+        className={`action-sheet${className ? ` ${className}` : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -7638,7 +7664,9 @@ function ActionSheet({
             <X />
           </button>
         </div>
-        <div id={descriptionId}>{children}</div>
+        <div className="action-sheet-content" id={descriptionId}>
+          {children}
+        </div>
       </section>
     </div>
   );

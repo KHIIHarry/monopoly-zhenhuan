@@ -859,6 +859,87 @@ test('bank approval presents unified player and bank transfer details', async ({
   await expect(playerTransfer).toContainText('实际金额 400 两');
 });
 
+test('electronic players can correct an unconfirmed landing', async ({ page }) => {
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const snapshot = {
+    ...gameSnapshot,
+    diceMode: 'ELECTRONIC' as const,
+    turn: { id: 'turn-1', number: 1, playerId: 'player-1', dice: [3, 4] as [number, number], total: 7 },
+    landings: [{ id: 'landing-1', turnId: 'turn-1', playerId: 'player-1', propertyName: '甘露寺', spaceType: 'PROPERTY' as const, status: 'DECLARED' as const, plotResolved: false, propertyActionsCancelled: false, tollSettled: false }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+
+  await page.goto('http://localhost:3000/rooms/room-1/player');
+  await expect(page.getByRole('button', { name: '更正落点' })).toBeVisible();
+});
+
+test('bank submits the selected add or remove stopwheel mode in electronic games', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+  const removals: Record<string, unknown>[] = [];
+  const snapshot = {
+    ...gameSnapshot,
+    diceMode: 'ELECTRONIC' as const,
+    players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 2 }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+  await page.route('**/api/rooms/room-1/bank/consume-skip-turn', async (route) => {
+    removals.push(await postBody(route));
+    await route.fulfill({ json: { remainingSkipTurns: 0, stateVersion: 2 } });
+  });
+
+  await page.goto('http://localhost:3000/rooms/room-1/bank');
+  await page.getByRole('button', { name: '事务' }).click();
+  await expect(page.getByRole('button', { name: '增加', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: '扣减', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByLabel('次数', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '提交', exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: '扣减', exact: true }).click();
+  await expect(page.getByRole('button', { name: '扣减', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByLabel('次数', { exact: true })).toHaveCount(0);
+  await page.getByLabel('扣减次数').selectOption('2');
+  await page.getByLabel('扣减原因').fill('现场裁定错误');
+  await page.getByRole('button', { name: '提交', exact: true }).click();
+  await page.getByRole('button', { name: '确认扣减停轮' }).click();
+
+  expect(removals).toEqual([{ playerId: 'player-1', count: 2, reason: '现场裁定错误' }]);
+});
+
+test('a blocked electronic player uses the skip endpoint instead of ending a turn', async ({ page }) => {
+  const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
+  const skipBodies: Record<string, unknown>[] = [];
+  const snapshot = {
+    ...gameSnapshot,
+    diceMode: 'ELECTRONIC' as const,
+    turn: { id: 'turn-1', number: 1, playerId: 'player-1' },
+    players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 1 }],
+  };
+
+  await mockAccount(page);
+  await mockLobby(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
+  await page.route('**/api/rooms/room-1/turn/skip', async (route) => {
+    skipBodies.push(await postBody(route));
+    await route.fulfill({ json: { id: 'turn-2', number: 2, playerId: 'player-2', stateVersion: 2 } });
+  });
+
+  await page.goto('http://localhost:3000/rooms/room-1/player');
+  await expect(page.getByRole('button', { name: '掷骰' })).toHaveCount(0);
+  await page.getByRole('button', { name: '跳过回合' }).click();
+  await page.getByRole('button', { name: '确认跳过' }).click();
+
+  expect(skipBodies).toEqual([{ playerId: 'player-1' }]);
+});
+
 test('实体事件 shares one count, resets after success, and sends distinct cold and plot requests', async ({ page }, testInfo) => {
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
   const coldBodies: Record<string, unknown>[] = [];
@@ -1072,7 +1153,7 @@ test('伙伴卡获得审批不向非甄嬛显示奖励且不显示通用字段',
   await expect(dialog).not.toContainText('数量：无');
 });
 
-test('places skip consumption between physical events and end turn', async ({ page }) => {
+test('physical dice mode hides turn controls from the player workbench', async ({ page }) => {
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
   const snapshot = { ...gameSnapshot, players: [{ ...gameSnapshot.players[0], remainingSkipTurns: 1 }] };
 
@@ -1081,12 +1162,25 @@ test('places skip consumption between physical events and end turn', async ({ pa
   await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
   await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: snapshot }));
 
-  await openRoom(page);
+  await page.goto('http://localhost:3000/rooms/room-1/player');
   await expect(page.getByRole('heading', { name: '玩家端', exact: true })).toBeVisible();
-  const labels = await page.locator('.quick-grid .quick').evaluateAll((buttons) => buttons.map((button) => button.textContent?.trim()));
-  const physicalEvent = labels.indexOf('实体事件');
+  await expect(page.getByRole('button', { name: '结束回合' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '跳过回合' })).toHaveCount(0);
+});
 
-  expect(labels.slice(physicalEvent, physicalEvent + 3)).toEqual(['实体事件', '停轮次数减除', '结束回合']);
+test('physical dice mode hides turn controls from the bank workbench', async ({ page }) => {
+  const capability = { characterId: null, playerId: null, isBank: true, activeHere: true };
+
+  await mockAccount(page);
+  await mockLobby(page, [room({ characterId: null, myCharacter: null, isBank: true })]);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(capability) }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: gameSnapshot }));
+
+  await page.goto('http://localhost:3000/rooms/room-1/bank');
+  await page.getByRole('button', { name: '事务' }).click();
+  await expect(page.getByRole('heading', { name: '轮次控制' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '判定骰子无效' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '强制下一位' })).toHaveCount(0);
 });
 
 test('bank displays plot-rest details and submits all remaining skip turns', async ({ page }) => {

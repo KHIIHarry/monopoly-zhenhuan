@@ -6,6 +6,52 @@ const appRouter = await readFile(new URL('../apps/web/app/components/app-router-
 const appLayout = await readFile(new URL('../apps/web/app/layout.tsx', import.meta.url), 'utf8');
 const landingPicker = await readFile(new URL('../apps/web/app/components/landing-property-card-picker.tsx', import.meta.url), 'utf8');
 
+const quickGridStart = appRouter.indexOf('<div className="quick-grid">');
+const quickGridEnd = appRouter.indexOf('</div>', quickGridStart);
+const quickGrid = appRouter.slice(quickGridStart, quickGridEnd);
+
+assert.ok(
+  quickGrid.indexOf('label="支付过路费"') < quickGrid.indexOf('label="购买 / 建造"')
+    && quickGrid.indexOf('label="购买 / 建造"') < quickGrid.indexOf('label="起点奖励"'),
+  'The player quick grid must place toll payment before purchase/build and start reward after it.',
+);
+
+assert.match(
+  stylesheet,
+  /\.bank-workbench-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;[^}]*align-items:\s*center;/s,
+  'The bank workbench header must reserve independent room information and action columns.',
+);
+
+assert.match(
+  stylesheet,
+  /\.app-shell\s+header\.bank-workbench-header\s*\{[^}]*display:\s*grid;/s,
+  'The bank header grid must override the shared flex header layout.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.app-shell\s+header\.bank-workbench-header\s*\{[^}]*min-height:\s*100px;[^}]*border-bottom-width:\s*3px;/s,
+  'Mobile bank header must use the reference-scale title area and gold divider.',
+);
+
+assert.match(
+  stylesheet,
+  /\.bank-workbench-header\s+\.workbench-room-info\s+strong,[\s\S]*?\.bank-workbench-header\s+\.workbench-room-info\s+h1\s*\{[^}]*white-space:\s*nowrap;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;/s,
+  'Bank room information text must never wrap or overlap the action column.',
+);
+
+assert.match(
+  stylesheet,
+  /\.bank-workbench-header\s+\.workbench-room-meta\s+strong\s*\{[^}]*flex:\s*0\s+1\s+auto;/s,
+  'The room name must not consume the gap before the adjacent room code.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.bank-workbench-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;[^}]*gap:\s*8px;[\s\S]*?\.bank-workbench-header\s+\.workbench-tools\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*nowrap;[\s\S]*?\.bank-workbench-header\s+\.workbench-tools\s*>\s*button:not\(\.icon\)\s*\{[^}]*min-width:\s*86px;[^}]*min-height:\s*44px;[^}]*font-size:\s*18px;/s,
+  'Mobile bank-header actions must remain a reference-sized non-wrapping right column.',
+);
+
 assert.match(
   stylesheet,
   /\.device-list\s*\+\s*button\s*\{[^}]*margin-top:\s*24px;/s,
@@ -92,6 +138,12 @@ assert.match(
 
 assert.match(
   stylesheet,
+  /\.workbench-scroll\s*>\s*\.bank-summary:not\(\.toast\)\s*\{[^}]*width:\s*calc\(100%\s*\+\s*var\(--workbench-inline-padding\)\s*\+\s*var\(--workbench-inline-padding\)\);[^}]*margin-left:\s*calc\(0px\s*-\s*var\(--workbench-inline-padding\)\);[^}]*margin-right:\s*calc\(0px\s*-\s*var\(--workbench-inline-padding\)\);/s,
+  'The desktop bank summary must extend evenly to both workbench edges.',
+);
+
+assert.match(
+  stylesheet,
   /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.admin-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);[^}]*overflow-x:\s*clip;/s,
   'Mobile admin navigation must keep all four tabs in a fixed non-scrollable row.',
 );
@@ -104,8 +156,8 @@ assert.match(
 
 assert.match(
   appRouter,
-  /<ActionSheet\s+title="声明实体落点"\s+onClose=\{\(\)\s*=>\s*setPanel\(null\)\}/,
-  'The landing declaration must retain the standard sheet position.',
+  /<ActionSheet\s+title=\{currentLanding\?\.status === "DECLARED" \? "更正实体落点" : "声明实体落点"\}\s+className="landing-action-sheet"\s+onClose=\{\(\)\s*=>\s*setPanel\(null\)\}/s,
+  'The landing declaration must use its fixed confirmation layout.',
 );
 
 assert.match(
@@ -122,26 +174,44 @@ assert.match(
 
 assert.match(
   stylesheet,
-  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.landing-confirm\s*\{[^}]*width:\s*calc\(100%\s*\+\s*36px\);[^}]*margin:\s*0\s+-18px;/s,
-  'The mobile landing confirmation must meet the property picker without gaps and extend to its edges.',
+  /\.landing-action-sheet\s+\.landing-confirm\s*\{[^}]*width:\s*calc\(100%\s*\+\s*36px\);[^}]*margin:\s*10px\s+-18px;[^}]*border-radius:\s*6px;/s,
+  'The landing confirmation must align to the sheet edges while preserving small vertical spacing on every device.',
 );
 
 assert.match(
-  landingPicker,
-  /\{selected\s*&&\s*<span\s+className="landing-property-selected-label"\s+aria-hidden="true">✅<\/span>\}/,
-  'Selected landing cards must use a compact check-mark emoji.',
+  appRouter,
+  /<ActionSheet\s+title=\{currentLanding\?\.status === "DECLARED" \? "更正实体落点" : "声明实体落点"\}\s+className="landing-action-sheet"/s,
+  'The landing declaration must opt into the fixed confirmation layout.',
 );
 
 assert.match(
   stylesheet,
-  /\.landing-property-selected-label\s*\{[^}]*position:\s*absolute;[^}]*width:\s*22px;[^}]*height:\s*22px;[^}]*font-size:\s*18px;/s,
+  /\.landing-action-sheet\s*\{[^}]*overflow:\s*hidden;[^}]*display:\s*grid;[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\);/s,
+  'The landing sheet must prevent the outer dialog from scrolling.',
+);
+
+assert.match(
+  stylesheet,
+  /\.landing-action-sheet\s+\.landing-property-grid\s*\{[^}]*min-height:\s*0;[^}]*max-height:\s*none;[^}]*overflow-y:\s*auto;/s,
+  'Only the landing property grid may scroll while the confirmation remains visible.',
+);
+
+assert.match(
+  landingPicker,
+  /\{selected\s*&&\s*\(\s*<span\s+className="property-selected-mark"\s+aria-hidden="true">✓<\/span>\s*\)\}/s,
+  'Selected landing cards must use a compact check mark.',
+);
+
+assert.match(
+  stylesheet,
+  /\.property-selected-mark\s*\{[^}]*position:\s*absolute;[^}]*font-size:\s*20px;[^}]*pointer-events:\s*none;/s,
   'The selected landing marker must not consume card-title layout space.',
 );
 
 assert.match(
   stylesheet,
-  /\.landing-property-card:hover:not\(:disabled\):not\(\.selected\)\s*\{[^}]*border-color:\s*var\(--gold\);/s,
-  'Hover styling must not override the persistent selected landing-card border.',
+  /\.landing-property-card:hover:not\(\.selected\)\s*\{[^}]*background:\s*#fff8ec;[\s\S]*?\.landing-property-card\.selected\s*\{[^}]*outline:\s*3px\s+solid\s+var\(--red\);/s,
+  'Hover styling must not override the persistent selected landing-card outline.',
 );
 
 assert.match(

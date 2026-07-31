@@ -25,6 +25,17 @@ describe('confirmation dialog', () => {
   });
 });
 
+describe('bank workbench header', () => {
+  test('stacks the bank title under room information and keeps actions separate', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/<header\s+className=\{\s*context\.view === "BANK" \? "bank-workbench-header" : undefined\s*\}/s);
+    expect(component).toMatch(/className="workbench-room-info"[\s\S]*?className="workbench-room-meta"[\s\S]*?<strong title=\{snapshot\.name\}>\{snapshot\.name\}<\/strong>[\s\S]*?<small>\{" \\u2022 "\}\{snapshot\.code\}<\/small>[\s\S]*?<h1>银行端<\/h1>/);
+    expect(component).not.toContain("审批、轮次与资产管理");
+    expect(component).toMatch(/className="workbench-tools"[\s\S]*?管理席位[\s\S]*?aria-label="刷新房间快照"/);
+  });
+});
+
 describe('property explorer integration', () => {
   test('uses the shared property explorer for player and bank property views', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
@@ -33,6 +44,20 @@ describe('property explorer integration', () => {
     expect(component.match(/viewerPlayerId=\{me\.id\}/g)).toHaveLength(2);
     expect(component).toContain('mode="landing"');
     expect(component).not.toContain('function PropertyList(');
+  });
+});
+
+describe('physical dice turn controls', () => {
+  test('renders the player turn action only for electronic dice rooms', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/snapshot\.diceMode === "ELECTRONIC" && \(\s*<Quick[\s\S]*?label=\{mustSkipCurrentTurn \? "跳过回合" : "结束回合"\}/);
+  });
+
+  test('renders the bank turn-control section only for electronic dice rooms', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/snapshot\.diceMode === "ELECTRONIC" && \(\s*<>\s*<SectionTitle\s+title="轮次控制"[\s\S]*?强制下一位[\s\S]*?<\/section>\s*<\/>\s*\)/);
   });
 });
 
