@@ -30,9 +30,21 @@ describe('property explorer visual contract', () => {
     expect(stylesheet).toMatch(/\.property-palace-tier\s*\{[^}]*border:\s*3px double/s);
   });
 
-  it('falls back to one fluid card column on narrow screens', async () => {
+  it('keeps the landing selection outline inside a wider two-column desktop sheet', async () => {
     const stylesheet = await readFile(stylesheetUrl, 'utf8');
 
-    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*420px\)[\s\S]*?\.landing-property-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+    expect(stylesheet).toMatch(/\.landing-action-sheet\s*\{[^}]*width:\s*min\(840px,\s*calc\(100% - 40px\)\)/s);
+    expect(stylesheet).toMatch(/\.landing-action-sheet \.landing-property-grid\s*\{[^}]*padding:\s*6px/s);
+    expect(stylesheet).toMatch(/@media\s*\(min-width:\s*700px\)[\s\S]*?\.landing-action-sheet \.landing-property-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
+  });
+
+  it('uses compact edge-safe declaration cards through the 430px mobile range', async () => {
+    const stylesheet = await readFile(stylesheetUrl, 'utf8');
+
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet\s*\{[^}]*width:\s*calc\(100% - 16px\)[^}]*padding:\s*10px 12px 0/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.landing-property-card\.collapsed\s*\{[^}]*height:\s*174px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.landing-property-empty\s*\{[^}]*height:\s*174px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.landing-property-search input\s*\{[^}]*min-height:\s*40px[^}]*font-size:\s*16px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.landing-owner-filter\s*\{[^}]*min-height:\s*40px/s);
   });
 });

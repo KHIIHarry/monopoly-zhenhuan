@@ -833,12 +833,40 @@ label textarea { display: block; margin-top: 7px; }
 .property-palace-tier strong { color: var(--ink); font-size: 11px; white-space: nowrap; }
 .landing-property-empty { width: 100%; max-width: 360px; height: 220px; padding: 18px; border: 1px dashed #bdb6ac; border-radius: 6px; background: #faf9f6; color: #817a73; display: grid; place-content: center; gap: 5px; text-align: center; }
 .landing-property-empty small { display: block; }
-.landing-action-sheet { height: min(780px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); padding: 12px 18px 0; }
+.landing-action-sheet { width: min(840px, calc(100% - 40px)); height: min(780px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); padding: 12px 18px 0; }
 .landing-action-sheet > .action-sheet-content { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
 .landing-action-sheet .sheet-copy { margin: 6px 0; }
 .landing-action-sheet .landing-property-picker { min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; overflow: hidden; }
-.landing-action-sheet .landing-property-grid { min-height: 0; max-height: none; overflow-y: auto; }
+.landing-action-sheet .landing-property-grid { min-height: 0; max-height: none; overflow-y: auto; padding: 6px; grid-template-columns: minmax(0, 1fr); }
 .landing-action-sheet .landing-confirm { width: calc(100% + 36px); min-height: 52px; margin: 10px -18px; border-radius: 6px; }
+@media (min-width: 700px) {
+  .landing-action-sheet .landing-property-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 430px) {
+  .landing-action-sheet { width: calc(100% - 16px); height: min(760px, calc(100dvh - 16px)); max-height: calc(100dvh - 16px); padding: 10px 12px 0; }
+  .landing-action-sheet .modal-heading { min-height: 38px; }
+  .landing-action-sheet .modal-heading h2 { font-size: 19px; }
+  .landing-action-sheet .sheet-copy { margin: 3px 0 5px; font-size: 11px; line-height: 1.4; }
+  .landing-action-sheet .landing-property-picker { gap: 6px; }
+  .landing-action-sheet .landing-property-search input { min-height: 40px; padding-left: 36px; font-size: 16px; }
+  .landing-action-sheet .landing-property-search svg { left: 11px; width: 16px; height: 16px; }
+  .landing-action-sheet .landing-property-owner-filters { gap: 5px; }
+  .landing-action-sheet .landing-owner-filter { min-height: 40px; padding: 4px 10px; font-size: 11px; }
+  .landing-action-sheet .landing-property-grid { gap: 10px; }
+  .landing-action-sheet .landing-property-card { min-height: 174px; padding: 12px 10px 12px 14px; gap: 8px; }
+  .landing-action-sheet .landing-property-card.collapsed { height: 174px; }
+  .landing-action-sheet .landing-property-badge { min-width: 40px; padding: 5px 7px; font-size: 10px; }
+  .landing-action-sheet .landing-property-title-line { gap: 5px; max-width: calc(100% - 58px); margin: 3px 0 0; }
+  .landing-action-sheet .landing-property-card-title { font-size: 18px; }
+  .landing-action-sheet .property-cold-palace-hint { padding: 2px 4px; font-size: 9px; }
+  .landing-action-sheet .landing-property-card-meta { column-gap: 10px; row-gap: 8px; font-size: 11px; }
+  .landing-action-sheet .landing-property-card-meta strong { margin-top: 2px; font-size: 13px; }
+  .landing-action-sheet .property-owner-nickname { margin-top: 2px; font-size: 10px; }
+  .landing-action-sheet .property-selected-mark { top: 39px; right: 9px; font-size: 18px; }
+  .landing-action-sheet .property-mortgage-stamp { top: 104px; width: 92px; height: 31px; font-size: 15px; }
+  .landing-action-sheet .landing-property-empty { max-width: none; height: 174px; padding: 14px; }
+  .landing-action-sheet .landing-confirm { width: calc(100% + 24px); min-height: 46px; margin: 8px -12px; }
+}
 @media (max-width: 420px) {
   .landing-property-grid { grid-template-columns: minmax(0, 1fr); }
   .landing-property-empty { max-width: none; }
