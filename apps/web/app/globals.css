@@ -867,6 +867,26 @@ label textarea { display: block; margin-top: 7px; }
   .landing-action-sheet .landing-property-empty { max-width: none; height: 174px; padding: 14px; }
   .landing-action-sheet .landing-confirm { width: calc(100% + 24px); min-height: 46px; margin: 8px -12px; }
 }
+@media (max-width: 430px) {
+  .browse-property-picker { margin-inline: 16px; gap: 8px; }
+  .browse-property-picker .property-expand-hint { padding: 5px 8px; font-size: 11px; }
+  .browse-property-picker .landing-property-search input { min-height: 40px; padding-left: 36px; font-size: 16px; }
+  .browse-property-picker .landing-property-search svg { left: 11px; width: 16px; height: 16px; }
+  .browse-property-picker .landing-property-owner-filters { gap: 5px; }
+  .browse-property-picker .landing-owner-filter { min-height: 40px; padding: 4px 10px; font-size: 11px; }
+  .browse-property-picker .landing-property-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 0; }
+  .browse-property-picker .landing-property-card { min-height: 184px; padding: 12px 10px 12px 14px; gap: 8px; }
+  .browse-property-picker .landing-property-card.collapsed { height: 184px; }
+  .browse-property-picker .landing-property-badge { min-width: 40px; padding: 5px 7px; font-size: 10px; }
+  .browse-property-picker .landing-property-title-line { gap: 5px; max-width: calc(100% - 58px); margin: 3px 0 0; }
+  .browse-property-picker .landing-property-card-title { font-size: 19px; }
+  .browse-property-picker .property-cold-palace-hint { padding: 2px 4px; font-size: 9px; }
+  .browse-property-picker .landing-property-card-meta { column-gap: 10px; row-gap: 8px; font-size: 11px; }
+  .browse-property-picker .landing-property-card-meta strong { margin-top: 2px; font-size: 13px; }
+  .browse-property-picker .property-owner-nickname { margin-top: 2px; font-size: 10px; }
+  .browse-property-picker .property-mortgage-stamp { top: 110px; width: 94px; height: 32px; font-size: 15px; }
+  .browse-property-picker .landing-property-empty { max-width: none; height: 184px; padding: 14px; }
+}
 @media (max-width: 420px) {
   .landing-property-grid { grid-template-columns: minmax(0, 1fr); }
   .landing-property-empty { max-width: none; }

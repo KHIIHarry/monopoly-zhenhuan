@@ -47,4 +47,17 @@ describe('property explorer visual contract', () => {
     expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.landing-property-search input\s*\{[^}]*min-height:\s*40px[^}]*font-size:\s*16px/s);
     expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.landing-owner-filter\s*\{[^}]*min-height:\s*40px/s);
   });
+
+  it('keeps all mobile browse property surfaces inset and compact', async () => {
+    const stylesheet = await readFile(stylesheetUrl, 'utf8');
+
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker\s*\{[^}]*margin-inline:\s*16px[^}]*gap:\s*8px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.landing-property-search input\s*\{[^}]*min-height:\s*40px[^}]*font-size:\s*16px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.landing-owner-filter\s*\{[^}]*min-height:\s*40px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.landing-property-grid\s*\{[^}]*gap:\s*10px[^}]*padding:\s*0/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.landing-property-card\.collapsed\s*\{[^}]*height:\s*184px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.landing-property-empty\s*\{[^}]*height:\s*184px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.landing-property-card-title\s*\{[^}]*font-size:\s*19px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*430px\)[\s\S]*?\.browse-property-picker \.property-mortgage-stamp\s*\{[^}]*width:\s*94px[^}]*height:\s*32px/s);
+  });
 });
