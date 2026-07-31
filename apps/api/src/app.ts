@@ -8,6 +8,12 @@ import { authMeResponse, clearSessionCookie, loginBodySchema, passwordSchema, se
 import { mapApiError, RuleError } from './api-error.js';
 import { loadOriginPolicy } from './origin-policy.js';
 import { parseRoomSubscriptionPayload, PrismaGameService } from './prisma-game-service.js';
+import {
+  buildFundToastDeliveries,
+  buildRejectionToastDelivery,
+  type PostCommitToastNotifier,
+  type ToastDelivery,
+} from './realtime-toast-notifications.js';
 import { loadSecurityConfig } from './security-config.js';
 
 type ApiDatabase = ConstructorParameters<typeof AccountRoomService>[0];
@@ -17,9 +23,44 @@ type RoomSubscriptionSocket = {
   join: (roomId: string) => Promise<void> | void;
   leave: (roomId: string) => Promise<void> | void;
 };
+type SessionToastEmitter = {
+  to: (channel: string) => { emit: (name: string, event: ToastDelivery['event']) => unknown };
+};
+type ToastBuilders = {
+  funds: (database: ApiDatabase, transactionId: string) => Promise<ToastDelivery[]>;
+  rejection: (database: ApiDatabase, requestId: string) => Promise<ToastDelivery | null>;
+};
 
 export const roomChannel = (roomId: string) => `room:${roomId}`;
 export const sessionChannel = (sessionId: string) => `session:${sessionId}`;
+
+export function createPostCommitToastNotifier(
+  database: ApiDatabase,
+  emitter: SessionToastEmitter,
+  onError: (error: unknown, context: { roomId: string; sourceId: string; kind: 'FUNDS' | 'REQUEST_REJECTED' }) => void = () => undefined,
+  builders: ToastBuilders = { funds: buildFundToastDeliveries, rejection: buildRejectionToastDelivery },
+): PostCommitToastNotifier {
+  const emit = (delivery: ToastDelivery) => {
+    emitter.to(sessionChannel(delivery.sessionId)).emit('room.toast', delivery.event);
+  };
+  return {
+    fundsCommitted: async (roomId, transactionId) => {
+      try {
+        for (const delivery of await builders.funds(database, transactionId)) emit(delivery);
+      } catch (error) {
+        onError(error, { roomId, sourceId: transactionId, kind: 'FUNDS' });
+      }
+    },
+    requestRejected: async (roomId, requestId) => {
+      try {
+        const delivery = await builders.rejection(database, requestId);
+        if (delivery) emit(delivery);
+      } catch (error) {
+        onError(error, { roomId, sourceId: requestId, kind: 'REQUEST_REJECTED' });
+      }
+    },
+  };
+}
 
 export async function replaceRoomSubscription(socket: RoomSubscriptionSocket, roomId: string | null) {
   const previousRoomId = typeof socket.data.subscribedRoomId === 'string' ? socket.data.subscribedRoomId : null;
@@ -44,11 +85,6 @@ export type BuildApiAppOptions = {
 
 export async function buildApiApp(options: BuildApiAppOptions = {}) {
 const database = options.database ?? prisma;
-const accounts = options.accounts ?? (() => {
-  const security = loadSecurityConfig();
-  return new AccountRoomService(database, (username) => security.superAdminUsernames.has(username));
-})();
-const games = options.games ?? new PrismaGameService(database);
 const app = Fastify({ logger: options.logger ?? true });
 const { originAllowed, secureCookie } = loadOriginPolicy(process.env);
 app.addHook('onRequest', async (request, reply) => {
@@ -59,6 +95,14 @@ const io = new Server(app.server, {
   cors: { origin: (origin, done) => done(null, originAllowed(origin)), credentials: true },
   allowRequest: (request, done) => done(null, originAllowed(request.headers.origin)),
 });
+const toastNotifier = createPostCommitToastNotifier(database, io, (error, context) => {
+  app.log.error({ err: error, ...context }, 'Realtime Toast delivery failed');
+});
+const accounts = options.accounts ?? (() => {
+  const security = loadSecurityConfig();
+  return new AccountRoomService(database, (username) => security.superAdminUsernames.has(username), toastNotifier);
+})();
+const games = options.games ?? new PrismaGameService(database, Math.random, toastNotifier);
 
 function cookieToken(header?: string) {
   const cookie = header?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${sessionCookieName}=`));

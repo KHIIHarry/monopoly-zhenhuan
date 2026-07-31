@@ -5,6 +5,7 @@ import type { AccountRoomService, AuthenticatedSession } from './account-room-se
 import { sessionCookieName } from './auth-domain.js';
 import * as appModule from './app.js';
 import type { PrismaGameService } from './prisma-game-service.js';
+import type { RealtimeToastEvent } from '@zhenhuan/shared';
 
 type SubscriptionSocket = {
   data: Record<string, unknown>;
@@ -84,6 +85,58 @@ async function socketHarness(authorizeRoomSession: (auth: AuthenticatedSession, 
 }
 
 describe('Socket.IO room subscription ownership', () => {
+  it('targets fund and rejection Toasts only to their delivery Session channels', async () => {
+    const createNotifier = (appModule as typeof appModule & {
+      createPostCommitToastNotifier?: (...args: never[]) => {
+        fundsCommitted: (roomId: string, transactionId: string) => Promise<void>;
+        requestRejected: (roomId: string, requestId: string) => Promise<void>;
+      };
+    }).createPostCommitToastNotifier;
+    expect(createNotifier).toBeTypeOf('function');
+    if (!createNotifier) return;
+
+    const emitted: Array<{ channel: string; name: string; event: RealtimeToastEvent }> = [];
+    const emitter = {
+      to: (channel: string) => ({
+        emit: (name: string, event: RealtimeToastEvent) => { emitted.push({ channel, name, event }); },
+      }),
+    };
+    const fundEvents: RealtimeToastEvent[] = [
+      { eventId: 'tx-1:PLAYER:payer', roomId: 'room-a', audience: 'PLAYER', kind: 'FUNDS', message: '你向李四支付 500 两' },
+      { eventId: 'tx-1:PLAYER:receiver', roomId: 'room-a', audience: 'PLAYER', kind: 'FUNDS', message: '张三向你转入 500 两' },
+      { eventId: 'tx-1:BANK', roomId: 'room-a', audience: 'BANK', kind: 'FUNDS', message: '张三向李四支付 500 两' },
+    ];
+    const rejectedEvent: RealtimeToastEvent = {
+      eventId: 'request-1:rejected:PLAYER:payer', roomId: 'room-a', audience: 'PLAYER', kind: 'REQUEST_REJECTED', message: '你的转帐申请已被银行拒绝：金额有误',
+    };
+    const errors: unknown[] = [];
+    const notifier = createNotifier(
+      {} as never,
+      emitter,
+      (error: unknown) => { errors.push(error); },
+      {
+        funds: async () => [
+          { sessionId: 'payer-session', event: fundEvents[0]! },
+          { sessionId: 'receiver-session', event: fundEvents[1]! },
+          { sessionId: 'bank-session', event: fundEvents[2]! },
+        ],
+        rejection: async () => ({ sessionId: 'payer-session', event: rejectedEvent }),
+      },
+    );
+
+    await notifier.fundsCommitted('room-a', 'tx-1');
+    await notifier.requestRejected('room-a', 'request-1');
+
+    expect(emitted).toEqual([
+      { channel: 'session:payer-session', name: 'room.toast', event: fundEvents[0] },
+      { channel: 'session:receiver-session', name: 'room.toast', event: fundEvents[1] },
+      { channel: 'session:bank-session', name: 'room.toast', event: fundEvents[2] },
+      { channel: 'session:payer-session', name: 'room.toast', event: rejectedEvent },
+    ]);
+    expect(emitted.some(({ channel }) => channel === 'session:unrelated-session' || channel === 'session:other-room-session')).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
   it('replaces the previous room and explicitly cleans the active room', async () => {
     const replaceRoomSubscription = (appModule as typeof appModule & {
       replaceRoomSubscription?: (socket: SubscriptionSocket, roomId: string | null) => Promise<void>;
