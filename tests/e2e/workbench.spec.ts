@@ -419,12 +419,12 @@ test('stale PLAYER refresh cannot overwrite a later BANK snapshot', async ({ pag
   await page.getByRole('button', { name: '刷新房间快照' }).click();
   await expect.poll(() => playerReads).toBe(2);
   await page.getByRole('button', { name: '银行端', exact: true }).click();
-  await expect(page.getByText('最新银行快照', { exact: false })).toBeVisible();
+  await expect(page.getByTitle('最新银行快照')).toBeVisible();
   const staleResponse = page.waitForResponse((response) => response.url().includes('snapshot?view=PLAYER'));
   releaseStalePlayer();
   await staleResponse;
   await page.waitForTimeout(100);
-  await expect(page.getByText('最新银行快照', { exact: false })).toBeVisible();
+  await expect(page.getByTitle('最新银行快照')).toBeVisible();
   await expect(page.getByText('过期玩家快照', { exact: false })).toHaveCount(0);
 });
 
