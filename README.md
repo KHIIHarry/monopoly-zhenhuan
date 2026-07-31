@@ -59,6 +59,7 @@ HTTP 和 Socket.IO 都只从该 Cookie 认证。退出最早设备、退出其�
 - seats、游戏 snapshot 和 settlement REST 响应返回 `stateVersion`；H5 拒绝旧版本响应覆盖新版本。
 - 连接/重连、网络恢复、`pageshow`、页面重新可见和收到本房间通知时，H5 重新拉取完整权威状态。
 - 断线期间不依赖补收增量事件；恢复总是以 REST 完整快照为准。
+- `room.toast` 仅作为在线实时提醒，通过 `session:<sessionId>` 按当前玩家端或银行端定向发送；它不替代 REST 快照和不可变资金账本，断线期间也不会补发。
 
 ## 本地启动
 

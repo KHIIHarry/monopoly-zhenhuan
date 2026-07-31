@@ -1,4 +1,5 @@
 const realStack = process.env.TASK7_REAL_STACK === '1';
+const externalStack = process.env.PLAYWRIGHT_EXTERNAL_STACK === '1';
 const webServer = {
   command: 'npm run dev -w @zhenhuan/web -- --hostname 127.0.0.1',
   url: 'http://127.0.0.1:3000',
@@ -25,7 +26,7 @@ export default {
     { name: 'iphone-webkit', use: { browserName: 'webkit', viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true } },
     { name: 'short-mobile-webkit', use: { browserName: 'webkit', viewport: { width: 375, height: 667 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } },
   ],
-  webServer: realStack ? [
+  webServer: externalStack ? undefined : realStack ? [
     { command: 'npm run dev -w @zhenhuan/api', url: 'http://127.0.0.1:4000/health', reuseExistingServer: false, timeout: 120_000 },
     webServer,
   ] : webServer,

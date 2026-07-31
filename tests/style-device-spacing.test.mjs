@@ -161,3 +161,15 @@ assert.match(
   /\.admin-row\s*>\s*\.danger-text\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;[^}]*width:\s*100%;/s,
   'Room-member removal actions must span the full member row regardless of asset text length.',
 );
+
+assert.match(
+  stylesheet,
+  /\.toast\s*\{[^}]*top:\s*calc\(86px\s*\+\s*env\(safe-area-inset-top\)\);[^}]*width:\s*min\(calc\(100%\s*-\s*32px\),\s*500px\);[^}]*pointer-events:\s*none;[^}]*overflow-wrap:\s*anywhere;/s,
+  'Mobile Toasts must stay below the safe area, wrap long text, and never intercept pointer input.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(min-width:\s*900px\)\s*\{[\s\S]*?\.toast\s*\{[^}]*top:\s*24px;[^}]*right:\s*24px;[^}]*left:\s*auto;[^}]*transform:\s*none;[^}]*width:\s*min\(420px,\s*calc\(100vw\s*-\s*348px\)\);/s,
+  'Desktop Toasts must use the top-right space without covering the 300px navigation sidebar.',
+);

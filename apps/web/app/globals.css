@@ -525,7 +525,7 @@ label textarea { display: block; margin-top: 7px; }
 .toast {
   position: fixed;
   z-index: 40;
-  top: 86px;
+  top: calc(86px + env(safe-area-inset-top));
   left: 50%;
   transform: translateX(-50%);
   width: min(calc(100% - 32px), 500px);
@@ -539,6 +539,8 @@ label textarea { display: block; margin-top: 7px; }
   background: #e4f2e8;
   border: 1px solid #a8cbb4;
   box-shadow: 0 8px 24px #2d29262a;
+  pointer-events: none;
+  overflow-wrap: anywhere;
 }
 .toast svg { width: 18px; }
 
@@ -939,6 +941,14 @@ nav span { font-size: 10px; white-space: nowrap; }
 .desktop-nav-identity { display: none; }
 
 @media (min-width: 900px) {
+  .toast {
+    top: 24px;
+    right: 24px;
+    left: auto;
+    transform: none;
+    width: min(420px, calc(100vw - 348px));
+  }
+
   .app-shell {
     width: 100%;
     max-width: none;

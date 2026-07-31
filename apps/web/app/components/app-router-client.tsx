@@ -945,13 +945,20 @@ export default function AppRouterClient({
   const busyRef = useRef(false);
   const [currentToast, setCurrentToast] = useState<ToastItem | null>(null);
   const toastQueue = useRef<ReturnType<typeof createToastQueue> | null>(null);
-  if (!toastQueue.current) toastQueue.current = createToastQueue(setCurrentToast);
   const enqueue = useCallback((toast: ToastInput) => {
     toastQueue.current?.enqueue(toast);
   }, []);
   const showNotice = useCallback((message: string) => {
     enqueue({ message });
   }, [enqueue]);
+  useEffect(() => {
+    const queue = createToastQueue(setCurrentToast);
+    toastQueue.current = queue;
+    return () => {
+      queue.dispose();
+      if (toastQueue.current === queue) toastQueue.current = null;
+    };
+  }, []);
   const roomGeneration = useRef(0);
   const roomTarget = useRef<string | null>(null);
   const activeRoomTransition = useRef<number | null>(null);
@@ -1778,8 +1785,6 @@ export default function AppRouterClient({
       socket.disconnect();
     };
   }, [account?.id]);
-
-  useEffect(() => () => toastQueue.current?.dispose(), []);
 
   useEffect(() => {
     if (!account) return;
