@@ -4,6 +4,7 @@ import {
   landingOwnership,
   landingPropertyToll,
   propertyOwner,
+  propertyCharacterMeta,
   sortPropertiesByOwnership,
   visibleLandingPlayers,
 } from './landing-property-picker';
@@ -20,25 +21,31 @@ const players = [
 
 describe('landing property picker model', () => {
   it('filters property names after trimming whitespace', () => {
-    expect(filterLandingProperties(properties, ' 玉轩 ')).toEqual([properties[1]]);
+    expect(filterLandingProperties(properties, players, ' 玉轩 ')).toEqual([properties[1]]);
   });
 
   it('matches Chinese, a full-pinyin substring, initials, and mixed text', () => {
-    expect(filterLandingProperties(properties, '仁')).toEqual([properties[0]]);
-    expect(filterLandingProperties(properties, 'ren')).toEqual([properties[0]]);
-    expect(filterLandingProperties(properties, 'jrg')).toEqual([properties[0]]);
-    expect(filterLandingProperties(properties, '景ren')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, '仁')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, 'ren')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, 'jrg')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, '景ren')).toEqual([properties[0]]);
   });
 
   it('ignores query case and whitespace', () => {
-    expect(filterLandingProperties(properties, ' Jing Ren ')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, ' Jing Ren ')).toEqual([properties[0]]);
   });
 
-  it('filters by owner and intersects the owner with the query', () => {
-    expect(filterLandingProperties(properties, '', 'p1')).toEqual([properties[0]]);
-    expect(filterLandingProperties(properties, 'ren', 'p1')).toEqual([properties[0]]);
-    expect(filterLandingProperties(properties, 'yu', 'p1')).toEqual([]);
-    expect(filterLandingProperties(properties, '', null)).toEqual(properties);
+  it('matches owner character names and player nicknames with pinyin', () => {
+    expect(filterLandingProperties(properties, players, 'yixiu')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, 'laoshi')).toEqual([properties[0]]);
+  });
+
+  it('distinguishes all, unowned, and player filters and intersects them with the query', () => {
+    expect(filterLandingProperties(properties, players, '', 'p1')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, 'ren', 'p1')).toEqual([properties[0]]);
+    expect(filterLandingProperties(properties, players, 'yu', 'p1')).toEqual([]);
+    expect(filterLandingProperties(properties, players, '', 'unowned')).toEqual([properties[1]]);
+    expect(filterLandingProperties(properties, players, '', 'all')).toEqual(properties);
   });
 
   it('marks a property with an owner as purchased and resolves the owner name', () => {
@@ -64,6 +71,18 @@ describe('landing property picker model', () => {
       characterName: '乌拉那拉·宜修',
       theme: 'yixiu',
       player: { name: '小行老师' },
+    });
+  });
+
+  it('marks a property owned by the current viewer as mine', () => {
+    expect(propertyOwner(properties[0], players, 'p1').label).toBe('我的地产');
+    expect(propertyOwner(properties[0], players, 'someone-else').label).toBe('已持有');
+  });
+
+  it('provides short role labels for owner filters', () => {
+    expect(propertyCharacterMeta('yixiu')).toMatchObject({
+      name: '乌拉那拉·宜修',
+      filterLabel: '宜修',
     });
   });
 
