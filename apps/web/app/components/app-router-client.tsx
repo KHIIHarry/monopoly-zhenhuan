@@ -5359,6 +5359,7 @@ function PlayerView({
             mode="browse"
             properties={mine}
             players={snapshot.players}
+            viewerPlayerId={me.id}
           />
           <SectionTitle title="最近交易" action="近 3 笔" />
           <Ledger
@@ -5379,6 +5380,7 @@ function PlayerView({
             mode="browse"
             properties={snapshot.properties}
             players={snapshot.players}
+            viewerPlayerId={me.id}
           />
         </>
       )}

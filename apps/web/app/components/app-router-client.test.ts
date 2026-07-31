@@ -30,6 +30,7 @@ describe('property explorer integration', () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
 
     expect(component.match(/<LandingPropertyCardPicker\s+mode="browse"/g)).toHaveLength(3);
+    expect(component.match(/viewerPlayerId=\{me\.id\}/g)).toHaveLength(2);
     expect(component).toContain('mode="landing"');
     expect(component).not.toContain('function PropertyList(');
   });
