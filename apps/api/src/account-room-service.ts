@@ -3,6 +3,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { RuleError } from './api-error.js';
 import { accountSummary, hashPassword, maskIp, passwordSchema, sessionDurationMs, sessionSummary, verifyPassword } from './auth-domain.js';
+import type { PostCommitToastNotifier } from './realtime-toast-notifications.js';
 import { buildPropertySettlementDetail, isPristineSettlementTurn, rankSettlementPlayers, type RankedSettlementPlayer, type SettlementCandidate } from './settlement.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -285,7 +286,11 @@ function roleSwapSummary(request: {
 }
 
 export class AccountRoomService {
-  constructor(private readonly db: PrismaClient, private readonly isConfiguredSuperAdmin: (username: string) => boolean = () => false) {}
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly isConfiguredSuperAdmin: (username: string) => boolean = () => false,
+    private readonly toastNotifier?: PostCommitToastNotifier,
+  ) {}
 
   private async serializable<T>(task: (tx: Prisma.TransactionClient) => Promise<T>) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -474,7 +479,13 @@ export class AccountRoomService {
           });
           return { response, created: true };
         }, { isolationLevel });
-        if (result.created) await afterCreate?.();
+        if (result.created && afterCreate) {
+          try {
+            await afterCreate();
+          } catch {
+            // Notification delivery is best-effort after the mutation commits.
+          }
+        }
         return result.response;
       } catch (error) {
         if (isSerializationConflict(error) && attempt < 5) continue;
@@ -1385,9 +1396,11 @@ export class AccountRoomService {
 
   async selectCharacter(auth: AuthenticatedSession, roomId: string, characterId: string, key: string) {
     let mutationCreated = false;
+    let initialBalanceTransactionId: string | null = null;
     try {
       return await this.executeIdempotent(`account:${auth.account.id}:room:${roomId}:select-character`, key, { roomId, characterId }, async (tx) => {
         mutationCreated = false;
+        initialBalanceTransactionId = null;
         await this.lockRoom(tx, roomId);
         const membership = await this.ensureMembership(tx, auth, roomId, true);
         this.requireSeatAcquisitionAllowed(membership, membership.player !== null);
@@ -1418,13 +1431,16 @@ export class AccountRoomService {
         if (creatingPlayer && startsInLobby && membership.room.initialBalance > 0) {
           const effects = [{ playerId: player.id, amount: membership.room.initialBalance, before: 0, after: membership.room.initialBalance, type: 'INITIAL_BALANCE', description: '初始资金' }];
           const transaction = await tx.gameTransaction.create({ data: { roomId, type: 'INITIAL_BALANCE', reversible: false, metadata: { effects } } });
+          initialBalanceTransactionId = transaction.id;
           await tx.ledgerEntry.create({ data: { roomId, transactionId: transaction.id, playerId: player.id, amount: membership.room.initialBalance, balanceBefore: 0, balanceAfter: membership.room.initialBalance, type: 'INITIAL_BALANCE', description: '初始资金', createdBy: membership.id } });
         }
         if (creatingPlayer && startsInLobby) await tx.roomProperty.updateMany({ where: { roomId, propertyDefinitionId: character.initialPropertyId, ownerPlayerId: null }, data: { ownerPlayerId: player.id, version: { increment: 1 } } });
         await tx.securityLog.create({ data: { accountId: auth.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId, characterId, characterNameSnapshot: character.name } } });
         mutationCreated = true;
         return { ...membershipSummary(membership, auth.session.id), characterId, player: playerSummary(player) };
-      }, undefined, () => mutationCreated);
+      }, async () => {
+        if (initialBalanceTransactionId) await this.toastNotifier?.fundsCommitted(roomId, initialBalanceTransactionId);
+      }, () => mutationCreated);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') fail('ROLE_ALREADY_TAKEN');
       throw error;
@@ -1506,12 +1522,13 @@ export class AccountRoomService {
       membership: Awaited<ReturnType<AccountRoomService['ensureMembership']>>,
       roomId: string,
     ) => Promise<T>,
+    afterCommit?: (value: T, roomId: string) => void | Promise<void>,
   ) {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
     const canonicalRequest = JSON.stringify(canonicalValue(input));
     for (let attempt = 0; attempt < 6; attempt += 1) {
       try {
-        return await this.db.$transaction(async (tx) => {
+        const execution = await this.db.$transaction(async (tx) => {
           await this.ensureActiveSession(tx, auth);
           const roomId = await this.controlledRoomId(tx, auth, target);
           await this.lockRoom(tx, roomId);
@@ -1519,13 +1536,21 @@ export class AccountRoomService {
           if (capability === 'BANK' && !membership.isBank) fail('BANK_REQUIRED');
           const scope = `account:${auth.account.id}:room:${roomId}:role-swap:${operation}`;
           const previous = await tx.idempotencyRecord.findUnique({ where: { scope_key: { scope, key } } });
-          if (previous) return this.replayRecord<T>(previous, canonicalRequest);
+          if (previous) return { response: await this.replayRecord<T>(previous, canonicalRequest), roomId, created: false };
           const result = canonicalValue(await work(tx, membership, roomId)) as T;
           const room = await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } });
           const response = { ...result, stateVersion: room.stateVersion } as T;
           await tx.idempotencyRecord.create({ data: { scope, key, requestHash: await hashPassword(canonicalRequest), response: response as Prisma.InputJsonObject } });
-          return response;
+          return { response, roomId, created: true };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        if (execution.created && afterCommit) {
+          try {
+            await afterCommit(execution.response, execution.roomId);
+          } catch {
+            // Notification delivery is best-effort after the mutation commits.
+          }
+        }
+        return execution.response;
       } catch (error) {
         if (isSerializationConflict(error) && attempt < 5) continue;
         if (isSerializationConflict(error)) fail('TRANSACTION_RETRY_EXHAUSTED');
@@ -1620,7 +1645,14 @@ export class AccountRoomService {
     return updated;
   }
 
-  private async executeSwap(tx: Prisma.TransactionClient, requestId: string, actorMemberId: string, actorRole: 'PLAYER' | 'BANK', bankApprovedById?: string) {
+  private async executeSwap(
+    tx: Prisma.TransactionClient,
+    requestId: string,
+    actorMemberId: string,
+    actorRole: 'PLAYER' | 'BANK',
+    bankApprovedById?: string,
+    onInitialBalance?: (transactionId: string) => void,
+  ) {
     const request = required(await tx.roleSwapRequest.findUnique({ where: { id: requestId }, include: { room: true } }), 'SWAP_REQUEST_NOT_FOUND');
     const requester = await tx.roomMembership.findUnique({ where: { id: request.requesterMembershipId }, include: { player: true } });
     const target = await tx.roomMembership.findUnique({ where: { id: request.targetMembershipId }, include: { player: true } });
@@ -1669,6 +1701,7 @@ export class AccountRoomService {
       if (request.room.status === 'LOBBY' && initialBalance > 0) {
         const effects = [{ playerId: requesterPlayer.id, amount: initialBalance, before: 0, after: initialBalance, type: 'INITIAL_BALANCE', description: '初始资金' }];
         const transaction = await tx.gameTransaction.create({ data: { roomId: request.roomId, type: 'INITIAL_BALANCE', reversible: false, metadata: { effects } } });
+        onInitialBalance?.(transaction.id);
         await tx.ledgerEntry.create({ data: { roomId: request.roomId, transactionId: transaction.id, playerId: requesterPlayer.id, amount: initialBalance, balanceBefore: 0, balanceAfter: initialBalance, type: 'INITIAL_BALANCE', description: '初始资金', createdBy: requester.id } });
       }
       if (request.room.status === 'LOBBY') {
@@ -1698,14 +1731,20 @@ export class AccountRoomService {
 
   async acceptRoleSwap(auth: AuthenticatedSession, requestId: string, key: string) {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
+    let initialBalanceTransactionId: string | null = null;
     return this.executeControlledIdempotent(auth, { requestId }, `accept:${requestId}`, key, { requestId, action: 'ACCEPT' }, undefined, async (tx, targetActor, roomId) => {
+      initialBalanceTransactionId = null;
       const request = required(await tx.roleSwapRequest.findUnique({ where: { id: requestId }, include: { room: true } }), 'SWAP_REQUEST_NOT_FOUND');
       if (request.targetMembershipId !== targetActor.id || request.status !== 'PENDING_TARGET') fail('SWAP_REQUEST_NOT_PENDING');
       await tx.auditLog.create({ data: { roomId, actorMemberId: targetActor.id, actorRole: 'PLAYER', action: 'ROLE_SWAP_TARGET_ACCEPTED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: { status: request.status }, afterJson: { status: request.room.status === 'PLAYING' ? 'PENDING_BANK' : 'APPROVED' } } });
       const updated = request.room.status === 'PLAYING'
         ? await tx.roleSwapRequest.update({ where: { id: request.id }, data: { status: 'PENDING_BANK' } })
-        : await this.executeSwap(tx, request.id, targetActor.id, 'PLAYER');
+        : await this.executeSwap(tx, request.id, targetActor.id, 'PLAYER', undefined, (transactionId) => {
+            initialBalanceTransactionId = transactionId;
+          });
       return roleSwapSummary(updated);
+    }, async (_result, roomId) => {
+      if (initialBalanceTransactionId) await this.toastNotifier?.fundsCommitted(roomId, initialBalanceTransactionId);
     });
   }
 

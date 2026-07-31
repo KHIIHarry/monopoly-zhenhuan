@@ -11,6 +11,7 @@ import { RuleError } from './api-error.js';
 import { hashPassword } from './auth-domain.js';
 import { PrismaGameService, type GameActor, type SnapshotView } from './prisma-game-service.js';
 import * as prismaGameServiceModule from './prisma-game-service.js';
+import { buildFundToastDeliveries } from './realtime-toast-notifications.js';
 
 const unsafeResetConfirmation = 'I_UNDERSTAND_THIS_WILL_DELETE_ALL_DATA';
 
@@ -960,6 +961,99 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await expect(
       second.transfer(room.id, { fromPlayerId: a.playerId, recipientType: 'PLAYER', toPlayerId: b.playerId, amount: 301, isPlotFine: false }, 'concurrent-transfer-key'),
     ).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
+  });
+
+  it('emits a committed funds callback once for an immediate transfer and never for its replay', async () => {
+    const { room, a, b } = await physicalRoom();
+    const committed: Array<{ roomId: string; transactionId: string }> = [];
+    const game = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
+      requestRejected: () => undefined,
+    });
+    const actor = state.players.get(a.playerId)!;
+    const input = { fromPlayerId: a.playerId, recipientType: 'PLAYER' as const, toPlayerId: b.playerId, amount: 250, isPlotFine: false };
+
+    const result = await game.transfer(actor, room.id, input, 'fund-callback-transfer');
+    const replay = await game.transfer(actor, room.id, input, 'fund-callback-transfer');
+
+    expect(replay).toEqual(result);
+    expect(committed).toEqual([{ roomId: room.id, transactionId: result.id }]);
+  });
+
+  it('emits post-commit callbacks once for every money command and for a rejection', async () => {
+    const { room, a, b, bank } = await physicalRoom();
+    const committed: Array<{ roomId: string; transactionId: string }> = [];
+    const rejected: Array<{ roomId: string; requestId: string }> = [];
+    const game = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
+      requestRejected: (roomId, requestId) => { rejected.push({ roomId, requestId }); },
+    });
+    const bankActor = state.banks.get(bank.token)!;
+    const playerActor = state.players.get(a.playerId)!;
+
+    const adjustment = await game.adjustBalance(bankActor, room.id, a.playerId, 100, '通知测试', 'notify-adjust');
+    await game.adjustBalance(bankActor, room.id, a.playerId, 100, '通知测试', 'notify-adjust');
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: adjustment.id });
+
+    const reversal = await game.reverseLatest(bankActor, room.id, adjustment.id, '通知撤销测试', 'notify-reversal');
+    await game.reverseLatest(bankActor, room.id, adjustment.id, '通知撤销测试', 'notify-reversal');
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: reversal.reversalTransactionId });
+
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: b.playerId },
+    });
+    const toll = await game.payToll(playerActor, room.id, a.playerId, '甘露寺', 'notify-toll');
+    await game.payToll(playerActor, room.id, a.playerId, '甘露寺', 'notify-toll');
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: toll.id });
+
+    const fine = await game.plotFine(bankActor, room.id, a.playerId, 100, 'notify-fine');
+    await game.plotFine(bankActor, room.id, a.playerId, 100, 'notify-fine');
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: fine.id });
+
+    const paymentRequest = await game.requestBankPayment(playerActor, room.id, a.playerId, 200, 'notify-approval-request');
+    const approval = await game.approve(bankActor, room.id, paymentRequest.id, 'notify-approval');
+    await game.approve(bankActor, room.id, paymentRequest.id, 'notify-approval');
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: approval.transactionId });
+
+    const rejectedRequest = await game.requestBankPayment(playerActor, room.id, a.playerId, 200, 'notify-rejection-request');
+    await game.reject(bankActor, room.id, rejectedRequest.id, '金额有误', 'notify-rejection');
+    await game.reject(bankActor, room.id, rejectedRequest.id, '金额有误', 'notify-rejection');
+    expect(rejected).toEqual([{ roomId: room.id, requestId: rejectedRequest.id }]);
+
+    const restRequest = await game.createRequest(playerActor, room.id, a.playerId, { type: 'PLOT_REST_EVENT', count: 1, reason: '通知零分录测试' }, 'notify-zero-request');
+    const restApproval = await game.approve(bankActor, room.id, restRequest.id, 'notify-zero-approval');
+    await game.approve(bankActor, room.id, restRequest.id, 'notify-zero-approval');
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: restApproval.transactionId });
+    await expect(buildFundToastDeliveries(firstDb, restApproval.transactionId)).resolves.toEqual([]);
+
+    const skillRoom = await first.createRoom({ name: '现金技能通知', initialBalance: 5000, diceMode: 'PHYSICAL' });
+    const yixiu = await first.joinPlayer(skillRoom.code, '宜修', 'yixiu');
+    await first.joinPlayer(skillRoom.code, '甄嬛', 'zhenhuan');
+    const skillBank = await first.joinBank(skillRoom.code, '技能银行');
+    await first.start(skillRoom.id, skillBank.token, 'notify-skill-start');
+    const skillGame = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
+      requestRejected: () => undefined,
+    });
+    const skillResult = await skillGame.addSkipTurns(state.banks.get(skillBank.token)!, skillRoom.id, yixiu.playerId, 2, 'COLD_PALACE', 'notify-skill', '现金技能通知');
+    await skillGame.addSkipTurns(state.banks.get(skillBank.token)!, skillRoom.id, yixiu.playerId, 2, 'COLD_PALACE', 'notify-skill', '现金技能通知');
+    expect(committed.at(-1)).toEqual({ roomId: skillRoom.id, transactionId: skillResult.transactionId });
+
+    expect(committed).toHaveLength(7);
+  });
+
+  it('keeps a committed transfer successful when toast delivery fails', async () => {
+    const { room, a, b } = await physicalRoom();
+    const game = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: () => { throw new Error('delivery unavailable'); },
+      requestRejected: () => undefined,
+    });
+    const input = { fromPlayerId: a.playerId, recipientType: 'PLAYER' as const, toPlayerId: b.playerId, amount: 250, isPlotFine: false };
+
+    const result = await game.transfer(state.players.get(a.playerId)!, room.id, input, 'notify-failure-transfer');
+    await expect(game.transfer(state.players.get(a.playerId)!, room.id, input, 'notify-failure-transfer')).resolves.toEqual(result);
+    expect(await firstDb.gameTransaction.count({ where: { id: result.id } })).toBe(1);
   });
 
   it('unified transfer immediately settles player and bank recipients when approval is disabled', async () => {

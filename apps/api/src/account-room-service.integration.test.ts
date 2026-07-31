@@ -149,10 +149,11 @@ function expectNoSessionIds(value: unknown, sessionIds: string[]) {
 integration('AccountRoomService PostgreSQL authentication', () => {
   let db: PrismaClient;
   let service: AccountRoomService;
+  const configuredSuperAdmins = new Set<string>();
 
   beforeAll(async () => {
     db = new PrismaClient({ datasources: { db: { url: isolatedTestDatabaseUrl! } } });
-    service = new AccountRoomService(db);
+    service = new AccountRoomService(db, (username) => configuredSuperAdmins.has(username));
     await db.$queryRaw`SELECT 1`;
   });
 
@@ -161,12 +162,13 @@ integration('AccountRoomService PostgreSQL authentication', () => {
   async function createAccount(options: { superAdmin?: boolean; canCreateRoom?: boolean } = {}) {
     const suffix = randomUUID();
     const password = `Password-${suffix}`;
+    const username = `${accountPrefix}${suffix}`;
+    if (options.superAdmin) configuredSuperAdmins.add(username);
     const account = await db.account.create({
       data: {
-        username: `${accountPrefix}${suffix}`,
+        username,
         passwordHash: await hashPassword(password),
         displayName: `Task 2 ${suffix.slice(0, 8)}`,
-        isSuperAdmin: options.superAdmin ?? false,
         canCreateRoom: options.canCreateRoom ?? false,
       },
     });
@@ -447,6 +449,7 @@ integration('AccountRoomService PostgreSQL authentication', () => {
 integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
   let db: PrismaClient;
   let service: AccountRoomService;
+  const configuredSuperAdmins = new Set<string>();
 
   const roomInput = (name: string, overrides: Partial<{
     password: string;
@@ -471,7 +474,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
   beforeAll(async () => {
     db = new PrismaClient({ datasources: { db: { url: isolatedTestDatabaseUrl! } } });
-    service = new AccountRoomService(db);
+    service = new AccountRoomService(db, (username) => configuredSuperAdmins.has(username));
     await db.$queryRaw`SELECT 1`;
   });
 
@@ -479,13 +482,14 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
   async function createAuth(options: { canCreateRoom?: boolean; displayName?: string; superAdmin?: boolean } = {}) {
     const suffix = randomUUID();
+    const username = `${accountPrefix}${suffix}`;
+    if (options.superAdmin) configuredSuperAdmins.add(username);
     const account = await db.account.create({
       data: {
-        username: `${accountPrefix}${suffix}`,
+        username,
         passwordHash: await hashPassword(`Password-${suffix}`),
         displayName: options.displayName ?? `Task 3 ${suffix.slice(0, 8)}`,
         canCreateRoom: options.canCreateRoom ?? false,
-        isSuperAdmin: options.superAdmin ?? false,
       },
     });
     const session = await db.accountSession.create({
@@ -507,9 +511,36 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
         id: account.id,
         username: account.username,
         displayName: account.displayName,
-        isSuperAdmin: account.isSuperAdmin,
+        isSuperAdmin: options.superAdmin ?? false,
         canCreateRoom: account.canCreateRoom,
       },
+      session: { id: session.id, accountId: account.id },
+    };
+    return { account, auth };
+  }
+
+  async function createToastAuth(canCreateRoom = false) {
+    const suffix = randomUUID();
+    const account = await db.account.create({ data: {
+      username: `toast-${suffix}`,
+      passwordHash: await hashPassword(`Password-${suffix}`),
+      displayName: `Toast ${suffix.slice(0, 8)}`,
+      canCreateRoom,
+    } });
+    const session = await db.accountSession.create({ data: {
+      accountId: account.id,
+      sessionTokenHash: randomUUID().replaceAll('-', ''),
+      deviceId: randomUUID(),
+      deviceName: 'Toast Test Browser',
+      browser: 'Test',
+      operatingSystem: 'Test',
+      userAgent: 'Toast integration test',
+      loginIp: '127.0.0.1',
+      lastIp: '127.0.0.1',
+      expiresAt: new Date(Date.now() + 60_000),
+    } });
+    const auth: AuthenticatedSession = {
+      account: { id: account.id, username: account.username, displayName: account.displayName, isSuperAdmin: false, canCreateRoom },
       session: { id: session.id, accountId: account.id },
     };
     return { account, auth };
@@ -672,6 +703,50 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.ledgerEntry.count({ where: { roomId: zeroRoom.id, playerId: player.id } })).toBe(0);
     expect(await db.gameTransaction.count({ where: { roomId: zeroRoom.id, type: 'INITIAL_BALANCE' } })).toBe(0);
     expect(await db.roomProperty.findFirstOrThrow({ where: { roomId: zeroRoom.id, propertyDefinitionId: character!.initialPropertyId } })).toMatchObject({ ownerPlayerId: player.id });
+  });
+
+  it('emits the initial-balance transaction once after the first character selection commit', async () => {
+    const committed: Array<{ roomId: string; transactionId: string }> = [];
+    const notifiedService = new AccountRoomService(db, () => false, {
+      fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
+      requestRejected: () => undefined,
+    });
+    const creator = await createToastAuth(true);
+    const member = await createToastAuth();
+    const [character] = await characters(1);
+    const room = await createRoom(creator.auth, 'Initial balance callback');
+    await notifiedService.joinRoom(member.auth, room.id, undefined, 'join-initial-callback');
+
+    await notifiedService.selectCharacter(member.auth, room.id, character!.id, 'select-initial-callback');
+    await notifiedService.selectCharacter(member.auth, room.id, character!.id, 'select-initial-callback');
+
+    const transaction = await db.gameTransaction.findFirstOrThrow({ where: { roomId: room.id, type: 'INITIAL_BALANCE' } });
+    expect(committed).toEqual([{ roomId: room.id, transactionId: transaction.id }]);
+  });
+
+  it('emits a role-swap initial-balance transaction once after commit', async () => {
+    const committed: Array<{ roomId: string; transactionId: string }> = [];
+    const notifiedService = new AccountRoomService(db, () => false, {
+      fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
+      requestRejected: () => undefined,
+    });
+    const creator = await createToastAuth(true);
+    const requester = await createToastAuth();
+    const target = await createToastAuth();
+    const [character] = await characters(1);
+    const room = await createRoom(creator.auth, 'Role swap initial balance callback');
+    await notifiedService.joinRoom(requester.auth, room.id, undefined, 'notify-swap-requester-join');
+    await notifiedService.joinRoom(target.auth, room.id, undefined, 'notify-swap-target-join');
+    await notifiedService.selectCharacter(target.auth, room.id, character!.id, 'notify-swap-target-character');
+    committed.length = 0;
+    const request = await notifiedService.requestRoleSwap(requester.auth, room.id, character!.id, 'notify-swap-request');
+
+    const accepted = await notifiedService.acceptRoleSwap(target.auth, request.id, 'notify-swap-accept');
+    await expect(notifiedService.acceptRoleSwap(target.auth, request.id, 'notify-swap-accept')).resolves.toEqual(accepted);
+
+    const requesterPlayer = await db.player.findFirstOrThrow({ where: { roomId: room.id, member: { accountId: requester.account.id } } });
+    const transaction = await db.gameTransaction.findFirstOrThrow({ where: { roomId: room.id, ledgerEntries: { some: { playerId: requesterPlayer.id, type: 'INITIAL_BALANCE' } } } });
+    expect(committed).toEqual([{ roomId: room.id, transactionId: transaction.id }]);
   });
 
   it('replays the same character and rejects a direct second character without duplicating assets or logs', async () => {
@@ -2315,7 +2390,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     await db.account.update({ where: { id: bank.account.id }, data: { status: 'DISABLED' } });
     await expect(service.previewSettlement(activeBank, room.id)).rejects.toMatchObject({ code: 'SESSION_INVALID' });
 
-    await db.account.update({ where: { id: admin.account.id }, data: { isSuperAdmin: false } });
+    configuredSuperAdmins.delete(admin.account.username);
     await expect(service.previewSettlement(admin.auth, room.id, 'ADMIN')).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
   });
 

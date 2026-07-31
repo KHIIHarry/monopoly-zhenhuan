@@ -3,6 +3,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { roll2d6 } from '@zhenhuan/shared';
 import { z } from 'zod';
 import { RuleError } from './api-error.js';
+import type { PostCommitToastNotifier } from './realtime-toast-notifications.js';
 
 export type GameActor = { accountId: string; sessionId: string };
 export type SnapshotView = 'PLAYER' | 'BANK';
@@ -57,7 +58,11 @@ export function parseRoomSubscriptionPayload(payload: unknown) {
 }
 
 export class PrismaGameService {
-  constructor(private readonly db: PrismaClient, private readonly random: () => number = Math.random) {}
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly random: () => number = Math.random,
+    private readonly toastNotifier?: PostCommitToastNotifier,
+  ) {}
 
   private async playablePlayers(tx: Prisma.TransactionClient, roomId: string, playerIds?: string[]) {
     const candidates = await tx.player.findMany({
@@ -591,7 +596,9 @@ export class PrismaGameService {
       const executed = await tx.gameRequest.update({ where: { id: request.id }, data: { status: 'EXECUTED', resolvedAt: new Date() } });
       mutationCreated = true;
       return { id: executed.id, status: executed.status, transactionId: transaction.id };
-    }, async (tx) => this.requireRequestParticipants(tx, roomId, requestId), () => mutationCreated);
+    }, async (tx) => this.requireRequestParticipants(tx, roomId, requestId), () => mutationCreated, async (result) => {
+      if (mutationCreated && typeof result.transactionId === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.transactionId);
+    });
   }
 
   async reject(actor: GameActor, roomId: string, requestId: string, reason: string, key: string) {
@@ -604,6 +611,8 @@ export class PrismaGameService {
         if (request.propertyId) await tx.roomProperty.updateMany({ where: { id: request.propertyId, lockedByRequestId: request.id }, data: { lockedByRequestId: null } });
         const rejected = await tx.gameRequest.findUniqueOrThrow({ where: { id: request.id } });
         return { id: rejected.id, status: rejected.status };
+    }, undefined, undefined, async (result) => {
+      if (typeof result.id === 'string') await this.toastNotifier?.requestRejected(roomId, result.id);
     });
   }
 
@@ -668,7 +677,9 @@ export class PrismaGameService {
       return { id: transaction.id, status: 'EXECUTED', originalAmount: amounts.originalAmount, reduction: amounts.reduction, amount: amounts.actualAmount };
     }, async (tx) => input.recipientType === 'PLAYER'
       ? this.requirePlayablePlayers(tx, roomId, [input.fromPlayerId, input.toPlayerId!])
-      : this.requirePlayablePlayer(tx, roomId, input.fromPlayerId));
+      : this.requirePlayablePlayer(tx, roomId, input.fromPlayerId), undefined, async (result) => {
+        if (result.status === 'EXECUTED' && typeof result.id === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.id);
+      });
   }
 
   async payToll(actor: GameActor, roomId: string, payerId: string, propertyName: string, key: string) {
@@ -695,7 +706,9 @@ export class PrismaGameService {
         const transaction = await this.recordTransaction(tx, roomId, 'TOLL', effects, null, { landingId: landing.id });
         await tx.idempotencyRecord.update({ where: { scope_key: { scope: settlementScope, key: 'settled' } }, data: { response: { requestKey: key, transactionId: transaction.id } } });
         return { id: transaction.id, amount };
-    }, async (tx) => this.requirePlayableTollOwner(tx, roomId, payerId, propertyName));
+    }, async (tx) => this.requirePlayableTollOwner(tx, roomId, payerId, propertyName), undefined, async (result) => {
+      if (typeof result.id === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.id);
+    });
   }
 
   async adjustBalance(actor: GameActor, roomId: string, playerId: string, amount: number, reason: string, key: string) {
@@ -707,7 +720,9 @@ export class PrismaGameService {
       const transaction = await this.recordTransaction(tx, roomId, 'MANUAL_BALANCE_CHANGE', effects, bank.id);
       await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'MANUAL_BALANCE_CHANGE', entityType: 'Player', entityId: playerId, beforeJson: { balance: changed.before }, afterJson: { balance: changed.after }, reason } });
       return { id: transaction.id };
-    }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId));
+    }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId), undefined, async (result) => {
+      if (typeof result.id === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.id);
+    });
   }
 
   async adjustProperty(actor: GameActor, roomId: string, propertyName: string, patch: { ownerPlayerId?: string | null; buildingLevel?: number; mortgaged?: boolean }, reason: string, key: string) {
@@ -744,11 +759,13 @@ export class PrismaGameService {
       }
       const changed = await tx.player.updateMany({ where: { id: playerId, roomId, version: player.version + (reward ? 1 : 0) }, data: { remainingSkipTurns: { increment: actualCount }, version: { increment: 1 } } }); if (changed.count !== 1) fail('PLAYER_STATE_CHANGED');
       const created = await tx.skipTurnEntry.create({ data: { roomId, playerId, sourceType: source, sourceDescription: reason, originalCount: actualCount, remainingCount: actualCount, blocksTollCollection: source === 'COLD_PALACE', createdBy: bank.id, approvedBy: bank.id } });
-      if (effects.length) await this.recordTransaction(tx, roomId, 'COLD_PALACE_EVENT', effects, bank.id);
+      const transaction = effects.length ? await this.recordTransaction(tx, roomId, 'COLD_PALACE_EVENT', effects, bank.id) : null;
       const after = { remainingSkipTurns: player.remainingSkipTurns + actualCount, balance: player.balance + reward };
       await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'MANUAL_SKIP_TURNS_CHANGE', entityType: 'Player', entityId: playerId, beforeJson: { remainingSkipTurns: player.remainingSkipTurns, balance: player.balance }, afterJson: after, reason } });
-      return { id: created.id, playerId, remainingSkipTurns: after.remainingSkipTurns };
-    }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId));
+      return { id: created.id, playerId, remainingSkipTurns: after.remainingSkipTurns, transactionId: transaction?.id };
+    }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId), undefined, async (result) => {
+      if (typeof result.transactionId === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.transactionId);
+    });
   }
 
   async plotFine(actor: GameActor, roomId: string, playerId: string, amount: number, key: string) {
@@ -760,7 +777,9 @@ export class PrismaGameService {
       const changed = await this.changeBalance(tx, playerId, -amounts.actualAmount);
       const transaction = await this.recordTransaction(tx, roomId, 'PLOT_FINE', [{ playerId, amount: -amounts.actualAmount, ...changed, type: 'PLOT_FINE', description: '剧情罚款' }], bank.id, { recipientType: 'BANK', originalAmount: amounts.originalAmount, reduction: amounts.reduction, actualAmount: amounts.actualAmount, isPlotFine: true });
       return { id: transaction.id, originalAmount: amounts.originalAmount, reduction: amounts.reduction, amount: amounts.actualAmount };
-    }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId));
+    }, async (tx) => this.requirePlayablePlayer(tx, roomId, playerId), undefined, async (result) => {
+      if (typeof result.id === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.id);
+    });
   }
 
   private async consumeSkipTurns(tx: Prisma.TransactionClient, roomId: string, playerId: string, count: number) {
@@ -839,6 +858,8 @@ export class PrismaGameService {
       await tx.gameTransaction.update({ where: { id: original.id }, data: { status: 'REVERSED', reversedByTransactionId: reversal.id } }); if (original.requestId) await tx.gameRequest.update({ where: { id: original.requestId }, data: { status: 'REVERSED' } });
       const response = { id: original.id, reversed: true, reversalTransactionId: reversal.id };
       await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'REVERSE_TRANSACTION', entityType: 'GameTransaction', entityId: original.id, reason, afterJson: { reversalTransactionId: reversal.id } } }); return response;
+      }, undefined, undefined, async (result) => {
+        if (typeof result.reversalTransactionId === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.reversalTransactionId);
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') fail('REVERSAL_TARGET_STALE');
@@ -1045,18 +1066,19 @@ export class PrismaGameService {
     work: (tx: Prisma.TransactionClient, membership: { id: string }) => Promise<T>,
     validateCurrentParticipants?: (tx: Prisma.TransactionClient) => Promise<unknown>,
     shouldIncrementRoomVersion: () => boolean = () => true,
+    afterCommit?: (value: T & { stateVersion: number }) => void | Promise<void>,
   ): Promise<T & { stateVersion: number }> {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
     const scope = `account:${actor.accountId}:room:${roomId}:${operation}`;
     const expectedHash = requestFingerprint(input);
     for (let attempt = 0; attempt < 6; attempt += 1) {
       try {
-        return await this.db.$transaction(async (tx) => {
+        const execution = await this.db.$transaction(async (tx) => {
           await this.lockRoom(tx, roomId);
           const membership = await this.authorizeActor(tx, actor, roomId, capability, playerId);
           await validateCurrentParticipants?.(tx);
           const previous = await tx.idempotencyRecord.findUnique({ where: { scope_key: { scope, key } } });
-          if (previous) return this.replayRecord<T>(previous, expectedHash) as T & { stateVersion: number };
+          if (previous) return { response: this.replayRecord<T>(previous, expectedHash) as T & { stateVersion: number }, created: false };
           const value = await work(tx, membership);
           const room = shouldIncrementRoomVersion()
             ? await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } })
@@ -1070,8 +1092,16 @@ export class PrismaGameService {
               response: canonicalValue(response) as Prisma.InputJsonObject,
             },
           });
-          return response;
+          return { response, created: true };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        if (execution.created && afterCommit) {
+          try {
+            await afterCommit(execution.response);
+          } catch {
+            // Notification delivery is best-effort after the money mutation commits.
+          }
+        }
+        return execution.response;
       } catch (error) {
         const retryableConflict = (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') || isSerializationConflict(error);
         if (retryableConflict && attempt < 5) {
