@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { buildFundToastDeliveries, buildRejectionToastDelivery } from './realtime-toast-notifications.js';
 
@@ -12,11 +13,11 @@ function entry(playerId: string, name: string, activeSessionId: string | null, a
 }
 
 function databaseFor(transaction: Record<string, unknown> | null, bankSessionId: string | null = 'bank-session') {
-  return {
-    gameTransaction: { findUnique: vi.fn(async () => transaction) },
-    roomMembership: { findFirst: vi.fn(async () => bankSessionId ? { activeSessionId: bankSessionId } : null) },
-    gameRequest: { findUnique: vi.fn(async () => null) },
-  };
+  const database = new PrismaClient();
+  vi.spyOn(database.gameTransaction, 'findUnique').mockImplementation(async () => transaction);
+  vi.spyOn(database.roomMembership, 'findFirst').mockImplementation(async () => bankSessionId ? { activeSessionId: bankSessionId } : null);
+  vi.spyOn(database.gameRequest, 'findUnique').mockImplementation(async () => null);
+  return database;
 }
 
 describe('fund Toast deliveries', () => {
@@ -32,7 +33,7 @@ describe('fund Toast deliveries', () => {
       ],
     });
 
-    await expect(buildFundToastDeliveries(database as never, 'tx-transfer')).resolves.toEqual([
+    await expect(buildFundToastDeliveries(database, 'tx-transfer')).resolves.toEqual([
       {
         sessionId: 'payer-session',
         event: {
@@ -71,19 +72,85 @@ describe('fund Toast deliveries', () => {
       ledgerEntries: [entry('payer', '钮祜禄·甄嬛', 'payer-session', amount, description)],
     });
 
-    const deliveries = await buildFundToastDeliveries(database as never, `tx-${type}`);
+    const deliveries = await buildFundToastDeliveries(database, `tx-${type}`);
 
     expect(deliveries.map(({ event }) => event.message)).toEqual([playerMessage, bankMessage]);
   });
 
-  it('does not leak to unrelated players and skips missing sessions and zero effects', async () => {
+  it('ignores zero-effect transactions without looking up the bank', async () => {
     const database = databaseFor({
       id: 'tx-zero', roomId: 'room-1', type: 'NO_CASH', metadata: {},
       ledgerEntries: [entry('payer', '钮祜禄·甄嬛', null, 0, '无资金变化')],
     }, null);
 
-    await expect(buildFundToastDeliveries(database as never, 'tx-zero')).resolves.toEqual([]);
+    await expect(buildFundToastDeliveries(database, 'tx-zero')).resolves.toEqual([]);
     expect(database.roomMembership.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('represents every non-zero entry to the bank when a transaction is not an exact pair', async () => {
+    const database = databaseFor({
+      id: 'tx-multi', roomId: 'room-1', type: 'MANUAL_BALANCE_CHANGE', metadata: {},
+      ledgerEntries: [
+        entry('payer', '钮祜禄·甄嬛', 'payer-session', -500, '剧情罚款'),
+        entry('receiver', '沈眉庄', 'receiver-session', 300, '补偿'),
+        entry('other', '安陵容', 'other-session', 200, '补偿'),
+      ],
+    });
+
+    const deliveries = await buildFundToastDeliveries(database, 'tx-multi');
+    const bankDeliveries = deliveries.filter(({ event }) => event.audience === 'BANK');
+
+    expect(bankDeliveries).toEqual([
+      expect.objectContaining({ event: expect.objectContaining({ eventId: 'tx-multi:BANK:entry-payer', message: '银行收到钮祜禄·甄嬛支付 500 两（剧情罚款）' }) }),
+      expect.objectContaining({ event: expect.objectContaining({ eventId: 'tx-multi:BANK:entry-receiver', message: '银行向沈眉庄支付 300 两（补偿）' }) }),
+      expect.objectContaining({ event: expect.objectContaining({ eventId: 'tx-multi:BANK:entry-other', message: '银行向安陵容支付 200 两（补偿）' }) }),
+    ]);
+    expect(new Set(bankDeliveries.map(({ event }) => event.eventId)).size).toBe(3);
+    expect(deliveries.every(({ event }) => event.message.length <= 240)).toBe(true);
+  });
+
+  it('skips inactive participants while delivering non-zero effects to active participants and the bank', async () => {
+    const database = databaseFor({
+      id: 'tx-inactive', roomId: 'room-1', type: 'PLAYER_TRANSFER', metadata: {},
+      ledgerEntries: [
+        entry('payer', '钮祜禄·甄嬛', null, -500, '玩家转出'),
+        entry('receiver', '沈眉庄', 'receiver-session', 500, '玩家转入'),
+      ],
+    });
+
+    const deliveries = await buildFundToastDeliveries(database, 'tx-inactive');
+
+    expect(deliveries.map(({ sessionId }) => sessionId)).toEqual(['receiver-session', 'bank-session']);
+    expect(deliveries[0]?.event.message).toBe('钮祜禄·甄嬛向你转入 500 两');
+  });
+
+  it('never targets an unrelated active member', async () => {
+    const database = databaseFor({
+      id: 'tx-private', roomId: 'room-1', type: 'MANUAL_BALANCE_CHANGE', metadata: {},
+      ledgerEntries: [entry('payer', '钮祜禄·甄嬛', 'payer-session', -300, '剧情罚款')],
+    });
+    const unrelatedActiveSessionId = 'unrelated-session';
+
+    const deliveries = await buildFundToastDeliveries(database, 'tx-private');
+
+    expect(deliveries.map(({ sessionId }) => sessionId)).toEqual(['payer-session', 'bank-session']);
+    expect(deliveries.map(({ sessionId }) => sessionId)).not.toContain(unrelatedActiveSessionId);
+    expect(database.roomMembership.findFirst).toHaveBeenCalledWith({
+      where: { roomId: 'room-1', status: 'ACTIVE', isBank: true },
+      select: { activeSessionId: true },
+    });
+  });
+
+  it('keeps every fund payload within the realtime wire limit', async () => {
+    const database = databaseFor({
+      id: 'tx-long-reason', roomId: 'room-1', type: 'MANUAL_BALANCE_CHANGE', metadata: {},
+      ledgerEntries: [entry('payer', '钮祜禄·甄嬛', 'payer-session', -300, '剧情'.repeat(200))],
+    });
+
+    const deliveries = await buildFundToastDeliveries(database, 'tx-long-reason');
+
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries.every(({ event }) => event.message.length <= 240)).toBe(true);
   });
 });
 
@@ -93,9 +160,9 @@ describe('request rejection Toast delivery', () => {
     database.gameRequest.findUnique.mockResolvedValueOnce({
       id: 'request-1', roomId: 'room-1', type: 'PLAYER_TRANSFER', status: 'REJECTED', rejectionReason: '金额有误',
       actor: { id: 'payer', member: { activeSessionId: 'payer-session' } },
-    } as never);
+    });
 
-    await expect(buildRejectionToastDelivery(database as never, 'request-1')).resolves.toEqual({
+    await expect(buildRejectionToastDelivery(database, 'request-1')).resolves.toEqual({
       sessionId: 'payer-session',
       event: {
         eventId: 'request-1:rejected:PLAYER:payer', roomId: 'room-1', audience: 'PLAYER', kind: 'REQUEST_REJECTED',
@@ -109,8 +176,20 @@ describe('request rejection Toast delivery', () => {
     database.gameRequest.findUnique.mockResolvedValueOnce({
       id: 'request-2', roomId: 'room-1', type: 'BANK_PAYMENT', status: 'PENDING', rejectionReason: null,
       actor: { id: 'payer', member: { activeSessionId: null } },
-    } as never);
+    });
 
-    await expect(buildRejectionToastDelivery(database as never, 'request-2')).resolves.toBeNull();
+    await expect(buildRejectionToastDelivery(database, 'request-2')).resolves.toBeNull();
+  });
+
+  it('keeps rejection messages within the realtime wire limit', async () => {
+    const database = databaseFor(null);
+    database.gameRequest.findUnique.mockResolvedValueOnce({
+      id: 'request-long', roomId: 'room-1', type: 'BANK_PAYMENT', status: 'REJECTED', rejectionReason: '原因'.repeat(200),
+      actor: { id: 'payer', member: { activeSessionId: 'payer-session' } },
+    });
+
+    const delivery = await buildRejectionToastDelivery(database, 'request-long');
+
+    expect(delivery?.event.message.length).toBeLessThanOrEqual(240);
   });
 });

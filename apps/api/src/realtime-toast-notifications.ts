@@ -8,8 +8,8 @@ export type PostCommitToastNotifier = {
   requestRejected: (roomId: string, requestId: string) => void | Promise<void>;
 };
 
-type ToastDatabase = Pick<PrismaClient, 'gameTransaction' | 'roomMembership' | 'gameRequest'>;
 type FundEntry = {
+  id: string;
   playerId: string;
   amount: number;
   description: string;
@@ -43,6 +43,7 @@ const requestLabels: Record<string, string> = {
 
 const money = (amount: number) => String(Math.abs(amount));
 const suffix = (reason: string | null) => reason ? `（${reason}）` : '';
+const wireMessage = (message: string) => message.length <= 240 ? message : `${message.slice(0, 237)}...`;
 
 function normalizedReason(type: string, description: string) {
   if (type === 'START_REWARD') return '起点奖励';
@@ -81,7 +82,10 @@ function pairReason(transaction: FundTransaction, paid: FundEntry) {
   return reason;
 }
 
-export async function buildFundToastDeliveries(database: ToastDatabase, transactionId: string): Promise<ToastDelivery[]> {
+export async function buildFundToastDeliveries(
+  database: Pick<PrismaClient, 'gameTransaction' | 'roomMembership'>,
+  transactionId: string,
+): Promise<ToastDelivery[]> {
   const transaction = await database.gameTransaction.findUnique({
     where: { id: transactionId },
     include: {
@@ -118,7 +122,7 @@ export async function buildFundToastDeliveries(database: ToastDatabase, transact
         roomId: transaction.roomId,
         audience: 'PLAYER',
         kind: 'FUNDS',
-        message,
+        message: wireMessage(message),
       },
     });
   }
@@ -127,11 +131,8 @@ export async function buildFundToastDeliveries(database: ToastDatabase, transact
     where: { roomId: transaction.roomId, status: 'ACTIVE', isBank: true },
     select: { activeSessionId: true },
   });
-  if (bank?.activeSessionId) {
+  if (bank?.activeSessionId && paired) {
     const reason = paired ? pairReason(transaction, paid) : null;
-    const message = paired
-      ? `${paid.player.member.displayNameSnapshot}向${received.player.member.displayNameSnapshot}支付 ${money(paid.amount)} 两${suffix(reason)}`
-      : bankPlayerMessage(transaction, entries[0]);
     deliveries.push({
       sessionId: bank.activeSessionId,
       event: {
@@ -139,15 +140,32 @@ export async function buildFundToastDeliveries(database: ToastDatabase, transact
         roomId: transaction.roomId,
         audience: 'BANK',
         kind: 'FUNDS',
-        message,
+        message: wireMessage(`${paid.player.member.displayNameSnapshot}向${received.player.member.displayNameSnapshot}支付 ${money(paid.amount)} 两${suffix(reason)}`),
       },
     });
+  }
+  if (bank?.activeSessionId && !paired) {
+    for (const entry of entries) {
+      deliveries.push({
+        sessionId: bank.activeSessionId,
+        event: {
+          eventId: entries.length === 1 ? `${transaction.id}:BANK` : `${transaction.id}:BANK:${entry.id}`,
+          roomId: transaction.roomId,
+          audience: 'BANK',
+          kind: 'FUNDS',
+          message: wireMessage(bankPlayerMessage(transaction, entry)),
+        },
+      });
+    }
   }
 
   return deliveries;
 }
 
-export async function buildRejectionToastDelivery(database: ToastDatabase, requestId: string): Promise<ToastDelivery | null> {
+export async function buildRejectionToastDelivery(
+  database: Pick<PrismaClient, 'gameRequest'>,
+  requestId: string,
+): Promise<ToastDelivery | null> {
   const request = await database.gameRequest.findUnique({
     where: { id: requestId },
     include: { actor: { include: { member: { select: { activeSessionId: true } } } } },
@@ -169,7 +187,7 @@ export async function buildRejectionToastDelivery(database: ToastDatabase, reque
       roomId: request.roomId,
       audience: 'PLAYER',
       kind: 'REQUEST_REJECTED',
-      message: `你的${requestLabels[request.type] ?? '操作'}申请已被银行拒绝${reason ? `：${reason}` : ''}`,
+      message: wireMessage(`你的${requestLabels[request.type] ?? '操作'}申请已被银行拒绝${reason ? `：${reason}` : ''}`),
     },
   };
 }
