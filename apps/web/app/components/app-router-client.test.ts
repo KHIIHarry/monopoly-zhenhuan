@@ -48,3 +48,23 @@ describe('ledger transaction time', () => {
     expect(component).toMatch(/<time dateTime=\{entry\.createdAt\}>\{transactionTime\}<\/time>/);
   });
 });
+
+describe('realtime Toast integration', () => {
+  test('validates and role-filters room Toasts into the shared queue', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('realtimeToastEventSchema.safeParse(payload)');
+    expect(component).toMatch(/parsed\.data\.roomId !== runtime\.roomId/);
+    expect(component).toMatch(/parsed\.data\.audience !== runtime\.workbench\?\.view/);
+    expect(component).toMatch(/enqueue\(\{ id: parsed\.data\.eventId, message: parsed\.data\.message \}\)/);
+    expect(component).toContain('socket.on("room.toast", onRoomToast)');
+  });
+
+  test('renders the AppRouter queue item as one passive live-region Toast', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/toast=\{currentToast\}[\s\S]*?showNotice=\{showNotice\}/);
+    expect(component).toMatch(/<div className="toast" role="status" aria-live="polite" aria-atomic="true">[\s\S]*?<Check aria-hidden="true" \/>[\s\S]*?<span>\{toast\.message\}<\/span>/);
+    expect(component).not.toContain('window.setTimeout(() => setNotice(""), 3500)');
+  });
+});

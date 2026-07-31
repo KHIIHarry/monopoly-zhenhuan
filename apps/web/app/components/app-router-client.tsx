@@ -4,14 +4,17 @@ import {
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
+  useCallback,
   useEffect,
   useId,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { realtimeToastEventSchema } from "@zhenhuan/shared";
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
+import { createToastQueue, type ToastInput, type ToastItem } from "./toast-queue";
 import { useRouter } from "next/navigation";
 import { io } from "socket.io-client";
 import { createPortal } from "react-dom";
@@ -940,6 +943,15 @@ export default function AppRouterClient({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const [currentToast, setCurrentToast] = useState<ToastItem | null>(null);
+  const toastQueue = useRef<ReturnType<typeof createToastQueue> | null>(null);
+  if (!toastQueue.current) toastQueue.current = createToastQueue(setCurrentToast);
+  const enqueue = useCallback((toast: ToastInput) => {
+    toastQueue.current?.enqueue(toast);
+  }, []);
+  const showNotice = useCallback((message: string) => {
+    enqueue({ message });
+  }, [enqueue]);
   const roomGeneration = useRef(0);
   const roomTarget = useRef<string | null>(null);
   const activeRoomTransition = useRef<number | null>(null);
@@ -1075,6 +1087,7 @@ export default function AppRouterClient({
 
   function beginRoomTransition(roomId: string): RoomOwner {
     roomGeneration.current += 1;
+    toastQueue.current?.clear();
     roomTarget.current = roomId;
     snapshotRequestGeneration.current += 1;
     roomStateVersion.current = -1;
@@ -1097,6 +1110,7 @@ export default function AppRouterClient({
 
   function clearRoomState() {
     invalidateRoomTransition();
+    toastQueue.current?.clear();
     setSelectedRoom(null);
     setSeats(null);
     setWorkbench(null);
@@ -1161,6 +1175,7 @@ export default function AppRouterClient({
   async function handleRoomControlLost(failedOwner: RoomOwner) {
     if (!ownsRoom(failedOwner)) return;
     const owner = beginRoomTransition(failedOwner.roomId);
+    toastQueue.current?.clear();
     setSnapshot(null);
     setWorkbench(null);
     setSettlementPreview(null);
@@ -1727,6 +1742,14 @@ export default function AppRouterClient({
       refresh();
     };
     roomInvalidator.current = refresh;
+    const onRoomToast = (payload: unknown) => {
+      const parsed = realtimeToastEventSchema.safeParse(payload);
+      if (!parsed.success) return;
+      const runtime = roomRuntime.current;
+      if (parsed.data.roomId !== runtime.roomId) return;
+      if (parsed.data.audience !== runtime.workbench?.view) return;
+      enqueue({ id: parsed.data.eventId, message: parsed.data.message });
+    };
     socket.on("connect", () => {
       socketRoomSubscription.current = null;
       const { roomId } = roomRuntime.current;
@@ -1743,6 +1766,7 @@ export default function AppRouterClient({
     socket.on("room.subscription-rejected", onRoomSubscriptionLost);
     socket.on("room.control.changed", onRoomSubscriptionLost);
     socket.on("account.session.revoked", () => invalidateLogin());
+    socket.on("room.toast", onRoomToast);
     return () => {
       const subscribedRoom = socketRoomSubscription.current;
       if (subscribedRoom && socket.connected)
@@ -1756,6 +1780,8 @@ export default function AppRouterClient({
   }, [account?.id]);
 
   useEffect(() => {
+  useEffect(() => () => toastQueue.current?.dispose(), []);
+
     if (!account) return;
     const refresh = () => {
       roomInvalidator.current?.();
@@ -2080,6 +2106,8 @@ export default function AppRouterClient({
         error={error}
         action={gameAction}
         refresh={refreshGame}
+        toast={currentToast}
+        showNotice={showNotice}
         switchView={(view) => void chooseWorkbench(view)}
         manageSeats={() => void manageSeats()}
         finish={() => void openFinish()}
@@ -4422,6 +4450,8 @@ function Workbench({
   error,
   action,
   refresh,
+  toast,
+  showNotice,
   switchView,
   manageSeats,
   finish,
@@ -4433,6 +4463,8 @@ function Workbench({
   error: string;
   action: ActionRunner;
   refresh: () => Promise<boolean>;
+  toast: ToastItem | null;
+  showNotice: (message: string) => void;
   switchView: (view: "PLAYER" | "BANK") => void;
   manageSeats: () => void;
   finish: () => void;
@@ -4444,16 +4476,10 @@ function Workbench({
   const [bankTab, setBankTab] = useState<
     "SUMMARY" | "APPROVAL" | "PROPERTY" | "LEDGER" | "TRANSACTION"
   >("SUMMARY");
-  const [notice, setNotice] = useState("");
   const [leaveOpen, setLeaveOpen] = useState(false);
   const playerName =
     snapshot.players.find((player) => player.id === context.membership.playerId)
       ?.name ?? "玩家";
-
-  function showNotice(message: string) {
-    setNotice(message);
-    window.setTimeout(() => setNotice(""), 3500);
-  }
 
   return (
     <main className="app-shell" aria-busy={busy}>
@@ -4512,10 +4538,10 @@ function Workbench({
             {error}
           </p>
         )}
-        {notice && (
-          <div className="toast" role="status">
-            <Check />
-            {notice}
+        {toast && (
+          <div className="toast" role="status" aria-live="polite" aria-atomic="true">
+            <Check aria-hidden="true" />
+            <span>{toast.message}</span>
           </div>
         )}
 
