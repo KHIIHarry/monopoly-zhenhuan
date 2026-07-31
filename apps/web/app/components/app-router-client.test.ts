@@ -35,3 +35,16 @@ describe('property explorer integration', () => {
     expect(component).not.toContain('function PropertyList(');
   });
 });
+
+describe('ledger transaction time', () => {
+  test('keeps server-newest ledger entries first and renders a second-free timestamp', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/type LedgerEntry = \{[\s\S]*?createdAt\?: string;/);
+    expect(component).toMatch(/function formatLedgerTime\(createdAt\?: string\): string \| null/);
+    expect(component).toMatch(/month: "long",[\s\S]*?day: "numeric",[\s\S]*?hour: "2-digit",[\s\S]*?minute: "2-digit",[\s\S]*?hour12: false/);
+    expect(component).toMatch(/const visible = entries;/);
+    expect(component).toMatch(/const transactionTime = formatLedgerTime\(entry\.createdAt\);/);
+    expect(component).toMatch(/<time dateTime=\{entry\.createdAt\}>\{transactionTime\}<\/time>/);
+  });
+});

@@ -86,6 +86,7 @@ type LedgerEntry = {
   type: string;
   description: string;
   amount: number;
+  createdAt?: string;
 };
 
 type BankRequest = {
@@ -434,6 +435,18 @@ function booleanRoomAction(action: ActionRunner) {
 }
 
 const formatMoney = (amount: number) => amount.toLocaleString("zh-CN");
+function formatLedgerTime(createdAt?: string): string | null {
+  if (!createdAt) return null;
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
 const characterName = (id: string) =>
   characters.find((item) => item.id === id)?.name ?? id;
 const numericSkill = (skill: Record<string, unknown>, ...keys: string[]) => {
@@ -7418,27 +7431,37 @@ function Ledger({
   players?: Player[];
   compact?: boolean;
 }) {
-  const visible = [...entries].reverse();
+  const visible = entries;
   return (
     <div className={`ledger ${compact ? "compact-ledger" : ""}`}>
       {visible.length ? (
-        visible.map((entry) => (
-          <div key={entry.id}>
-            <span className={entry.amount >= 0 ? "money plus" : "money"}>
-              {entry.amount >= 0 ? "+" : ""}
-              {formatMoney(entry.amount)}
-            </span>
-            <div>
-              <strong>{entry.description}</strong>
-              <small>
-                {players?.find((player) => player.id === entry.playerId)?.name
-                  ? `${players.find((player) => player.id === entry.playerId)?.name} · `
-                  : ""}
-                {entry.type}
-              </small>
+        visible.map((entry) => {
+          const transactionTime = formatLedgerTime(entry.createdAt);
+          const playerName = players?.find(
+            (player) => player.id === entry.playerId,
+          )?.name;
+          return (
+            <div key={entry.id}>
+              <span className={entry.amount >= 0 ? "money plus" : "money"}>
+                {entry.amount >= 0 ? "+" : ""}
+                {formatMoney(entry.amount)}
+              </span>
+              <div>
+                <strong>{entry.description}</strong>
+                <small>
+                  {playerName ? `${playerName} · ` : ""}
+                  {entry.type}
+                  {transactionTime ? (
+                    <>
+                      {" · "}
+                      <time dateTime={entry.createdAt}>{transactionTime}</time>
+                    </>
+                  ) : null}
+                </small>
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       ) : (
         <div className="empty no-margin">暂无交易记录</div>
       )}
