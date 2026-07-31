@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { filterLandingProperties, landingOwnership, landingPropertyToll } from './landing-property-picker';
+import {
+  filterLandingProperties,
+  landingOwnership,
+  landingPropertyToll,
+  propertyOwner,
+  sortPropertiesByOwnership,
+  visibleLandingPlayers,
+} from './landing-property-picker';
 
 const properties = [
   { name: '景仁宫', ownerId: 'p1', level: 2, mortgaged: false, mortgage: 1500, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800, 2000, 3900] },
   { name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800, purchasePrice: 1600, build: 1000, buildingSell: 600, tolls: [300, 700] }
+];
+
+const players = [
+  { id: 'p1', name: '小行老师', characterId: 'yixiu' },
+  { id: 'bank', name: '银行', characterId: null },
 ];
 
 describe('landing property picker model', () => {
@@ -44,5 +56,25 @@ describe('landing property picker model', () => {
 
   it('shows the current toll for an owned property', () => {
     expect(landingPropertyToll(properties[0], [{ id: 'p1', name: '皇后' }])).toBe(3900);
+  });
+
+  it('formats an owned property with its character theme and player name', () => {
+    expect(propertyOwner(properties[0], players)).toMatchObject({
+      label: '已持有',
+      characterName: '乌拉那拉·宜修',
+      theme: 'yixiu',
+      player: { name: '小行老师' },
+    });
+  });
+
+  it('keeps only seated characters in the filter list', () => {
+    expect(visibleLandingPlayers(players).map((player) => player.id)).toEqual(['p1']);
+  });
+
+  it('places owned properties before treasury properties without changing group order', () => {
+    expect(sortPropertiesByOwnership([properties[1], properties[0]])).toEqual([
+      properties[0],
+      properties[1],
+    ]);
   });
 });

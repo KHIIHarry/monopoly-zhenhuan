@@ -12,7 +12,55 @@ export type LandingProperty = {
   tolls: number[];
 };
 
-export type LandingPlayer = { id: string; name: string; tollBonus?: number; tollCollectionBlocked?: boolean };
+export type LandingPlayer = {
+  id: string;
+  name: string;
+  characterId?: string | null;
+  tollBonus?: number;
+  tollCollectionBlocked?: boolean;
+};
+
+const propertyCharacters = {
+  yixiu: { name: '乌拉那拉·宜修', theme: 'yixiu' },
+  zhenhuan: { name: '钮祜禄·甄嬛', theme: 'zhenhuan' },
+  huashifei: { name: '年世兰', theme: 'huashifei' },
+  meizhuang: { name: '沈眉庄', theme: 'meizhuang' },
+  anlingrong: { name: '安陵容', theme: 'anlingrong' },
+} as const;
+
+export function propertyCharacterMeta(characterId: string | null | undefined) {
+  if (!characterId || !(characterId in propertyCharacters)) return null;
+  return propertyCharacters[characterId as keyof typeof propertyCharacters];
+}
+
+export function visibleLandingPlayers(players: LandingPlayer[]) {
+  return players.filter((player) => propertyCharacterMeta(player.characterId) !== null);
+}
+
+export function propertyOwner(property: LandingProperty, players: LandingPlayer[]) {
+  if (!property.ownerId) {
+    return { label: '国库' as const, player: null, characterName: null, theme: 'treasury' };
+  }
+
+  const player = players.find((candidate) => candidate.id === property.ownerId) ?? null;
+  const character = propertyCharacterMeta(player?.characterId);
+  return {
+    label: '已持有' as const,
+    player,
+    characterName: character?.name ?? null,
+    theme: character?.theme ?? 'treasury',
+  };
+}
+
+export function sortPropertiesByOwnership<T extends LandingProperty>(properties: T[]): T[] {
+  return properties
+    .map((property, index) => ({ property, index }))
+    .sort(
+      (left, right) =>
+        Number(left.property.ownerId === null) - Number(right.property.ownerId === null) || left.index - right.index,
+    )
+    .map(({ property }) => property);
+}
 
 function normalizedLandingQuery(query: string) {
   return query.replaceAll(/\s/g, '').toLocaleLowerCase('en-US');
