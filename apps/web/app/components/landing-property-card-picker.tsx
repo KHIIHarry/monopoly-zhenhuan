@@ -100,7 +100,16 @@ export function LandingPropertyCardPicker({
                 {mode === 'landing' && selected && <span className="landing-property-selected-label" aria-hidden="true">✅</span>}
                 {tollBlocked && <span className="toll-blocked">冷宫中，免过路费</span>}
                 <span className="landing-property-card-meta">
-                  <span>购买价<strong>{formatAmount(property.purchasePrice)} 两</strong></span>
+                  <span>
+                    {owner ? '下级费用' : '购买价'}
+                    <strong>
+                      {owner
+                        ? property.level < 5
+                          ? `${formatAmount(property.build)} 两`
+                          : '满级'
+                        : `${formatAmount(property.purchasePrice)} 两`}
+                    </strong>
+                  </span>
                   <span>当前过路费<strong>{formatAmount(toll)} 两</strong></span>
                 </span>
                 <span className="landing-property-card-meta">

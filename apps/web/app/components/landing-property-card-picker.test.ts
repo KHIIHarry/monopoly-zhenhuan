@@ -56,6 +56,7 @@ describe('LandingPropertyCardPicker', () => {
     expect(html).toContain('乌拉那拉·宜修（<span class="property-owner-nickname">小行老师</span>）');
     expect(html).toContain('property-theme-yixiu');
     expect(html).toContain('已抵押');
+    expect(html).toContain('下级费用<strong>2,000 两</strong>');
     expect(html).toContain('<article');
   });
 
