@@ -26,7 +26,9 @@ const transferFailureReasons: Record<string, string> = {
 };
 
 export function transferFailureReason(code: string) {
-  return transferFailureReasons[code] ?? '服务暂时不可用，请稍后重试';
+  return Object.prototype.hasOwnProperty.call(transferFailureReasons, code)
+    ? transferFailureReasons[code]!
+    : '服务暂时不可用，请稍后重试';
 }
 
 export type SkillInput = { skipTurns: number; amount: number };

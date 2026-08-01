@@ -68,6 +68,8 @@ describe('realtime toast event', () => {
     ['PLAYER_STATE_CHANGED', '玩家状态已变化，请刷新后重试'],
     ['REQUEST_ALREADY_RESOLVED', '转账申请已处理'],
     ['untrusted raw database text', '服务暂时不可用，请稍后重试'],
+    ['toString', '服务暂时不可用，请稍后重试'],
+    ['constructor', '服务暂时不可用，请稍后重试'],
   ])('maps %s to a safe transfer failure reason', (code, message) => {
     expect(transferFailureReason(code)).toBe(message);
   });
