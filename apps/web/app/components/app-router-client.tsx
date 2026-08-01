@@ -5414,7 +5414,7 @@ function PlayerView({
             <Quick
               icon={<CircleDollarSign />}
               label="支付过路费"
-              disabled={busy || !canAct || mustSkipCurrentTurn}
+              disabled={busy || !canAct || mustSkipCurrentTurn || !landingConfirmed}
               onClick={() => setPanel("TOLL")}
             />
             <Quick

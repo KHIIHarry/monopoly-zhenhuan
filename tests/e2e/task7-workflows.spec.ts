@@ -322,6 +322,7 @@ test('landing-bound toll payment uses the confirmed landing and explains disable
   await expect(assetSheet.getByRole('option', { name: '支付过路费' })).toHaveCount(0);
   await assetSheet.getByRole('button', { name: '关闭' }).click();
 
+  await expect(page.getByRole('button', { name: '支付过路费' })).toBeEnabled();
   await page.getByRole('button', { name: '支付过路费' }).click();
   const tollSheet = page.getByRole('dialog', { name: '支付过路费' });
   await expect(tollSheet.getByLabel('目标地产')).toHaveCount(0);
@@ -335,7 +336,12 @@ test('landing-bound toll payment uses the confirmed landing and explains disable
   for (const [name, fixture] of Object.entries(disabledCases)) {
     tollCase = name as keyof typeof disabledCases;
     await page.reload();
-    await page.getByRole('button', { name: '支付过路费' }).click();
+    const tollQuick = page.getByRole('button', { name: '支付过路费' });
+    if (name === 'no-landing') {
+      await expect(tollQuick).toBeDisabled();
+      continue;
+    }
+    await tollQuick.click();
     const sheet = page.getByRole('dialog', { name: '支付过路费' });
     if (name === 'unowned') await expect(sheet.getByText('国库', { exact: true })).toBeVisible();
     await expect(sheet.getByText(fixture.reason, { exact: true })).toBeVisible();
