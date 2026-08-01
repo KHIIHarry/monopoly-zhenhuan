@@ -6,6 +6,7 @@ export type ToastDelivery = { sessionId: string; event: RealtimeToastEvent };
 export type PostCommitToastNotifier = {
   fundsCommitted: (roomId: string, transactionId: string) => void | Promise<void>;
   requestRejected: (roomId: string, requestId: string) => void | Promise<void>;
+  landingRejected: (roomId: string, landingId: string, reason: string) => void | Promise<void>;
 };
 
 type FundEntry = {
@@ -192,6 +193,35 @@ export async function buildRejectionToastDelivery(
       audience: 'PLAYER',
       kind: 'REQUEST_REJECTED',
       message: wireMessage(`你的${requestLabels[request.type] ?? '操作'}申请已被银行拒绝${reason ? `：${reason}` : ''}`),
+    },
+  };
+}
+
+export async function buildLandingRejectionToastDelivery(
+  database: Pick<PrismaClient, 'landingEvent'>,
+  landingId: string,
+  reason: string,
+): Promise<ToastDelivery | null> {
+  const landing = await database.landingEvent.findUnique({
+    where: { id: landingId },
+    include: { player: { include: { member: { select: { activeSessionId: true } } } } },
+  }) as {
+    id: string;
+    roomId: string;
+    propertyActionsCancelled: boolean;
+    player: { id: string; member: { activeSessionId: string | null } };
+  } | null;
+  const sessionId = landing?.player.member.activeSessionId;
+  if (!landing || !landing.propertyActionsCancelled || !sessionId) return null;
+  const trimmedReason = reason.trim();
+  return {
+    sessionId,
+    event: {
+      eventId: `${landing.id}:rejected:PLAYER:${landing.player.id}`,
+      roomId: landing.roomId,
+      audience: 'PLAYER',
+      kind: 'REQUEST_REJECTED',
+      message: wireMessage(`你的落点申请已被银行拒绝${trimmedReason ? `：${trimmedReason}` : ''}`),
     },
   };
 }

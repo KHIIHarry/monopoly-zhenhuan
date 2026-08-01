@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
-import { buildFundToastDeliveries, buildRejectionToastDelivery } from './realtime-toast-notifications.js';
+import { buildFundToastDeliveries, buildLandingRejectionToastDelivery, buildRejectionToastDelivery } from './realtime-toast-notifications.js';
 
 function entry(playerId: string, name: string, activeSessionId: string | null, amount: number, description: string, id = `entry-${playerId}`) {
   return {
@@ -17,6 +17,7 @@ function databaseFor(transaction: Record<string, unknown> | null, bankSessionId:
   vi.spyOn(database.gameTransaction, 'findUnique').mockImplementation(async () => transaction);
   vi.spyOn(database.roomMembership, 'findFirst').mockImplementation(async () => bankSessionId ? { activeSessionId: bankSessionId } : null);
   vi.spyOn(database.gameRequest, 'findUnique').mockImplementation(async () => null);
+  vi.spyOn(database.landingEvent, 'findUnique').mockImplementation(async () => null);
   return database;
 }
 
@@ -210,5 +211,50 @@ describe('request rejection Toast delivery', () => {
     const delivery = await buildRejectionToastDelivery(database, 'request-long');
 
     expect(delivery?.event.message.length).toBeLessThanOrEqual(240);
+  });
+});
+
+describe('landing rejection Toast delivery', () => {
+  it('targets the landing player with the bank cancellation reason', async () => {
+    const database = databaseFor(null);
+    database.landingEvent.findUnique.mockResolvedValueOnce({
+      id: 'landing-1', roomId: 'room-1', propertyActionsCancelled: true,
+      player: { id: 'player-1', member: { activeSessionId: 'player-session' } },
+    });
+
+    await expect(buildLandingRejectionToastDelivery(database, 'landing-1', '  现场落点有误  ')).resolves.toEqual({
+      sessionId: 'player-session',
+      event: {
+        eventId: 'landing-1:rejected:PLAYER:player-1',
+        roomId: 'room-1',
+        audience: 'PLAYER',
+        kind: 'REQUEST_REJECTED',
+        message: '你的落点申请已被银行拒绝：现场落点有误',
+      },
+    });
+  });
+
+  it('returns null for a missing landing', async () => {
+    await expect(buildLandingRejectionToastDelivery(databaseFor(null), 'missing', '现场落点有误')).resolves.toBeNull();
+  });
+
+  it('returns null when property actions were not cancelled', async () => {
+    const database = databaseFor(null);
+    database.landingEvent.findUnique.mockResolvedValueOnce({
+      id: 'landing-1', roomId: 'room-1', propertyActionsCancelled: false,
+      player: { id: 'player-1', member: { activeSessionId: 'player-session' } },
+    });
+
+    await expect(buildLandingRejectionToastDelivery(database, 'landing-1', '现场落点有误')).resolves.toBeNull();
+  });
+
+  it('returns null when the landing player has no active Session', async () => {
+    const database = databaseFor(null);
+    database.landingEvent.findUnique.mockResolvedValueOnce({
+      id: 'landing-1', roomId: 'room-1', propertyActionsCancelled: true,
+      player: { id: 'player-1', member: { activeSessionId: null } },
+    });
+
+    await expect(buildLandingRejectionToastDelivery(database, 'landing-1', '现场落点有误')).resolves.toBeNull();
   });
 });

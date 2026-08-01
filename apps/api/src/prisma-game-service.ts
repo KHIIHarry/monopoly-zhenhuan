@@ -346,6 +346,8 @@ export class PrismaGameService {
       await this.cancelPendingRequests(tx, roomId, { landingEventId: landingId }, 'LANDING_PROPERTY_ACTIONS_CANCELLED');
       const after = await tx.landingEvent.update({ where: { id: landingId }, data: { propertyActionsCancelled: true, plotResolved: true } });
       await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'CANCEL_LANDING_PROPERTY_ACTIONS', entityType: 'LandingEvent', entityId: landingId, beforeJson: before as unknown as Prisma.InputJsonValue, afterJson: after as unknown as Prisma.InputJsonValue, reason } }); return after;
+    }, undefined, undefined, async () => {
+      await this.toastNotifier?.landingRejected(roomId, landingId, reason);
     });
   }
 

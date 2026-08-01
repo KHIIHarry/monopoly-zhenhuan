@@ -118,6 +118,7 @@ describe('Socket.IO room subscription ownership', () => {
       createPostCommitToastNotifier?: (...args: never[]) => {
         fundsCommitted: (roomId: string, transactionId: string) => Promise<void>;
         requestRejected: (roomId: string, requestId: string) => Promise<void>;
+        landingRejected: (roomId: string, landingId: string, reason: string) => Promise<void>;
       };
     }).createPostCommitToastNotifier;
     expect(createNotifier).toBeTypeOf('function');
@@ -137,6 +138,9 @@ describe('Socket.IO room subscription ownership', () => {
     const rejectedEvent: RealtimeToastEvent = {
       eventId: 'request-1:rejected:PLAYER:payer', roomId: 'room-a', audience: 'PLAYER', kind: 'REQUEST_REJECTED', message: '你的转帐申请已被银行拒绝：金额有误',
     };
+    const landingRejectedEvent: RealtimeToastEvent = {
+      eventId: 'landing-1:rejected:PLAYER:player-1', roomId: 'room-a', audience: 'PLAYER', kind: 'REQUEST_REJECTED', message: '你的落点申请已被银行拒绝：现场落点有误',
+    };
     const errors: unknown[] = [];
     const notifier = createNotifier(
       {} as never,
@@ -149,17 +153,20 @@ describe('Socket.IO room subscription ownership', () => {
           { sessionId: 'bank-session', event: fundEvents[2]! },
         ],
         rejection: async () => ({ sessionId: 'payer-session', event: rejectedEvent }),
+        landingRejection: async () => ({ sessionId: 'player-session', event: landingRejectedEvent }),
       },
     );
 
     await notifier.fundsCommitted('room-a', 'tx-1');
     await notifier.requestRejected('room-a', 'request-1');
+    await notifier.landingRejected('room-a', 'landing-1', '现场落点有误');
 
     expect(emitted).toEqual([
       { channel: 'session:payer-session', name: 'room.toast', event: fundEvents[0] },
       { channel: 'session:receiver-session', name: 'room.toast', event: fundEvents[1] },
       { channel: 'session:bank-session', name: 'room.toast', event: fundEvents[2] },
       { channel: 'session:payer-session', name: 'room.toast', event: rejectedEvent },
+      { channel: 'session:player-session', name: 'room.toast', event: landingRejectedEvent },
     ]);
     expect(emitted.some(({ channel }) => channel === 'session:unrelated-session' || channel === 'session:other-room-session')).toBe(false);
     expect(errors).toEqual([]);

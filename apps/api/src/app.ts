@@ -11,6 +11,7 @@ import { loadOriginPolicy } from './origin-policy.js';
 import { parseRoomSubscriptionPayload, PrismaGameService } from './prisma-game-service.js';
 import {
   buildFundToastDeliveries,
+  buildLandingRejectionToastDelivery,
   buildRejectionToastDelivery,
   type PostCommitToastNotifier,
   type ToastDelivery,
@@ -30,6 +31,7 @@ type SessionToastEmitter = {
 type ToastBuilders = {
   funds: (database: ApiDatabase, transactionId: string) => Promise<ToastDelivery[]>;
   rejection: (database: ApiDatabase, requestId: string) => Promise<ToastDelivery | null>;
+  landingRejection: (database: ApiDatabase, landingId: string, reason: string) => Promise<ToastDelivery | null>;
 };
 
 export const roomChannel = (roomId: string) => `room:${roomId}`;
@@ -39,7 +41,7 @@ export function createPostCommitToastNotifier(
   database: ApiDatabase,
   emitter: SessionToastEmitter,
   onError: (error: unknown, context: { roomId: string; sourceId: string; kind: 'FUNDS' | 'REQUEST_REJECTED' }) => void = () => undefined,
-  builders: ToastBuilders = { funds: buildFundToastDeliveries, rejection: buildRejectionToastDelivery },
+  builders: ToastBuilders = { funds: buildFundToastDeliveries, rejection: buildRejectionToastDelivery, landingRejection: buildLandingRejectionToastDelivery },
 ): PostCommitToastNotifier {
   const emit = (delivery: ToastDelivery) => {
     emitter.to(sessionChannel(delivery.sessionId)).emit('room.toast', delivery.event);
@@ -58,6 +60,14 @@ export function createPostCommitToastNotifier(
         if (delivery) emit(delivery);
       } catch (error) {
         onError(error, { roomId, sourceId: requestId, kind: 'REQUEST_REJECTED' });
+      }
+    },
+    landingRejected: async (roomId, landingId, reason) => {
+      try {
+        const delivery = await builders.landingRejection(database, landingId, reason);
+        if (delivery) emit(delivery);
+      } catch (error) {
+        onError(error, { roomId, sourceId: landingId, kind: 'REQUEST_REJECTED' });
       }
     },
   };

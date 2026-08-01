@@ -1007,6 +1007,26 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect(committed).toEqual([{ roomId: room.id, transactionId: approved.transactionId }]);
   });
 
+  it('notifies the player once when landing property actions are cancelled', async () => {
+    const { room, a, bank } = await physicalRoom();
+    const rejected: Array<{ roomId: string; landingId: string; reason: string }> = [];
+    const game = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: () => undefined,
+      requestRejected: () => undefined,
+      landingRejected: (roomId, landingId, reason) => { rejected.push({ roomId, landingId, reason }); },
+    });
+    const landing = await firstDb.landingEvent.findFirstOrThrow({
+      where: { roomId: room.id, playerId: a.playerId, property: { definition: { name: '甘露寺' } } },
+      orderBy: { confirmedAt: 'desc' },
+    });
+    const bankActor = state.banks.get(bank.token)!;
+
+    await game.cancelLandingPropertyActions(bankActor, room.id, landing.id, '现场落点有误', 'notify-cancelled-landing');
+    await game.cancelLandingPropertyActions(bankActor, room.id, landing.id, '现场落点有误', 'notify-cancelled-landing');
+
+    expect(rejected).toEqual([{ roomId: room.id, landingId: landing.id, reason: '现场落点有误' }]);
+  });
+
   it('emits post-commit callbacks once for every money command and for a rejection', async () => {
     const { room, a, b, bank } = await physicalRoom();
     const committed: Array<{ roomId: string; transactionId: string }> = [];
