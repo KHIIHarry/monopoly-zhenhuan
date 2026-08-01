@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 import { loadMasterData } from '@zhenhuan/shared';
 import { AccountRoomService, type AuthenticatedSession } from './account-room-service.js';
-import { RuleError } from './api-error.js';
+import { RuleError, TransferRuleError } from './api-error.js';
 import { hashPassword } from './auth-domain.js';
 import { PrismaGameService, type GameActor, type SnapshotView } from './prisma-game-service.js';
 import * as prismaGameServiceModule from './prisma-game-service.js';
@@ -986,6 +986,108 @@ integration('PrismaGameService PostgreSQL transactions', () => {
 
     expect(replay).toEqual(result);
     expect(committed).toEqual([{ roomId: room.id, transactionId: result.id }]);
+  });
+
+  it('transfer lifecycle Toasts follow fresh commits, replay suppression, and safe failure phases', async () => {
+    const { room, zhenhuan, huashifei, bank } = await unifiedTransferRoom('转账生命周期通知');
+    const committed: Array<{ roomId: string; transactionId: string }> = [];
+    const requested: Array<{ roomId: string; requestId: string }> = [];
+    const approved: Array<{ roomId: string; requestId: string }> = [];
+    const failed: Array<Parameters<NonNullable<import('./realtime-toast-notifications.js').PostCommitToastNotifier['transferFailed']>>[0]> = [];
+    let fundsDeliveryFails = false;
+    let approvalDeliveryFails = false;
+    const game = new PrismaGameService(firstDb, () => 0, {
+      fundsCommitted: (roomId, transactionId) => {
+        committed.push({ roomId, transactionId });
+        if (fundsDeliveryFails) throw new Error('fund delivery unavailable');
+      },
+      requestRejected: () => undefined,
+      landingRejected: () => undefined,
+      transferRequested: (roomId, requestId) => { requested.push({ roomId, requestId }); },
+      transferApproved: (roomId, requestId) => {
+        approved.push({ roomId, requestId });
+        if (approvalDeliveryFails) throw new Error('approval delivery unavailable');
+      },
+      transferFailed: (notice) => { failed.push(notice); },
+    });
+    const playerActor = state.players.get(zhenhuan.playerId)!;
+    const bankActor = state.banks.get(bank.token)!;
+    const input = { fromPlayerId: zhenhuan.playerId, recipientType: 'PLAYER' as const, toPlayerId: huashifei.playerId, amount: 200, isPlotFine: false };
+
+    const immediate = await game.transfer(playerActor, room.id, input, 'lifecycle-immediate');
+    await game.transfer(playerActor, room.id, input, 'lifecycle-immediate');
+    expect(immediate).toMatchObject({ status: 'EXECUTED' });
+    expect(committed).toEqual([{ roomId: room.id, transactionId: immediate.id }]);
+    expect(requested).toEqual([]);
+
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: true } });
+    const pending = await game.transfer(playerActor, room.id, input, 'lifecycle-pending');
+    await game.transfer(playerActor, room.id, input, 'lifecycle-pending');
+    expect(pending).toMatchObject({ status: 'PENDING' });
+    expect(requested).toEqual([{ roomId: room.id, requestId: pending.id }]);
+
+    fundsDeliveryFails = true;
+    approvalDeliveryFails = true;
+    const approval = await game.approve(bankActor, room.id, pending.id, 'lifecycle-approve');
+    await game.approve(bankActor, room.id, pending.id, 'lifecycle-approve');
+    fundsDeliveryFails = false;
+    approvalDeliveryFails = false;
+    expect(committed.at(-1)).toEqual({ roomId: room.id, transactionId: approval.transactionId });
+    expect(approved).toEqual([{ roomId: room.id, requestId: pending.id }]);
+
+    const insufficient = await game.transfer(playerActor, room.id, input, 'lifecycle-insufficient-request');
+    await firstDb.player.update({ where: { id: zhenhuan.playerId }, data: { balance: 100 } });
+    await expect(game.approve(bankActor, room.id, insufficient.id, 'lifecycle-insufficient-approval')).rejects.toThrow('INSUFFICIENT_BALANCE');
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: insufficient.id } })).toMatchObject({ status: 'PENDING' });
+    expect(failed.at(-1)).toEqual({
+      phase: 'APPROVAL',
+      roomId: room.id,
+      requestId: insufficient.id,
+      attemptId: expect.stringMatching(/^[a-f0-9]{24}$/),
+      reasonCode: 'INSUFFICIENT_BALANCE',
+    });
+
+    await firstDb.player.update({ where: { id: zhenhuan.playerId }, data: { balance: 5_000 } });
+    await firstDb.player.update({ where: { id: huashifei.playerId }, data: { status: 'LEFT' } });
+    const approvalModeFailure = await game.transfer(playerActor, room.id, input, 'lifecycle-submission-failure').catch((error: unknown) => error);
+    expect(approvalModeFailure).toBeInstanceOf(TransferRuleError);
+    expect(approvalModeFailure).toMatchObject({ code: 'PLAYER_NOT_FOUND', transferApprovalRequired: true });
+    expect(failed.at(-1)).toEqual({
+      phase: 'SUBMISSION',
+      roomId: room.id,
+      playerId: zhenhuan.playerId,
+      attemptId: expect.stringMatching(/^[a-f0-9]{24}$/),
+      reasonCode: 'PLAYER_NOT_FOUND',
+    });
+
+    const failureCount = failed.length;
+    await firstDb.room.update({ where: { id: room.id }, data: { transferApprovalRequired: false } });
+    const immediateModeFailure = await game.transfer(playerActor, room.id, input, 'lifecycle-immediate-failure').catch((error: unknown) => error);
+    expect(immediateModeFailure).toBeInstanceOf(TransferRuleError);
+    expect(immediateModeFailure).toMatchObject({ code: 'PLAYER_NOT_FOUND', transferApprovalRequired: false });
+    expect(failed).toHaveLength(failureCount);
+  });
+
+  it('uses live transfer approval mode in one playing room after admin false true false updates', async () => {
+    const { room, zhenhuan, huashifei } = await unifiedTransferRoom('运行中实时审批模式');
+    const game = new PrismaGameService(firstDb, () => 0);
+    const accounts = new AccountRoomService(firstDb, () => true);
+    const playerActor = state.players.get(zhenhuan.playerId)!;
+    const input = { fromPlayerId: zhenhuan.playerId, recipientType: 'PLAYER' as const, toPlayerId: huashifei.playerId, amount: 100, isPlotFine: false };
+
+    const firstResult = await game.transfer(playerActor, room.id, input, 'live-mode-off-1');
+    await accounts.updateAdminRoom(state.creator, room.id, { transferApprovalRequired: true }, 'live-mode-on');
+    const secondResult = await game.transfer(playerActor, room.id, input, 'live-mode-on-1');
+    await accounts.updateAdminRoom(state.creator, room.id, { transferApprovalRequired: false }, 'live-mode-off');
+    const thirdResult = await game.transfer(playerActor, room.id, input, 'live-mode-off-2');
+
+    expect(firstResult.status).toBe('EXECUTED');
+    expect(secondResult.status).toBe('PENDING');
+    expect(thirdResult.status).toBe('EXECUTED');
+    expect(await firstDb.room.findUniqueOrThrow({ where: { id: room.id } })).toMatchObject({
+      status: 'PLAYING',
+      transferApprovalRequired: false,
+    });
   });
 
   it('emits a committed funds callback once for START_REWARD approval and never for its replay', async () => {

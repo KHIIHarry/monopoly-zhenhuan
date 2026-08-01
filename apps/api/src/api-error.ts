@@ -33,6 +33,13 @@ export class RuleError extends Error {
   }
 }
 
+export class TransferRuleError extends RuleError {
+  constructor(code: string, readonly transferApprovalRequired: boolean) {
+    super(code);
+    this.name = 'TransferRuleError';
+  }
+}
+
 export function mapApiError(error: unknown) {
   if (error instanceof ZodError) {
     return {
@@ -43,7 +50,7 @@ export function mapApiError(error: unknown) {
   }
 
   if (error instanceof RuleError) {
-    const status = error.code === 'SETTLEMENT_INCONSISTENT'
+    const status = error.code === 'SETTLEMENT_INCONSISTENT' || error.code === 'INTERNAL_ERROR'
       ? 500
       : authenticationErrors.has(error.code)
       ? 401
@@ -56,7 +63,9 @@ export function mapApiError(error: unknown) {
         : 409;
     return {
       status,
-      body: { error: error.code },
+      body: error instanceof TransferRuleError
+        ? { error: error.code, transferApprovalRequired: error.transferApprovalRequired }
+        : { error: error.code },
       expose: true,
     };
   }

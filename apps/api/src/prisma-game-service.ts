@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { roll2d6 } from '@zhenhuan/shared';
 import { z } from 'zod';
-import { RuleError } from './api-error.js';
+import { RuleError, TransferRuleError } from './api-error.js';
 import type { PostCommitToastNotifier } from './realtime-toast-notifications.js';
 
 export type GameActor = { accountId: string; sessionId: string };
@@ -482,8 +482,11 @@ export class PrismaGameService {
 
   async approve(actor: GameActor, roomId: string, requestId: string, key: string) {
     let mutationCreated = false;
-    return this.executeIdempotent(actor, roomId, 'BANK', undefined, `request:${requestId}:approve`, key, { roomId, requestId }, async (tx, bank) => {
+    let approvedPlayerTransfer = false;
+    try {
+      return await this.executeIdempotent(actor, roomId, 'BANK', undefined, `request:${requestId}:approve`, key, { roomId, requestId }, async (tx, bank) => {
       mutationCreated = false;
+      approvedPlayerTransfer = false;
       const request = await tx.gameRequest.findUnique({ where: { id: requestId }, include: { property: { include: { definition: true } }, landingEvent: true, actor: { include: { character: true } }, target: true, transaction: true, room: true } });
       if (!request || request.roomId !== roomId) fail('REQUEST_NOT_FOUND');
       if (request.room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
@@ -632,10 +635,32 @@ export class PrismaGameService {
       if (approvalAudit) await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'RETURN_COMPANION_EVENT', entityType: 'Player', entityId: actorId ?? '', beforeJson: approvalAudit.beforeJson, afterJson: approvalAudit.afterJson } });
       const executed = await tx.gameRequest.update({ where: { id: request.id }, data: { status: 'EXECUTED', resolvedAt: new Date() } });
       mutationCreated = true;
+      approvedPlayerTransfer = request.type === 'PLAYER_TRANSFER';
       return { id: executed.id, status: executed.status, transactionId: transaction.id };
     }, async (tx) => this.requireRequestParticipants(tx, roomId, requestId), () => mutationCreated, async (result) => {
-      if (mutationCreated && typeof result.transactionId === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.transactionId);
-    });
+        const deliveries: Array<Promise<unknown>> = [];
+        if (mutationCreated && typeof result.transactionId === 'string') {
+          deliveries.push(Promise.resolve().then(() => this.toastNotifier?.fundsCommitted(roomId, result.transactionId!)));
+        }
+        if (mutationCreated && approvedPlayerTransfer) {
+          deliveries.push(Promise.resolve().then(() => this.toastNotifier?.transferApproved?.(roomId, requestId)));
+        }
+        await Promise.allSettled(deliveries);
+      });
+    } catch (error) {
+      try {
+        await this.toastNotifier?.transferFailed?.({
+          phase: 'APPROVAL',
+          roomId,
+          requestId,
+          attemptId: hash(`${actor.accountId}:${roomId}:approve-transfer:${requestId}:${key}`).slice(0, 24),
+          reasonCode: error instanceof RuleError ? error.code : 'INTERNAL_ERROR',
+        });
+      } catch {
+        // Failure reporting must not replace the approval error.
+      }
+      throw error;
+    }
   }
 
   async reject(actor: GameActor, roomId: string, requestId: string, reason: string, key: string) {
@@ -661,8 +686,12 @@ export class PrismaGameService {
       && input.toPlayerId !== input.fromPlayerId;
     const bankRecipientValid = input.recipientType === 'BANK' && input.toPlayerId === undefined;
     if (!input.fromPlayerId || (!playerRecipientValid && !bankRecipientValid)) fail('INVALID_TRANSFER');
-    return this.executeIdempotent(actor, roomId, 'PLAYER', input.fromPlayerId, 'transfer', key, { roomId, ...input }, async (tx, member) => {
-      const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
+    let observedApprovalMode: boolean | undefined;
+    try {
+      return await this.executeIdempotent(actor, roomId, 'PLAYER', input.fromPlayerId, 'transfer', key, { roomId, ...input }, async (tx, member) => {
+      const room = await tx.room.findUnique({ where: { id: roomId } });
+      if (room) observedApprovalMode = room.transferApprovalRequired;
+      if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
       const payer = await tx.player.findUnique({ where: { id: input.fromPlayerId }, include: { character: true } });
       if (!payer || payer.roomId !== roomId) fail('PLAYER_NOT_FOUND');
       const amounts = this.transferAmounts(room, payer, input.amount, input.isPlotFine);
@@ -712,11 +741,37 @@ export class PrismaGameService {
       };
       const transaction = await this.recordTransaction(tx, roomId, transactionType, effects, member.id, metadata);
       return { id: transaction.id, status: 'EXECUTED', originalAmount: amounts.originalAmount, reduction: amounts.reduction, amount: amounts.actualAmount };
-    }, async (tx) => input.recipientType === 'PLAYER'
-      ? this.requirePlayablePlayers(tx, roomId, [input.fromPlayerId, input.toPlayerId!])
-      : this.requirePlayablePlayer(tx, roomId, input.fromPlayerId), undefined, async (result) => {
-        if (result.status === 'EXECUTED' && typeof result.id === 'string') await this.toastNotifier?.fundsCommitted(roomId, result.id);
+      }, async (tx) => {
+        const room = await tx.room.findUnique({ where: { id: roomId }, select: { transferApprovalRequired: true } });
+        if (room) observedApprovalMode = room.transferApprovalRequired;
+        return input.recipientType === 'PLAYER'
+          ? this.requirePlayablePlayers(tx, roomId, [input.fromPlayerId, input.toPlayerId!])
+          : this.requirePlayablePlayer(tx, roomId, input.fromPlayerId);
+      }, undefined, async (result) => {
+        if (result.status === 'EXECUTED' && typeof result.id === 'string') {
+          await this.toastNotifier?.fundsCommitted(roomId, result.id);
+        } else if (result.status === 'PENDING' && typeof result.id === 'string') {
+          await this.toastNotifier?.transferRequested?.(roomId, result.id);
+        }
       });
+    } catch (error) {
+      if (observedApprovalMode === undefined) throw error;
+      const reasonCode = error instanceof RuleError ? error.code : 'INTERNAL_ERROR';
+      if (observedApprovalMode) {
+        try {
+          await this.toastNotifier?.transferFailed?.({
+            phase: 'SUBMISSION',
+            roomId,
+            playerId: input.fromPlayerId,
+            attemptId: hash(`${actor.accountId}:${roomId}:transfer:${key}`).slice(0, 24),
+            reasonCode,
+          });
+        } catch {
+          // Failure reporting must not replace the transfer error.
+        }
+      }
+      throw new TransferRuleError(reasonCode, observedApprovalMode);
+    }
   }
 
   async payToll(actor: GameActor, roomId: string, payerId: string, propertyName: string, key: string) {

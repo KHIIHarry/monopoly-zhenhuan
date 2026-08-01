@@ -11,6 +11,9 @@ export type PostCommitToastNotifier = {
   fundsCommitted: (roomId: string, transactionId: string) => void | Promise<void>;
   requestRejected: (roomId: string, requestId: string) => void | Promise<void>;
   landingRejected: (roomId: string, landingId: string, reason: string) => void | Promise<void>;
+  transferRequested: (roomId: string, requestId: string) => void | Promise<void>;
+  transferApproved: (roomId: string, requestId: string) => void | Promise<void>;
+  transferFailed: (notice: TransferFailureNotice) => void | Promise<void>;
 };
 
 type FundEntry = {

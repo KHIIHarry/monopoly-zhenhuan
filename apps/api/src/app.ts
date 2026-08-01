@@ -13,8 +13,12 @@ import {
   buildFundToastDeliveries,
   buildLandingRejectionToastDelivery,
   buildRejectionToastDelivery,
+  buildTransferApprovedToastDelivery,
+  buildTransferFailureToastDelivery,
+  buildTransferRequestedToastDelivery,
   type PostCommitToastNotifier,
   type ToastDelivery,
+  type TransferFailureNotice,
 } from './realtime-toast-notifications.js';
 import { loadSecurityConfig } from './security-config.js';
 
@@ -32,6 +36,9 @@ type ToastBuilders = {
   funds: (database: ApiDatabase, transactionId: string) => Promise<ToastDelivery[]>;
   rejection: (database: ApiDatabase, requestId: string) => Promise<ToastDelivery | null>;
   landingRejection: (database: ApiDatabase, landingId: string, reason: string) => Promise<ToastDelivery | null>;
+  transferRequested: (database: ApiDatabase, requestId: string) => Promise<ToastDelivery | null>;
+  transferApproved: (database: ApiDatabase, requestId: string) => Promise<ToastDelivery | null>;
+  transferFailed: (database: ApiDatabase, notice: TransferFailureNotice) => Promise<ToastDelivery | null>;
 };
 
 export const roomChannel = (roomId: string) => `room:${roomId}`;
@@ -40,8 +47,15 @@ export const sessionChannel = (sessionId: string) => `session:${sessionId}`;
 export function createPostCommitToastNotifier(
   database: ApiDatabase,
   emitter: SessionToastEmitter,
-  onError: (error: unknown, context: { roomId: string; sourceId: string; kind: 'FUNDS' | 'REQUEST_REJECTED' }) => void = () => undefined,
-  builders: ToastBuilders = { funds: buildFundToastDeliveries, rejection: buildRejectionToastDelivery, landingRejection: buildLandingRejectionToastDelivery },
+  onError: (error: unknown, context: { roomId: string; sourceId: string; kind: 'FUNDS' | 'REQUEST_REJECTED' | 'TRANSFER_REQUESTED' | 'TRANSFER_APPROVED' | 'TRANSFER_FAILED' }) => void = () => undefined,
+  builders: ToastBuilders = {
+    funds: buildFundToastDeliveries,
+    rejection: buildRejectionToastDelivery,
+    landingRejection: buildLandingRejectionToastDelivery,
+    transferRequested: buildTransferRequestedToastDelivery,
+    transferApproved: buildTransferApprovedToastDelivery,
+    transferFailed: buildTransferFailureToastDelivery,
+  },
 ): PostCommitToastNotifier {
   const emit = (delivery: ToastDelivery) => {
     emitter.to(sessionChannel(delivery.sessionId)).emit('room.toast', delivery.event);
@@ -68,6 +82,31 @@ export function createPostCommitToastNotifier(
         if (delivery) emit(delivery);
       } catch (error) {
         onError(error, { roomId, sourceId: landingId, kind: 'REQUEST_REJECTED' });
+      }
+    },
+    transferRequested: async (roomId, requestId) => {
+      try {
+        const delivery = await builders.transferRequested(database, requestId);
+        if (delivery) emit(delivery);
+      } catch (error) {
+        onError(error, { roomId, sourceId: requestId, kind: 'TRANSFER_REQUESTED' });
+      }
+    },
+    transferApproved: async (roomId, requestId) => {
+      try {
+        const delivery = await builders.transferApproved(database, requestId);
+        if (delivery) emit(delivery);
+      } catch (error) {
+        onError(error, { roomId, sourceId: requestId, kind: 'TRANSFER_APPROVED' });
+      }
+    },
+    transferFailed: async (notice) => {
+      try {
+        const delivery = await builders.transferFailed(database, notice);
+        if (delivery) emit(delivery);
+      } catch (error) {
+        const sourceId = notice.phase === 'SUBMISSION' ? notice.attemptId : notice.requestId;
+        onError(error, { roomId: notice.roomId, sourceId, kind: 'TRANSFER_FAILED' });
       }
     },
   };

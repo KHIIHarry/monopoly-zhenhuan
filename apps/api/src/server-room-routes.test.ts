@@ -135,6 +135,9 @@ describe('unified transfer route contract', () => {
     const { accounts, app, games, headers, notifications } = await routeHarness();
     const playerTransfer = { fromPlayerId: 'player-1', recipientType: 'PLAYER', toPlayerId: 'player-2', amount: 400, isPlotFine: false } as const;
     const bankTransfer = { fromPlayerId: 'player-1', recipientType: 'BANK', amount: 500, isPlotFine: true } as const;
+    games.transfer
+      .mockResolvedValueOnce({ id: 'transfer-1', status: 'EXECUTED', stateVersion: 22 })
+      .mockResolvedValueOnce({ id: 'request-1', status: 'PENDING', stateVersion: 23 });
 
     const playerResponse = await app.inject({
       method: 'POST',
@@ -151,12 +154,14 @@ describe('unified transfer route contract', () => {
 
     expect(playerResponse.statusCode).toBe(200);
     expect(bankResponse.statusCode).toBe(200);
+    expect(playerResponse.json()).toMatchObject({ status: 'EXECUTED' });
+    expect(bankResponse.json()).toMatchObject({ status: 'PENDING' });
     expect(accounts.authorizeRoomSession).toHaveBeenCalledTimes(2);
     expect(games.transfer).toHaveBeenNthCalledWith(1, { accountId: 'account-1', sessionId: 'session-1' }, 'room-1', playerTransfer, 'player-transfer-key');
     expect(games.transfer).toHaveBeenNthCalledWith(2, { accountId: 'account-1', sessionId: 'session-1' }, 'room-1', bankTransfer, 'bank-transfer-key');
     expect(notifications).toEqual([
       { roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 22 } },
-      { roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 22 } },
+      { roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 23 } },
     ]);
   });
 

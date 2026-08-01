@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
-import { mapApiError, RuleError } from './api-error.js';
+import { mapApiError, RuleError, TransferRuleError } from './api-error.js';
 
 async function parserResponse(input: { contentType: string; payload: string; bodyLimit?: number }) {
   const app = Fastify({ bodyLimit: input.bodyLimit });
@@ -98,6 +98,27 @@ describe('mapApiError', () => {
       status: 500,
       body: { error: 'INTERNAL_ERROR' },
       expose: false,
+    });
+  });
+
+  it('exposes the authoritative transfer approval mode only for transfer rule errors', () => {
+    expect(mapApiError(new TransferRuleError('INSUFFICIENT_BALANCE', true))).toEqual({
+      status: 409,
+      body: { error: 'INSUFFICIENT_BALANCE', transferApprovalRequired: true },
+      expose: true,
+    });
+    expect(mapApiError(new TransferRuleError('PLAYER_NOT_FOUND', false))).toEqual({
+      status: 404,
+      body: { error: 'PLAYER_NOT_FOUND', transferApprovalRequired: false },
+      expose: true,
+    });
+    expect(mapApiError(new RuleError('INSUFFICIENT_BALANCE')).body).toEqual({
+      error: 'INSUFFICIENT_BALANCE',
+    });
+    expect(mapApiError(new TransferRuleError('INTERNAL_ERROR', true))).toEqual({
+      status: 500,
+      body: { error: 'INTERNAL_ERROR', transferApprovalRequired: true },
+      expose: true,
     });
   });
 

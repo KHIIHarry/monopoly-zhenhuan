@@ -6,6 +6,7 @@ import { sessionCookieName } from './auth-domain.js';
 import * as appModule from './app.js';
 import type { PrismaGameService } from './prisma-game-service.js';
 import type { RealtimeToastEvent } from '@zhenhuan/shared';
+import type { TransferFailureNotice } from './realtime-toast-notifications.js';
 
 type SubscriptionSocket = {
   data: Record<string, unknown>;
@@ -119,6 +120,9 @@ describe('Socket.IO room subscription ownership', () => {
         fundsCommitted: (roomId: string, transactionId: string) => Promise<void>;
         requestRejected: (roomId: string, requestId: string) => Promise<void>;
         landingRejected: (roomId: string, landingId: string, reason: string) => Promise<void>;
+        transferRequested: (roomId: string, requestId: string) => Promise<void>;
+        transferApproved: (roomId: string, requestId: string) => Promise<void>;
+        transferFailed: (notice: TransferFailureNotice) => Promise<void>;
       };
     }).createPostCommitToastNotifier;
     expect(createNotifier).toBeTypeOf('function');
@@ -141,6 +145,18 @@ describe('Socket.IO room subscription ownership', () => {
     const landingRejectedEvent: RealtimeToastEvent = {
       eventId: 'landing-1:rejected:PLAYER:player-1', roomId: 'room-a', audience: 'PLAYER', kind: 'REQUEST_REJECTED', message: '你的落点申请已被银行拒绝：现场落点有误',
     };
+    const transferRequestedEvent: RealtimeToastEvent = {
+      eventId: 'request-2:requested:BANK', roomId: 'room-a', audience: 'BANK', kind: 'TRANSFER_REQUESTED', message: '收到张三的转账申请：向李四支付 500 两',
+    };
+    const transferApprovedEvent: RealtimeToastEvent = {
+      eventId: 'request-2:approved:PLAYER:payer', roomId: 'room-a', audience: 'PLAYER', kind: 'TRANSFER_APPROVED', message: '银行审批通过，转账已成功，结果已同步至账本',
+    };
+    const transferFailedEvent: RealtimeToastEvent = {
+      eventId: 'attempt-1:submission-failed:BANK', roomId: 'room-a', audience: 'BANK', kind: 'TRANSFER_FAILED', message: '张三的转账申请提交失败：余额不足',
+    };
+    const submissionFailure: TransferFailureNotice = {
+      phase: 'SUBMISSION', roomId: 'room-a', playerId: 'payer', attemptId: 'attempt-1', reasonCode: 'INSUFFICIENT_BALANCE',
+    };
     const errors: unknown[] = [];
     const notifier = createNotifier(
       {} as never,
@@ -154,12 +170,18 @@ describe('Socket.IO room subscription ownership', () => {
         ],
         rejection: async () => ({ sessionId: 'payer-session', event: rejectedEvent }),
         landingRejection: async () => ({ sessionId: 'player-session', event: landingRejectedEvent }),
+        transferRequested: async () => ({ sessionId: 'bank-session', event: transferRequestedEvent }),
+        transferApproved: async () => ({ sessionId: 'payer-session', event: transferApprovedEvent }),
+        transferFailed: async () => ({ sessionId: 'bank-session', event: transferFailedEvent }),
       },
     );
 
     await notifier.fundsCommitted('room-a', 'tx-1');
     await notifier.requestRejected('room-a', 'request-1');
     await notifier.landingRejected('room-a', 'landing-1', '现场落点有误');
+    await notifier.transferRequested('room-a', 'request-2');
+    await notifier.transferApproved('room-a', 'request-2');
+    await notifier.transferFailed(submissionFailure);
 
     expect(emitted).toEqual([
       { channel: 'session:payer-session', name: 'room.toast', event: fundEvents[0] },
@@ -167,9 +189,43 @@ describe('Socket.IO room subscription ownership', () => {
       { channel: 'session:bank-session', name: 'room.toast', event: fundEvents[2] },
       { channel: 'session:payer-session', name: 'room.toast', event: rejectedEvent },
       { channel: 'session:player-session', name: 'room.toast', event: landingRejectedEvent },
+      { channel: 'session:bank-session', name: 'room.toast', event: transferRequestedEvent },
+      { channel: 'session:payer-session', name: 'room.toast', event: transferApprovedEvent },
+      { channel: 'session:bank-session', name: 'room.toast', event: transferFailedEvent },
     ]);
     expect(emitted.some(({ channel }) => channel === 'session:unrelated-session' || channel === 'session:other-room-session')).toBe(false);
     expect(errors).toEqual([]);
+  });
+
+  it('reports transfer lifecycle builder failures without rejecting committed operations', async () => {
+    const createNotifier = (appModule as typeof appModule & {
+      createPostCommitToastNotifier?: (...args: never[]) => {
+        transferRequested: (roomId: string, requestId: string) => Promise<void>;
+      };
+    }).createPostCommitToastNotifier;
+    expect(createNotifier).toBeTypeOf('function');
+    if (!createNotifier) return;
+
+    const errors: Array<{ error: unknown; context: unknown }> = [];
+    const notifier = createNotifier(
+      {} as never,
+      { to: () => ({ emit: vi.fn() }) },
+      (error: unknown, context: unknown) => { errors.push({ error, context }); },
+      {
+        funds: async () => [],
+        rejection: async () => null,
+        landingRejection: async () => null,
+        transferRequested: async () => { throw new Error('delivery unavailable'); },
+        transferApproved: async () => null,
+        transferFailed: async () => null,
+      },
+    );
+
+    await expect(notifier.transferRequested('room-a', 'request-2')).resolves.toBeUndefined();
+    expect(errors).toEqual([{
+      error: expect.objectContaining({ message: 'delivery unavailable' }),
+      context: { roomId: 'room-a', sourceId: 'request-2', kind: 'TRANSFER_REQUESTED' },
+    }]);
   });
 
   it('replaces the previous room and explicitly cleans the active room', async () => {
