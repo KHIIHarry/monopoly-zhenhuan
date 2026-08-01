@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
+import { runGameAction } from './app-router-client';
 
 const componentUrl = new URL('./app-router-client.tsx', import.meta.url);
 
@@ -124,14 +125,33 @@ describe('realtime Toast integration', () => {
 });
 
 describe('authoritative transfer feedback', () => {
-  test('preserves write errors and committed responses across snapshot refresh', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+  test('returns the write error when the server rejects a mutation', async () => {
+    const error = new Error('server rejected write');
+    const result = await runGameAction({
+      owner: { roomId: 'room-1', view: 'PLAYER', generation: 1 },
+      spec: { path: '/rooms/room-1/transfers', body: { amount: 100 } },
+      write: async () => ({ ok: false, error }),
+      ownsRoom: () => true,
+      refreshGame: async () => true,
+    });
 
-    expect(component).toContain('type RunResult<T> = { ok: true; value: T } | { ok: false; error?: unknown };');
-    expect(component).toMatch(/return \{ ok: false, error: caught \};/);
-    expect(component).toMatch(/type RoomActionResult<T, B extends WriteBody> =\s*\| \{ ok: true; value: T; body: B; committed: true \}\s*\| \{ ok: false; value: T; body: B; committed: true \}\s*\| \{ ok: false; committed: false; error\?: unknown \};/);
-    expect(component).toMatch(/if \(!result\.ok\) return \{ \.\.\.result, committed: false \};/);
-    expect(component).toMatch(/if \(!\(await refreshGame\(owner\)\)\) \{\s*result\.confirm\(\);\s*return \{ ok: false, committed: true, value: result\.value, body: result\.body \};/);
+    expect(result).toEqual({ ok: false, committed: false, error });
+  });
+
+  test('keeps the authoritative response when snapshot refresh fails after a write', async () => {
+    const confirm = vi.fn();
+    const value = { id: 'transfer-1', status: 'EXECUTED' };
+    const body = { recipientId: 'player-2', amount: 100 };
+    const result = await runGameAction({
+      owner: { roomId: 'room-1', view: 'PLAYER', generation: 1 },
+      spec: { path: '/rooms/room-1/transfers', body },
+      write: async () => ({ ok: true, value, body, confirm }),
+      ownsRoom: () => true,
+      refreshGame: async () => false,
+    });
+
+    expect(result).toEqual({ ok: false, committed: true, value, body });
+    expect(confirm).toHaveBeenCalledOnce();
   });
 
   test('uses server status and API failure details for player transfers', async () => {

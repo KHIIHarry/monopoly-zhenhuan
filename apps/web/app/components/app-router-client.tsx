@@ -218,7 +218,8 @@ type StableWriteSpec<B extends WriteBody = WriteBody> = {
   createBody?: () => B;
 };
 type StableWriteResult<T, B extends WriteBody = WriteBody> =
-  { ok: true; value: T; body: B; confirm: () => void } | { ok: false };
+  | { ok: true; value: T; body: B; confirm: () => void }
+  | { ok: false; error?: unknown };
 type StableWriteOptions = { owner?: RoomOwner };
 type StableWriter = <T = unknown, B extends WriteBody = WriteBody>(
   spec: StableWriteSpec<B>,
@@ -233,6 +234,36 @@ type ActionRunner = <T = unknown, B extends WriteBody = WriteBody>(
 ) => Promise<RoomActionResult<T, B>>;
 type PendingWriteIntent = { key: string; body: WriteBody; payload?: string };
 type PendingRoomToast = { event: RealtimeToastEvent; generation: number };
+
+export async function runGameAction<T = unknown, B extends WriteBody = WriteBody>({
+  owner,
+  spec,
+  write,
+  ownsRoom,
+  refreshGame,
+}: {
+  owner: RoomActionOwner;
+  spec: StableWriteSpec<B>;
+  write: (
+    spec: StableWriteSpec<B>,
+    options?: StableWriteOptions,
+  ) => Promise<StableWriteResult<T, B>>;
+  ownsRoom: (owner: RoomActionOwner) => boolean;
+  refreshGame: (owner: RoomActionOwner) => Promise<boolean>;
+}): Promise<RoomActionResult<T, B>> {
+  const result = await write(spec, { owner });
+  if (!result.ok) return { ...result, committed: false };
+  if (!ownsRoom(owner)) {
+    result.confirm();
+    return { ok: false, committed: true, value: result.value, body: result.body };
+  }
+  if (!(await refreshGame(owner))) {
+    result.confirm();
+    return { ok: false, committed: true, value: result.value, body: result.body };
+  }
+  result.confirm();
+  return { ok: true, committed: true, value: result.value, body: result.body };
+}
 
 const pendingWriteIntents = new Map<string, PendingWriteIntent>();
 
@@ -1655,18 +1686,7 @@ export default function AppRouterClient({
       view: workbench.view,
       generation: roomGeneration.current,
     };
-    const result = await write<T, B>(spec, { owner });
-    if (!result.ok) return { ...result, committed: false };
-    if (!ownsRoom(owner)) {
-      result.confirm();
-      return { ok: false, committed: true, value: result.value, body: result.body };
-    }
-    if (!(await refreshGame(owner))) {
-      result.confirm();
-      return { ok: false, committed: true, value: result.value, body: result.body };
-    }
-    result.confirm();
-    return { ok: true, committed: true, value: result.value, body: result.body };
+    return runGameAction<T, B>({ owner, spec, write, ownsRoom, refreshGame });
   }
 
   async function loadProfile() {
