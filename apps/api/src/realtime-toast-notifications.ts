@@ -1,7 +1,11 @@
 import type { PrismaClient } from '@prisma/client';
-import type { RealtimeToastEvent } from '@zhenhuan/shared';
+import { transferFailureReason, type RealtimeToastEvent } from '@zhenhuan/shared';
 
 export type ToastDelivery = { sessionId: string; event: RealtimeToastEvent };
+
+export type TransferFailureNotice =
+  | { phase: 'SUBMISSION'; roomId: string; playerId: string; attemptId: string; reasonCode: string }
+  | { phase: 'APPROVAL'; roomId: string; requestId: string; attemptId: string; reasonCode: string };
 
 export type PostCommitToastNotifier = {
   fundsCommitted: (roomId: string, transactionId: string) => void | Promise<void>;
@@ -45,6 +49,43 @@ const requestLabels: Record<string, string> = {
 const money = (amount: number) => String(Math.abs(amount));
 const suffix = (reason: string | null) => reason ? `（${reason}）` : '';
 const wireMessage = (message: string) => message.length <= 240 ? message : `${message.slice(0, 237)}...`;
+
+type TransferMember = { displayNameSnapshot: string; activeSessionId: string | null };
+type PersistedTransferRequest = {
+  id: string;
+  roomId: string;
+  type: string;
+  status: string;
+  amount: number | null;
+  payload: unknown;
+  actor: { id: string; member: TransferMember } | null;
+  target: { id: string; member: TransferMember } | null;
+};
+
+function recipientType(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return null;
+  const value = (payload as Record<string, unknown>).recipientType;
+  return value === 'PLAYER' || value === 'BANK' ? value : null;
+}
+
+function isLifecycleTransfer(transaction: FundTransaction) {
+  const recipient = recipientType(transaction.metadata);
+  return ((transaction.type === 'PLAYER_TRANSFER' || transaction.type === 'PLOT_FINE') && recipient === 'PLAYER')
+    || ((transaction.type === 'PLAYER_BANK_PAYMENT' || transaction.type === 'PLOT_FINE') && recipient === 'BANK');
+}
+
+async function findTransferRequest(
+  database: Pick<PrismaClient, 'gameRequest'>,
+  requestId: string,
+): Promise<PersistedTransferRequest | null> {
+  return await database.gameRequest.findUnique({
+    where: { id: requestId },
+    include: {
+      actor: { include: { member: { select: { displayNameSnapshot: true, activeSessionId: true } } } },
+      target: { include: { member: { select: { displayNameSnapshot: true, activeSessionId: true } } } },
+    },
+  }) as PersistedTransferRequest | null;
+}
 
 function normalizedReason(type: string, description: string) {
   if (type === 'START_REWARD') return '起点奖励';
@@ -108,8 +149,10 @@ export async function buildFundToastDeliveries(
     playerEntryCounts.set(entry.playerId, (playerEntryCounts.get(entry.playerId) ?? 0) + 1);
   }
   const deliveries: ToastDelivery[] = [];
+  const suppressLifecyclePayer = isLifecycleTransfer(transaction);
 
   for (const entry of entries) {
+    if (suppressLifecyclePayer && entry === paid) continue;
     const sessionId = entry.player.member.activeSessionId;
     if (!sessionId) continue;
     let message = playerBankMessage(transaction, entry);
@@ -192,7 +235,96 @@ export async function buildRejectionToastDelivery(
       roomId: request.roomId,
       audience: 'PLAYER',
       kind: 'REQUEST_REJECTED',
-      message: wireMessage(`你的${requestLabels[request.type] ?? '操作'}申请已被银行拒绝${reason ? `：${reason}` : ''}`),
+      message: wireMessage(`${request.type === 'PLAYER_TRANSFER' ? '转账' : `你的${requestLabels[request.type] ?? '操作'}`}申请已被银行拒绝${reason ? `：${reason}` : ''}`),
+    },
+  };
+}
+
+export async function buildTransferRequestedToastDelivery(
+  database: Pick<PrismaClient, 'gameRequest' | 'roomMembership'>,
+  requestId: string,
+): Promise<ToastDelivery | null> {
+  const request = await findTransferRequest(database, requestId);
+  const recipient = request && recipientType(request.payload);
+  const amount = request?.amount;
+  if (!request || request.type !== 'PLAYER_TRANSFER' || request.status !== 'PENDING' || !request.actor || !recipient || typeof amount !== 'number' || !Number.isInteger(amount) || amount <= 0) return null;
+  const recipientName = recipient === 'BANK' ? '银行' : request.target?.member.displayNameSnapshot;
+  if (!recipientName) return null;
+  const bank = await database.roomMembership.findFirst({
+    where: { roomId: request.roomId, status: 'ACTIVE', isBank: true },
+    select: { activeSessionId: true },
+  });
+  if (!bank?.activeSessionId) return null;
+  return {
+    sessionId: bank.activeSessionId,
+    event: {
+      eventId: `${request.id}:requested:BANK`,
+      roomId: request.roomId,
+      audience: 'BANK',
+      kind: 'TRANSFER_REQUESTED',
+      message: wireMessage(`收到${request.actor.member.displayNameSnapshot}的转账申请：向${recipientName}支付 ${amount} 两`),
+    },
+  };
+}
+
+export async function buildTransferApprovedToastDelivery(
+  database: Pick<PrismaClient, 'gameRequest'>,
+  requestId: string,
+): Promise<ToastDelivery | null> {
+  const request = await findTransferRequest(database, requestId);
+  const sessionId = request?.actor?.member.activeSessionId;
+  if (!request || request.type !== 'PLAYER_TRANSFER' || request.status !== 'EXECUTED' || !request.actor || !sessionId) return null;
+  return {
+    sessionId,
+    event: {
+      eventId: `${request.id}:approved:PLAYER:${request.actor.id}`,
+      roomId: request.roomId,
+      audience: 'PLAYER',
+      kind: 'TRANSFER_APPROVED',
+      message: '银行审批通过，转账已成功，结果已同步至账本',
+    },
+  };
+}
+
+export async function buildTransferFailureToastDelivery(
+  database: Pick<PrismaClient, 'gameRequest' | 'player' | 'roomMembership'>,
+  notice: TransferFailureNotice,
+): Promise<ToastDelivery | null> {
+  const reason = transferFailureReason(notice.reasonCode);
+  if (notice.phase === 'SUBMISSION') {
+    const payer = await database.player.findFirst({
+      where: { id: notice.playerId, roomId: notice.roomId },
+      include: { member: { select: { displayNameSnapshot: true } } },
+    }) as { member: { displayNameSnapshot: string } } | null;
+    if (!payer) return null;
+    const bank = await database.roomMembership.findFirst({
+      where: { roomId: notice.roomId, status: 'ACTIVE', isBank: true },
+      select: { activeSessionId: true },
+    });
+    if (!bank?.activeSessionId) return null;
+    return {
+      sessionId: bank.activeSessionId,
+      event: {
+        eventId: `${notice.attemptId}:submission-failed:BANK`,
+        roomId: notice.roomId,
+        audience: 'BANK',
+        kind: 'TRANSFER_FAILED',
+        message: wireMessage(`${payer.member.displayNameSnapshot}的转账申请提交失败：${reason}`),
+      },
+    };
+  }
+
+  const request = await findTransferRequest(database, notice.requestId);
+  const sessionId = request?.actor?.member.activeSessionId;
+  if (!request || request.roomId !== notice.roomId || request.type !== 'PLAYER_TRANSFER' || request.status !== 'PENDING' || !request.actor || !sessionId) return null;
+  return {
+    sessionId,
+    event: {
+      eventId: `${request.id}:approval-failed:${notice.attemptId}`,
+      roomId: request.roomId,
+      audience: 'PLAYER',
+      kind: 'TRANSFER_FAILED',
+      message: wireMessage(`银行审批执行失败：${reason}`),
     },
   };
 }

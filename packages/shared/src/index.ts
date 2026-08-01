@@ -4,12 +4,30 @@ export const realtimeToastEventSchema = z.object({
   eventId: z.string().min(1),
   roomId: z.string().min(1),
   audience: z.enum(['PLAYER', 'BANK']),
-  kind: z.enum(['FUNDS', 'REQUEST_REJECTED']),
+  kind: z.enum(['FUNDS', 'REQUEST_REJECTED', 'TRANSFER_REQUESTED', 'TRANSFER_APPROVED', 'TRANSFER_FAILED']),
   message: z.string().trim().min(1).max(240),
 }).strict();
 
 export type RealtimeToastEvent = z.infer<typeof realtimeToastEventSchema>;
 export type RealtimeToastAudience = RealtimeToastEvent['audience'];
+
+const transferFailureReasons: Record<string, string> = {
+  INSUFFICIENT_BALANCE: '余额不足',
+  INVALID_AMOUNT: '收款对象或金额无效',
+  INVALID_TRANSFER: '收款对象或金额无效',
+  SAME_PLAYER_TRANSFER: '收款对象或金额无效',
+  ROOM_NOT_PLAYING: '房间当前不在游戏中',
+  PLAYER_STATE_CHANGED: '玩家状态已变化，请刷新后重试',
+  PLAYER_NOT_FOUND: '玩家状态已变化，请刷新后重试',
+  REQUEST_NOT_FOUND: '转账申请不存在',
+  REQUEST_ALREADY_RESOLVED: '转账申请已处理',
+  IDEMPOTENCY_KEY_REUSED: '提交内容已变化，请重新确认',
+  TRANSACTION_RETRY_EXHAUSTED: '多人同时操作，请刷新后重试',
+};
+
+export function transferFailureReason(code: string) {
+  return transferFailureReasons[code] ?? '服务暂时不可用，请稍后重试';
+}
 
 export type SkillInput = { skipTurns: number; amount: number };
 

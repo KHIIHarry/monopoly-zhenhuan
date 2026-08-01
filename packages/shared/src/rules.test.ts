@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import masterData from '../../../甄嬛传大富翁_master-data.json';
-import { applySkill, calculateToll, loadMasterData, realtimeToastEventSchema, roll2d6 } from './index.js';
+import { applySkill, calculateToll, loadMasterData, realtimeToastEventSchema, roll2d6, transferFailureReason } from './index.js';
 
 describe('master data', () => {
   it('loads exactly 26 properties without recalculating values', () => {
@@ -45,6 +45,31 @@ describe('realtime toast event', () => {
 
   it('accepts the funds wire envelope', () => {
     expect(realtimeToastEventSchema.parse(validEvent)).toMatchObject({ audience: 'PLAYER', kind: 'FUNDS' });
+  });
+
+  it.each([
+    ['TRANSFER_REQUESTED', 'BANK', '收到张三的转账申请：向李四支付 500 两'],
+    ['TRANSFER_APPROVED', 'PLAYER', '银行审批通过，转账已成功，结果已同步至账本'],
+    ['TRANSFER_FAILED', 'PLAYER', '银行审批执行失败：余额不足'],
+  ] as const)('accepts the %s transfer lifecycle wire envelope', (kind, audience, message) => {
+    expect(realtimeToastEventSchema.parse({
+      eventId: `request-1:${kind}`,
+      roomId: 'room-1',
+      audience,
+      kind,
+      message,
+    }).kind).toBe(kind);
+  });
+
+  it.each([
+    ['INSUFFICIENT_BALANCE', '余额不足'],
+    ['INVALID_TRANSFER', '收款对象或金额无效'],
+    ['ROOM_NOT_PLAYING', '房间当前不在游戏中'],
+    ['PLAYER_STATE_CHANGED', '玩家状态已变化，请刷新后重试'],
+    ['REQUEST_ALREADY_RESOLVED', '转账申请已处理'],
+    ['untrusted raw database text', '服务暂时不可用，请稍后重试'],
+  ])('maps %s to a safe transfer failure reason', (code, message) => {
+    expect(transferFailureReason(code)).toBe(message);
   });
 
   it.each([
