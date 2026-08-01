@@ -81,7 +81,8 @@ describe('realtime Toast integration', () => {
     expect(component).toContain('realtimeToastEventSchema.safeParse(payload)');
     expect(component).toMatch(/parsed\.data\.roomId !== runtime\.roomId/);
     expect(component).toMatch(/parsed\.data\.audience !== runtime\.workbench\.view/);
-    expect(component).toMatch(/enqueue\(\{\s*id: parsed\.data\.eventId,\s*message: parsed\.data\.message,\s*tone: parsed\.data\.kind === "REQUEST_REJECTED" \? "REJECTED" : "SUCCESS",\s*\}\)/);
+    expect(component).toMatch(/enqueue\(\{\s*id: parsed\.data\.eventId,\s*message: parsed\.data\.message,\s*tone: toastToneForRealtimeKind\(parsed\.data\.kind\),\s*\}\)/);
+    expect(component).toMatch(/tone: toastToneForRealtimeKind\(toast\.kind\)/);
     expect(component).toContain('socket.on("room.toast", onRoomToast)');
   });
 
@@ -119,6 +120,45 @@ describe('realtime Toast integration', () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
 
     expect(component).toMatch(/\}, \[account\?\.id, roomId, page, screen, workbench\]\);/);
+  });
+});
+
+describe('authoritative transfer feedback', () => {
+  test('preserves write errors and committed responses across snapshot refresh', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('type RunResult<T> = { ok: true; value: T } | { ok: false; error?: unknown };');
+    expect(component).toMatch(/return \{ ok: false, error: caught \};/);
+    expect(component).toMatch(/type RoomActionResult<T, B extends WriteBody> =\s*\| \{ ok: true; value: T; body: B; committed: true \}\s*\| \{ ok: false; value: T; body: B; committed: true \}\s*\| \{ ok: false; committed: false; error\?: unknown \};/);
+    expect(component).toMatch(/if \(!result\.ok\) return \{ \.\.\.result, committed: false \};/);
+    expect(component).toMatch(/if \(!\(await refreshGame\(owner\)\)\) \{\s*result\.confirm\(\);\s*return \{ ok: false, committed: true, value: result\.value, body: result\.body \};/);
+  });
+
+  test('uses server status and API failure details for player transfers', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const transfer = component.slice(
+      component.indexOf('async function submitTransfer'),
+      component.indexOf('async function requestBankPayment'),
+    );
+
+    expect(transfer).toContain('action<TransferResult, typeof body>');
+    expect(transfer).toContain('if (result.committed)');
+    expect(transfer).toContain('showToast(transferSuccessToast(result.value, playerId))');
+    expect(transfer).toContain('transferApprovalRequired?: boolean');
+    expect(transfer).toContain('showToast(transferFailureToast(');
+    expect(component).not.toContain('转帐已提交，结果已同步至账本或审批队列');
+  });
+
+  test('shows a red local failure for player-transfer approval errors', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const approval = component.slice(
+      component.indexOf('async function approve()'),
+      component.indexOf('async function rejectRequest()'),
+    );
+
+    expect(approval).toContain('approveTarget.type === "PLAYER_TRANSFER"');
+    expect(approval).toContain('if (result.committed)');
+    expect(approval).toContain('showToast(bankApprovalFailureToast(');
   });
 });
 

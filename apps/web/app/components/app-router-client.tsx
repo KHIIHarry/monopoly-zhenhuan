@@ -18,6 +18,13 @@ import {
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
 import { createToastQueue, type ToastInput, type ToastItem } from "./toast-queue";
+import {
+  bankApprovalFailureToast,
+  toastToneForRealtimeKind,
+  transferFailureToast,
+  transferSuccessToast,
+  type TransferResult,
+} from "./transfer-toast-feedback";
 import { useRouter } from "next/navigation";
 import { io } from "socket.io-client";
 import { createPortal } from "react-dom";
@@ -198,7 +205,7 @@ type IdempotentBody = Record<string, unknown>;
 type WriteBody = IdempotentBody | undefined;
 type RoomOwner = { roomId: string; generation: number };
 type RoomActionOwner = RoomOwner & { view: "PLAYER" | "BANK" };
-type RunResult<T> = { ok: true; value: T } | { ok: false };
+type RunResult<T> = { ok: true; value: T } | { ok: false; error?: unknown };
 type TaskRunner = <T>(
   task: () => Promise<T>,
   owner?: RoomOwner,
@@ -218,7 +225,9 @@ type StableWriter = <T = unknown, B extends WriteBody = WriteBody>(
   options?: StableWriteOptions,
 ) => Promise<StableWriteResult<T, B>>;
 type RoomActionResult<T, B extends WriteBody> =
-  { ok: true; value: T; body: B } | { ok: false };
+  | { ok: true; value: T; body: B; committed: true }
+  | { ok: false; value: T; body: B; committed: true }
+  | { ok: false; committed: false; error?: unknown };
 type ActionRunner = <T = unknown, B extends WriteBody = WriteBody>(
   spec: StableWriteSpec<B>,
 ) => Promise<RoomActionResult<T, B>>;
@@ -956,6 +965,9 @@ export default function AppRouterClient({
   const showNotice = useCallback((message: string) => {
     enqueue({ message });
   }, [enqueue]);
+  const showToast = useCallback((toast: ToastInput) => {
+    enqueue(toast);
+  }, [enqueue]);
   useEffect(() => {
     const queue = createToastQueue(setCurrentToast);
     toastQueue.current = queue;
@@ -1226,7 +1238,7 @@ export default function AppRouterClient({
       return { ok: true, value: await task() };
     } catch (caught) {
       await handleFailure(caught, owner);
-      return { ok: false };
+      return { ok: false, error: caught };
     } finally {
       busyRef.current = false;
       if (activeRoomTransition.current === null) setBusy(false);
@@ -1637,17 +1649,24 @@ export default function AppRouterClient({
   async function gameAction<T = unknown, B extends WriteBody = WriteBody>(
     spec: StableWriteSpec<B>,
   ): Promise<RoomActionResult<T, B>> {
-    if (!workbench) return { ok: false };
+    if (!workbench) return { ok: false, committed: false };
     const owner = {
       roomId: workbench.roomId,
       view: workbench.view,
       generation: roomGeneration.current,
     };
     const result = await write<T, B>(spec, { owner });
-    if (!result.ok || !ownsRoom(owner)) return { ok: false };
-    if (!(await refreshGame(owner))) return { ok: false };
+    if (!result.ok) return { ...result, committed: false };
+    if (!ownsRoom(owner)) {
+      result.confirm();
+      return { ok: false, committed: true, value: result.value, body: result.body };
+    }
+    if (!(await refreshGame(owner))) {
+      result.confirm();
+      return { ok: false, committed: true, value: result.value, body: result.body };
+    }
     result.confirm();
-    return { ok: true, value: result.value, body: result.body };
+    return { ok: true, committed: true, value: result.value, body: result.body };
   }
 
   async function loadProfile() {
@@ -1788,7 +1807,7 @@ export default function AppRouterClient({
       enqueue({
         id: parsed.data.eventId,
         message: parsed.data.message,
-        tone: parsed.data.kind === "REQUEST_REJECTED" ? "REJECTED" : "SUCCESS",
+        tone: toastToneForRealtimeKind(parsed.data.kind),
       });
     };
     roomInvalidator.current = refresh;
@@ -1889,7 +1908,7 @@ export default function AppRouterClient({
       enqueue({
         id: toast.eventId,
         message: toast.message,
-        tone: toast.kind === "REQUEST_REJECTED" ? "REJECTED" : "SUCCESS",
+        tone: toastToneForRealtimeKind(toast.kind),
       });
     }
   }, [enqueue, workbench]);
@@ -2167,6 +2186,7 @@ export default function AppRouterClient({
         action={gameAction}
         toast={currentToast}
         showNotice={showNotice}
+        showToast={showToast}
         refresh={refreshGame}
         switchView={(view) => void chooseWorkbench(view)}
         manageSeats={() => void manageSeats()}
@@ -4511,6 +4531,7 @@ function Workbench({
   action,
   toast,
   showNotice,
+  showToast,
   refresh,
   switchView,
   manageSeats,
@@ -4524,6 +4545,7 @@ function Workbench({
   action: ActionRunner;
   toast: ToastItem | null;
   showNotice: (message: string) => void;
+  showToast: (toast: ToastInput) => void;
   refresh: () => Promise<boolean>;
   switchView: (view: "PLAYER" | "BANK") => void;
   manageSeats: () => void;
@@ -4626,6 +4648,7 @@ function Workbench({
             tab={playerTab}
             action={action}
             showNotice={showNotice}
+            showToast={showToast}
           />
         ) : (
           <BankView
@@ -4634,6 +4657,7 @@ function Workbench({
             tab={bankTab}
             action={action}
             showNotice={showNotice}
+            showToast={showToast}
             onFinish={finish}
           />
         )}
@@ -4733,6 +4757,7 @@ function PlayerView({
   tab,
   action,
   showNotice,
+  showToast,
 }: {
   membership: RoomMembershipView;
   snapshot: Snapshot;
@@ -4741,6 +4766,7 @@ function PlayerView({
   tab: "HOME" | "PROPERTY" | "LEDGER";
   action: ActionRunner;
   showNotice: (message: string) => void;
+  showToast: (toast: ToastInput) => void;
 }) {
   const me = snapshot.players.find(
     (player) => player.id === membership.playerId,
@@ -5188,16 +5214,24 @@ function PlayerView({
             amount: rawTransferAmount,
             isPlotFine: isMeizhuang && transferIsPlotFine,
           };
-    const ok = await idempotentAction(
-      `/api/rooms/${snapshot.id}/transfers`,
+    const result = await action<TransferResult, typeof body>({
+      path: `/api/rooms/${snapshot.id}/transfers`,
       body,
-    );
-    if (ok) {
+    });
+    if (result.committed) {
       setTransferAmount("");
       setTransferIsPlotFine(false);
       setPanel(null);
-      showNotice("转帐已提交，结果已同步至账本或审批队列");
+      showToast(transferSuccessToast(result.value, playerId));
+      return;
     }
+    const details = result.error instanceof ApiError
+      ? result.error.data as { error?: string; transferApprovalRequired?: boolean }
+      : {};
+    showToast(transferFailureToast(
+      details.error ?? (result.error instanceof ApiError ? result.error.code : 'INTERNAL_ERROR'),
+      details.transferApprovalRequired,
+    ));
   }
 
   async function requestBankPayment(event: FormEvent) {
@@ -6088,6 +6122,7 @@ function BankView({
   tab,
   action,
   showNotice,
+  showToast,
   onFinish,
 }: {
   snapshot: Snapshot;
@@ -6095,6 +6130,7 @@ function BankView({
   tab: "SUMMARY" | "APPROVAL" | "PROPERTY" | "LEDGER" | "TRANSACTION";
   action: ActionRunner;
   showNotice: (message: string) => void;
+  showToast: (toast: ToastInput) => void;
   onFinish: () => void;
 }) {
   const pending = snapshot.requests.filter(
@@ -6214,6 +6250,25 @@ function BankView({
 
   async function approve() {
     if (!approveTarget) return;
+    if (approveTarget.type === "PLAYER_TRANSFER") {
+      const target = approveTarget;
+      const result = await action({
+        path: `/api/rooms/${snapshot.id}/requests/${target.id}/approve`,
+      });
+      if (result.committed) {
+        setApproveTarget(null);
+        showNotice("审批已执行");
+        return;
+      }
+      const details = result.error instanceof ApiError
+        ? result.error.data as { error?: string }
+        : {};
+      showToast(bankApprovalFailureToast(
+        details.error ?? (result.error instanceof ApiError ? result.error.code : 'INTERNAL_ERROR'),
+        target.id,
+      ));
+      return;
+    }
     const ok = await idempotentAction(
       `/api/rooms/${snapshot.id}/requests/${approveTarget.id}/approve`,
     );
