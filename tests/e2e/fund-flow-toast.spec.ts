@@ -9,6 +9,7 @@ const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 type RoomReference = { id: string; name: string };
 type RequestReference = { id: string; status: string };
 type PlayerReference = { id: string; accountId: string };
+type LandingReference = { id: string };
 
 async function postJson<T>(
   context: BrowserContext,
@@ -67,10 +68,61 @@ async function waitForNoToast(...pages: Page[]) {
   await Promise.all(pages.map((page) => expect(page.locator('.toast')).toHaveCount(0, { timeout: 4_500 })));
 }
 
+async function expectToastPresentation(page: Page, tone: 'success' | 'rejected', mobile: boolean) {
+  const toast = page.locator(`.toast-${tone}`);
+  await expect(toast).toBeVisible();
+  const presentation = await toast.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const icon = element.querySelector('svg');
+    const message = element.querySelector('span');
+    return {
+      animationDuration: style.animationDuration,
+      animationFillMode: style.animationFillMode,
+      animationTimingFunction: style.animationTimingFunction,
+      backgroundColor: style.backgroundColor,
+      borderRadius: style.borderRadius,
+      color: style.color,
+      fontSize: style.fontSize,
+      gap: style.gap,
+      iconHeight: icon ? getComputedStyle(icon).height : null,
+      iconWidth: icon ? getComputedStyle(icon).width : null,
+      messageWrapped: message ? message.scrollHeight > message.clientHeight : true,
+      paddingTop: style.paddingTop,
+      whiteSpace: style.whiteSpace,
+      width: style.width,
+    };
+  });
+
+  expect(presentation).toMatchObject({
+    animationDuration: '0.26s',
+    animationFillMode: 'both',
+    animationTimingFunction: 'ease-out',
+    borderRadius: '8px',
+    fontSize: '12px',
+    gap: '6px',
+    iconHeight: '13px',
+    iconWidth: '13px',
+    messageWrapped: false,
+    paddingTop: '8px',
+    whiteSpace: 'nowrap',
+  });
+  expect(presentation.backgroundColor).toBe(
+    tone === 'success' ? 'rgb(228, 242, 232)' : 'rgb(249, 232, 233)',
+  );
+  expect(presentation.color).toBe(
+    tone === 'success' ? 'rgb(23, 77, 52)' : 'rgb(139, 39, 48)',
+  );
+  if (mobile) {
+    expect(Number.parseFloat(presentation.width)).toBeCloseTo(382, 0);
+  } else {
+    expect(Number.parseFloat(presentation.width)).toBeLessThanOrEqual(680);
+  }
+}
+
 test.describe('real fund-flow Toast delivery', () => {
   test.skip(!enabled, 'Set FUND_TOAST_REAL_STACK=1 and run against the Docker Compose stack.');
 
-  test('isolates audiences, queues committed funds, and reports bank rejection', async ({ browser }, testInfo) => {
+  test('isolates audiences, queues committed funds, and reports rejected requests and landings', async ({ browser }, testInfo) => {
     test.skip(!['desktop-chromium', 'iphone-webkit'].includes(testInfo.project.name));
     test.setTimeout(120_000);
 
@@ -188,6 +240,8 @@ test.describe('real fund-flow Toast delivery', () => {
       await unrelatedPage.waitForTimeout(400);
       await expect(unrelatedPage.locator('.toast')).toHaveCount(0);
 
+      await expectToastPresentation(payerPage, 'success', mobile);
+
       const toastBox = await payerPage.locator('.toast').boundingBox();
       expect(toastBox).toBeTruthy();
       if (mobile) {
@@ -196,7 +250,7 @@ test.describe('real fund-flow Toast delivery', () => {
         expect(1440 - toastBox!.x - toastBox!.width).toBeCloseTo(24, 0);
       }
       await payerPage.getByRole('button', { name: '刷新房间快照' }).click();
-      await payerPage.screenshot({ path: testInfo.outputPath('fund-flow-toast.png'), fullPage: true });
+      await payerPage.screenshot({ path: testInfo.outputPath('fund-flow-toast-success.png'), fullPage: true });
       await waitForNoToast(bankPage, payerPage, receiverPage);
 
       await postJson(bankContext, `/api/rooms/${immediate.room.id}/bank/adjust-balance`, {
@@ -255,7 +309,28 @@ test.describe('real fund-flow Toast delivery', () => {
       await postJson(bankContext, `/api/rooms/${approval.room.id}/requests/${pendingRejection.id}/reject`, {
         reason: '金额有误',
       }, `reject-${runId}`);
-      await expect(payerPage.locator('.toast')).toHaveText('你的转帐申请已被银行拒绝：金额有误');
+      await expect(payerPage.locator('.toast-rejected')).toHaveText('你的转帐申请已被银行拒绝：金额有误');
+      await expectToastPresentation(payerPage, 'rejected', mobile);
+      await receiverPage.waitForTimeout(400);
+      await Promise.all([bankPage, receiverPage, unrelatedPage].map((page) => expect(page.locator('.toast')).toHaveCount(0)));
+      await waitForNoToast(payerPage);
+
+      await Promise.all([
+        openRoom(bankPage, immediate.room.name, '银行端'),
+        openRoom(payerPage, immediate.room.name, '玩家端'),
+        openRoom(receiverPage, immediate.room.name, '玩家端'),
+        openRoom(unrelatedPage, immediate.room.name, '玩家端'),
+      ]);
+      const landing = await postJson<LandingReference>(payerContext, `/api/rooms/${immediate.room.id}/landings`, {
+        playerId: payer.id,
+        propertyName: '甘露寺',
+      }, `landing-rejection-${runId}`);
+      await postJson(bankContext, `/api/rooms/${immediate.room.id}/landings/${landing.id}/cancel-property-actions`, {
+        reason: '现场落点有误',
+      }, `cancel-landing-${runId}`);
+      await expect(payerPage.locator('.toast-rejected')).toHaveText('你的落点申请已被银行拒绝：现场落点有误');
+      await expectToastPresentation(payerPage, 'rejected', mobile);
+      await payerPage.screenshot({ path: testInfo.outputPath('fund-flow-toast-rejected.png'), fullPage: true });
       await receiverPage.waitForTimeout(400);
       await Promise.all([bankPage, receiverPage, unrelatedPage].map((page) => expect(page.locator('.toast')).toHaveCount(0)));
     } finally {

@@ -81,7 +81,7 @@ describe('realtime Toast integration', () => {
     expect(component).toContain('realtimeToastEventSchema.safeParse(payload)');
     expect(component).toMatch(/parsed\.data\.roomId !== runtime\.roomId/);
     expect(component).toMatch(/parsed\.data\.audience !== runtime\.workbench\.view/);
-    expect(component).toMatch(/enqueue\(\{ id: parsed\.data\.eventId, message: parsed\.data\.message \}\)/);
+    expect(component).toMatch(/enqueue\(\{\s*id: parsed\.data\.eventId,\s*message: parsed\.data\.message,\s*tone: parsed\.data\.kind === "REQUEST_REJECTED" \? "REJECTED" : "SUCCESS",\s*\}\)/);
     expect(component).toContain('socket.on("room.toast", onRoomToast)');
   });
 
@@ -89,7 +89,9 @@ describe('realtime Toast integration', () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
 
     expect(component).toMatch(/toast=\{currentToast\}[\s\S]*?showNotice=\{showNotice\}/);
-    expect(component).toMatch(/<div className="toast" role="status" aria-live="polite" aria-atomic="true">[\s\S]*?<Check aria-hidden="true" \/>[\s\S]*?<span>\{toast\.message\}<\/span>/);
+    expect(component).toMatch(/<div\s+key=\{toast\.id\}\s+className=\{`toast toast-\$\{toast\.tone\.toLowerCase\(\)\}`\}\s+role="status"\s+aria-live="polite"\s+aria-atomic="true"\s*>/);
+    expect(component).toMatch(/toast\.tone === "REJECTED" \? <CircleX aria-hidden="true" \/> : <Check aria-hidden="true" \/>/);
+    expect(component).toMatch(/<span>\{toast\.message\}<\/span>/);
     expect(component).not.toContain('window.setTimeout(() => setNotice(""), 3500)');
     expect(component).not.toMatch(/useEffect\(\(\) => \{\s*useEffect\(\(\) => \(\) => toastQueue\.current\?\.dispose\(\)/);
     expect(component).not.toContain('if (!toastQueue.current) toastQueue.current = createToastQueue(setCurrentToast)');

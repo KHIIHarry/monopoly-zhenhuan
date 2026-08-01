@@ -29,6 +29,7 @@ import {
   Building2,
   Check,
   ChevronRight,
+  CircleX,
   CircleMinus,
   CircleDollarSign,
   Crown,
@@ -1784,7 +1785,11 @@ export default function AppRouterClient({
         return;
       }
       if (parsed.data.audience !== runtime.workbench.view) return;
-      enqueue({ id: parsed.data.eventId, message: parsed.data.message });
+      enqueue({
+        id: parsed.data.eventId,
+        message: parsed.data.message,
+        tone: parsed.data.kind === "REQUEST_REJECTED" ? "REJECTED" : "SUCCESS",
+      });
     };
     roomInvalidator.current = refresh;
     socket.on("connect", () => {
@@ -1881,7 +1886,11 @@ export default function AppRouterClient({
         toast.audience !== workbench.view
       )
         continue;
-      enqueue({ id: toast.eventId, message: toast.message });
+      enqueue({
+        id: toast.eventId,
+        message: toast.message,
+        tone: toast.kind === "REQUEST_REJECTED" ? "REJECTED" : "SUCCESS",
+      });
     }
   }, [enqueue, workbench]);
 
@@ -4596,8 +4605,14 @@ function Workbench({
           </p>
         )}
         {toast && (
-          <div className="toast" role="status" aria-live="polite" aria-atomic="true">
-            <Check aria-hidden="true" />
+          <div
+            key={toast.id}
+            className={`toast toast-${toast.tone.toLowerCase()}`}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {toast.tone === "REJECTED" ? <CircleX aria-hidden="true" /> : <Check aria-hidden="true" />}
             <span>{toast.message}</span>
           </div>
         )}

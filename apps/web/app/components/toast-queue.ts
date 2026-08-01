@@ -1,5 +1,6 @@
-export type ToastItem = { id: string; message: string };
-export type ToastInput = { id?: string; message: string };
+export type ToastTone = 'SUCCESS' | 'REJECTED';
+export type ToastItem = { id: string; message: string; tone: ToastTone };
+export type ToastInput = { id?: string; message: string; tone?: ToastTone };
 
 type Schedule = (callback: () => void, delay: number) => ReturnType<typeof setTimeout>;
 type Cancel = (timer: ReturnType<typeof setTimeout>) => void;
@@ -28,7 +29,7 @@ export function createToastQueue(
     const id = input.id ?? `local:${++localId}`;
     if (seen.has(id)) return false;
     seen.add(id);
-    pending.push({ id, message: input.message });
+    pending.push({ id, message: input.message, tone: input.tone ?? 'SUCCESS' });
     if (!active) showNext();
     return true;
   };

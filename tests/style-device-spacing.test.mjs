@@ -234,12 +234,54 @@ assert.match(
 
 assert.match(
   stylesheet,
-  /\.toast\s*\{[^}]*top:\s*calc\(86px\s*\+\s*env\(safe-area-inset-top\)\);[^}]*width:\s*min\(calc\(100%\s*-\s*32px\),\s*500px\);[^}]*pointer-events:\s*none;[^}]*overflow-wrap:\s*anywhere;/s,
-  'Mobile Toasts must stay below the safe area, wrap long text, and never intercept pointer input.',
+  /\.toast\s*\{[^}]*top:\s*calc\(86px\s*\+\s*env\(safe-area-inset-top\)\);[^}]*width:\s*calc\(100%\s*-\s*8px\);[^}]*pointer-events:\s*none;[^}]*white-space:\s*nowrap;/s,
+  'Mobile Toasts must stay below the safe area, stay single-line, and never intercept pointer input.',
 );
 
 assert.match(
   stylesheet,
-  /@media\s*\(min-width:\s*900px\)\s*\{[\s\S]*?\.toast\s*\{[^}]*top:\s*24px;[^}]*right:\s*24px;[^}]*left:\s*auto;[^}]*transform:\s*none;[^}]*width:\s*min\(420px,\s*calc\(100vw\s*-\s*348px\)\);/s,
+  /@media\s*\(min-width:\s*900px\)\s*\{[\s\S]*?\.toast\s*\{[^}]*top:\s*24px;[^}]*right:\s*24px;[^}]*left:\s*auto;[^}]*transform:\s*none;[^}]*width:\s*min\(680px,\s*calc\(100vw\s*-\s*348px\)\);/s,
   'Desktop Toasts must use the top-right space without covering the 300px navigation sidebar.',
+);
+
+assert.match(
+  stylesheet,
+  /\.toast\s*\{[^}]*width:\s*calc\(100%\s*-\s*8px\);[^}]*gap:\s*6px;[^}]*padding:\s*8px\s+10px;[^}]*border-radius:\s*8px;[^}]*font-size:\s*12px;[^}]*white-space:\s*nowrap;[^}]*animation:\s*toast-enter\s+260ms\s+ease-out\s+both;/s,
+  'Mobile Toasts must use the compact single-line entry treatment.',
+);
+
+assert.match(
+  stylesheet,
+  /\.toast-success\s*\{[^}]*color:\s*#174d34;[^}]*background:\s*#e4f2e8;[^}]*border:\s*1px\s+solid\s+var\(--jade\);[^}]*border-radius:\s*8px;/s,
+  'Success Toasts must use the approved pale-green treatment.',
+);
+
+assert.match(
+  stylesheet,
+  /\.toast-rejected\s*\{[^}]*color:\s*#8b2730;[^}]*background:\s*#f9e8e9;[^}]*border:\s*1px\s+solid\s+#8b2730;[^}]*border-radius:\s*8px;/s,
+  'Rejected Toasts must use the approved pale-red treatment.',
+);
+
+assert.match(
+  stylesheet,
+  /\.toast\s+svg\s*\{[^}]*width:\s*13px;[^}]*height:\s*13px;/s,
+  'Toast icons must remain compact on mobile.',
+);
+
+assert.match(
+  stylesheet,
+  /@keyframes\s+toast-enter\s*\{[\s\S]*?from\s*\{[^}]*opacity:\s*0;[^}]*translate:\s*0\s+-12px;[^}]*\}[\s\S]*?to\s*\{[^}]*opacity:\s*1;[^}]*translate:\s*0\s+0;[^}]*\}/s,
+  'Toast entry must fade and translate vertically without replacing mobile centering transforms.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(min-width:\s*900px\)\s*\{[\s\S]*?\.toast\s*\{[^}]*width:\s*min\(680px,\s*calc\(100vw\s*-\s*348px\)\);[^}]*max-width:\s*680px;[^}]*white-space:\s*nowrap;/s,
+  'Desktop Toasts must retain a 680px single-line maximum width beside the navigation.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.toast\s*\{[^}]*animation:\s*none;/s,
+  'Toast entry animation must be disabled for reduced-motion users.',
 );

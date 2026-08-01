@@ -41,6 +41,24 @@ describe('toast queue', () => {
     expect(secondLocal?.id).not.toBe(firstLocal?.id);
   });
 
+  it('preserves an explicit rejected tone and defaults local messages to success', () => {
+    vi.useFakeTimers();
+    const queue = createToastQueue(() => undefined);
+
+    queue.enqueue({ id: 'rejected', message: '申请已被拒绝', tone: 'REJECTED' });
+    queue.enqueue({ id: 'local', message: '本地操作完成' });
+
+    expect(queue.current()).toMatchObject({
+      id: 'rejected',
+      tone: 'REJECTED',
+    });
+    vi.advanceTimersByTime(3_000);
+    expect(queue.current()).toMatchObject({
+      id: 'local',
+      tone: 'SUCCESS',
+    });
+  });
+
   it('clears timers and seen IDs and disposal prevents later callbacks', () => {
     vi.useFakeTimers();
     const onChange = vi.fn();
