@@ -212,6 +212,19 @@ describe('fund Toast deliveries', () => {
 
     await expect(buildFundToastDeliveries(database, 'tx-ordinary-bank-payment')).resolves.toHaveLength(2);
   });
+
+  it('keeps bank-imposed plot fines visible to both player and bank', async () => {
+    const database = databaseFor({
+      id: 'tx-bank-plot-fine', roomId: 'room-1', type: 'PLOT_FINE',
+      metadata: { recipientType: 'BANK', isPlotFine: true },
+      ledgerEntries: [entry('payer', '钮祜禄·甄嬛', 'payer-session', -500, '剧情罚款')],
+    });
+
+    const deliveries = await buildFundToastDeliveries(database, 'tx-bank-plot-fine');
+
+    expect(deliveries.map(({ sessionId }) => sessionId)).toEqual(['payer-session', 'bank-session']);
+    expect(deliveries[0]?.event.message).toBe('银行扣除你 500 两（剧情罚款）');
+  });
 });
 
 describe('request rejection Toast delivery', () => {

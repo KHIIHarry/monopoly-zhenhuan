@@ -68,8 +68,9 @@ function recipientType(payload: unknown) {
   return value === 'PLAYER' || value === 'BANK' ? value : null;
 }
 
-function isLifecycleTransfer(transaction: FundTransaction) {
+function isLifecycleTransfer(transaction: FundTransaction, paid: FundEntry | undefined) {
   const recipient = recipientType(transaction.metadata);
+  if (transaction.type === 'PLOT_FINE' && paid?.description !== '支付剧情罚款') return false;
   return ((transaction.type === 'PLAYER_TRANSFER' || transaction.type === 'PLOT_FINE') && recipient === 'PLAYER')
     || ((transaction.type === 'PLAYER_BANK_PAYMENT' || transaction.type === 'PLOT_FINE') && recipient === 'BANK');
 }
@@ -149,7 +150,7 @@ export async function buildFundToastDeliveries(
     playerEntryCounts.set(entry.playerId, (playerEntryCounts.get(entry.playerId) ?? 0) + 1);
   }
   const deliveries: ToastDelivery[] = [];
-  const suppressLifecyclePayer = isLifecycleTransfer(transaction);
+  const suppressLifecyclePayer = isLifecycleTransfer(transaction, paid);
 
   for (const entry of entries) {
     if (suppressLifecyclePayer && entry === paid) continue;
