@@ -226,13 +226,21 @@ describe('mobile landing selection sheet', () => {
       /:root\s*\{\s*--mobile-function-bottom-space:\s*calc\(66px \+ env\(safe-area-inset-bottom\)\);\s*\}/,
     );
     expect(mobileStyles).not.toMatch(
-      /\.modal-backdrop \.landing-action-sheet \.property-selected-mark\s*\{[^}]*bottom:\s*12px;/,
-    );
-    expect(mobileStyles).not.toMatch(
       /\.modal-backdrop \.landing-action-sheet \.landing-property-card(?:\s*,|\s*\{)[^}]*height:\s*174px;/s,
     );
     expect(mobileStyles).not.toMatch(
       /\.landing-location-meta \.landing-player-nickname\s*\{[^}]*white-space:\s*nowrap;/,
+    );
+  });
+
+  test('places the selected property mark in the lower-right corner on every viewport', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(
+      /\.property-selected-mark\s*\{[^}]*top:\s*auto;[^}]*right:\s*12px;[^}]*bottom:\s*12px;/s,
+    );
+    expect(stylesheet).toMatch(
+      /@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.property-selected-mark\s*\{[^}]*top:\s*auto;[^}]*right:\s*9px;[^}]*bottom:\s*9px;/,
     );
   });
 
