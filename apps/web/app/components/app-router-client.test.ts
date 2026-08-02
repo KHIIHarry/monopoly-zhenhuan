@@ -248,8 +248,22 @@ describe('room completion regressions', () => {
 
     expect(component).toMatch(/const ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE =\s*"游戏已开始，你因未选择人物或银行身份已退出房间";/);
     expect(handler).toContain('{ roomId?: unknown; reason?: unknown }');
-    expect(handler).toMatch(/notification\?\.reason === "ROOM_STARTED_WITHOUT_CAPABILITY"[\s\S]*?clearRoomState\(\);[\s\S]*?pendingRouteError = ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE;[\s\S]*?go\("\/rooms", true\);[\s\S]*?setError\(ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE\);[\s\S]*?loadRooms\(\)/);
+    expect(handler).toMatch(/notification\?\.reason === "ROOM_STARTED_WITHOUT_CAPABILITY"[\s\S]*?clearRoomState\(\);[\s\S]*?go\("\/rooms\?reason=room-started-without-capability", true\);[\s\S]*?loadRooms\(\)/);
     expect(handler).toMatch(/snapshotRequestGeneration\.current \+= 1;\s*refresh\(\);/);
+  });
+
+  test('keys route errors and admin keyboard focus to the target URL', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).not.toMatch(/let pendingRouteError|let pendingAdminTabFocus|let suppressNextRouteHeadingFocus/);
+    expect(component).toMatch(/page === "login" && reason === "session-invalid"[\s\S]*?SESSION_INVALID_MESSAGE/);
+    expect(component).toMatch(/page === "rooms" && reason === "room-started-without-capability"[\s\S]*?ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE/);
+    expect(component).toMatch(/setError\(routeError\);[\s\S]*?window\.history\.replaceState\(\s*window\.history\.state,\s*"",\s*window\.location\.pathname,?\s*\)/);
+    expect(component).toContain('go("/login?reason=session-invalid", true);');
+    expect(component).toMatch(/screen === "ADMIN"[\s\S]*?return;/);
+    expect(component).toMatch(/focusAdminTab[\s\S]*?new URLSearchParams\(window\.location\.search\)\.get\("focus"\) === "tab"[\s\S]*?window\.requestAnimationFrame[\s\S]*?admin-tab-\$\{initialTab\.toLowerCase\(\)\}[\s\S]*?window\.history\.replaceState\(\s*window\.history\.state,\s*"",\s*window\.location\.pathname,?\s*\)/);
+    expect(component).toMatch(/onTab\(next, focus\)/);
+    expect(component).toMatch(/focus \? `\$\{path\}\?focus=tab` : path/);
   });
 
   test('keeps finish intent until its authoritative settlement has loaded', async () => {

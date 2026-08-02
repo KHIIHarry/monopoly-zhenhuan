@@ -239,9 +239,11 @@ test('settlement preview blocks, exact confirmation finishes, and immutable deta
   expect(finishRequests).toHaveLength(1);
   expect(finishRequests[0]).toMatchObject({ body: { confirmation: '确认结束游戏' }, auth: undefined });
   expect(finishRequests[0]?.key).toBeTruthy();
-  expect(settlementSequence[0]).toBe('POST finish');
-  expect(settlementSequence.slice(1).length).toBeGreaterThan(0);
-  expect(settlementSequence.slice(1).every((entry) => entry === 'GET settlement')).toBe(true);
+  expect(settlementSequence).toEqual([
+    'POST finish',
+    'GET settlement',
+    'GET settlement',
+  ]);
 });
 
 test('landing cards search, select a purchased property, and preserve the declaration flow', async ({ page }) => {
@@ -709,7 +711,8 @@ test('returns a member removed at start to the room list', async ({ page }) => {
     }
 
     await expect(page).toHaveURL(/\/rooms$/);
-    await expect(page.getByText('游戏已开始，你因未选择人物或银行身份已退出房间')).toBeVisible();
+    await expect(page.getByRole('main').getByRole('alert'))
+      .toHaveText('游戏已开始，你因未选择人物或银行身份已退出房间');
     await expect(page.getByRole('region', { name: '我参与的游戏' }))
       .not.toContainText('碎玉轩夜局');
     await expect(page.getByRole('region', { name: '可加入房间' }))
@@ -759,7 +762,8 @@ test('socket seat refresh applies global session invalidation', async ({ page })
     await expect.poll(() => invalidSnapshotReads).toBeGreaterThan(0);
 
     await expect(page.getByRole('heading', { name: '账号登录' })).toBeVisible();
-    await expect(page.getByText('登录已失效，请重新登录')).toBeVisible();
+    await expect(page.getByRole('main').getByRole('alert'))
+      .toHaveText('当前登录已失效，请重新登录');
   } finally {
     await closeSocketTest(page, socketServer, httpServer);
   }

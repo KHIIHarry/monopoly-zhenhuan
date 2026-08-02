@@ -670,9 +670,11 @@ test('player, bank, finish preview, and settlement survive zoom and orientation'
     await confirmFinish.click();
   }
   await expect(page.getByText('不可变结算快照')).toBeVisible();
-  expect(finishSequence[0]).toBe('POST /finish');
-  expect(finishSequence.slice(1).length).toBeGreaterThan(0);
-  expect(finishSequence.slice(1).every((entry) => entry === 'GET /settlement')).toBe(true);
+  expect(finishSequence).toEqual([
+    'POST /finish',
+    'GET /settlement',
+    'GET /settlement',
+  ]);
   await assertSurface(page);
   const propertyDetails = page.getByText('地产结算明细（1）');
   if (keyboardOnly) {

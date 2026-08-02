@@ -1033,6 +1033,13 @@ const screens: Record<AppPage, Screen> = {
   forbidden: "FORBIDDEN",
 };
 const screenForPage = (page: AppPage): Screen => screens[page];
+const routeErrorForPage = (page: AppPage, reason: string | null) => {
+  if (page === "login" && reason === "session-invalid")
+    return SESSION_INVALID_MESSAGE;
+  if (page === "rooms" && reason === "room-started-without-capability")
+    return ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE;
+  return null;
+};
 
 const terminalRoom = (status: RoomStatus) =>
   status === "FINISHED" || status === "ENDED" || status === "CLOSED";
@@ -1088,9 +1095,6 @@ const formatRoomLifecycleTime = (value: string | null, emptyLabel: string) => {
   return `${date.getFullYear()}年${String(date.getMonth() + 1).padStart(2, "0")}月${String(date.getDate()).padStart(2, "0")}日 ${weekday} ${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
 };
 let lastFocusOutsideDialog: HTMLElement | null = null;
-let pendingRouteError: string | null = null;
-let pendingAdminTabFocus: string | null = null;
-let suppressNextRouteHeadingFocus = false;
 
 export default function AppRouterClient({
   page,
@@ -1192,9 +1196,17 @@ export default function AppRouterClient({
   }, []);
 
   useEffect(() => {
-    if (!pendingRouteError) return;
-    setError(pendingRouteError);
-    pendingRouteError = null;
+    const routeError = routeErrorForPage(
+      page,
+      new URLSearchParams(window.location.search).get("reason"),
+    );
+    if (!routeError) return;
+    setError(routeError);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname,
+    );
   }, [page]);
 
   useEffect(() => {
@@ -1274,10 +1286,7 @@ export default function AppRouterClient({
   }, []);
 
   useEffect(() => {
-    if (suppressNextRouteHeadingFocus) {
-      suppressNextRouteHeadingFocus = false;
-      return;
-    }
+    if (screen === "ADMIN") return;
     const heading = document.querySelector("h1");
     if (heading instanceof HTMLElement) {
       heading.tabIndex = -1;
@@ -1342,7 +1351,7 @@ export default function AppRouterClient({
 
   async function handleFailure(caught: unknown, owner?: RoomOwner) {
     if (isAuthFailure(caught)) {
-      invalidateLogin((caught as Error).message);
+      invalidateLogin();
       return;
     }
     if (owner && !ownsRoom(owner)) return;
@@ -1376,15 +1385,13 @@ export default function AppRouterClient({
     }
   }
 
-  function invalidateLogin(message = SESSION_INVALID_MESSAGE) {
+  function invalidateLogin() {
     clearPassword();
     clearPendingIntents();
     clearRoomState();
     setAccount(null);
     setRooms([]);
-    setError(message);
-    pendingRouteError = message;
-    go("/login", true);
+    go("/login?reason=session-invalid", true);
   }
 
   async function handleRoomControlLost(failedOwner: RoomOwner) {
@@ -1398,7 +1405,7 @@ export default function AppRouterClient({
     try {
       next = await call<SeatSnapshot>(`/api/rooms/${owner.roomId}/seats`);
     } catch (caught) {
-      if (isAuthFailure(caught)) invalidateLogin((caught as Error).message);
+      if (isAuthFailure(caught)) invalidateLogin();
       else if (ownsRoom(owner)) go(roomPath("seats", owner.roomId), true);
       return;
     }
@@ -1964,9 +1971,7 @@ export default function AppRouterClient({
         socketRoomSubscription.current = null;
       if (notification?.reason === "ROOM_STARTED_WITHOUT_CAPABILITY") {
         clearRoomState();
-        pendingRouteError = ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE;
-        go("/rooms", true);
-        setError(ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE);
+        go("/rooms?reason=room-started-without-capability", true);
         void loadRooms().catch((caught) => void handleFailure(caught));
         return;
       }
@@ -2310,17 +2315,17 @@ export default function AppRouterClient({
                 ? "LOGS"
                 : "DASHBOARD"
         }
-        onTab={(tab) =>
-          go(
+        onTab={(tab, focus) => {
+          const path =
             tab === "DASHBOARD"
               ? "/admin"
               : tab === "ACCOUNTS"
                 ? "/admin/accounts"
                 : tab === "ROOMS"
                   ? "/admin/rooms"
-                  : "/admin/logs",
-          )
-        }
+                  : "/admin/logs";
+          go(focus ? `${path}?focus=tab` : path);
+        }}
       />
     );
   if (screen === "FINISH" && settlementPreview)
@@ -3217,7 +3222,10 @@ function AdminView({
   runAction: TaskRunner;
   writeAction: StableWriter;
   initialTab: "DASHBOARD" | "ACCOUNTS" | "ROOMS" | "LOGS";
-  onTab: (tab: "DASHBOARD" | "ACCOUNTS" | "ROOMS" | "LOGS") => void;
+  onTab: (
+    tab: "DASHBOARD" | "ACCOUNTS" | "ROOMS" | "LOGS",
+    focus?: boolean,
+  ) => void;
 }) {
   useEffect(() => {
     document.documentElement.style.setProperty(
@@ -3288,11 +3296,24 @@ function AdminView({
   >("IDLE");
 
   useEffect(() => {
-    if (pendingAdminTabFocus !== initialTab) return;
-    pendingAdminTabFocus = null;
-    window.requestAnimationFrame(() =>
-      document.getElementById(`admin-tab-${initialTab.toLowerCase()}`)?.focus(),
-    );
+    const focusAdminTab =
+      new URLSearchParams(window.location.search).get("focus") === "tab";
+    const focusFrame = window.requestAnimationFrame(() => {
+      const focusTarget = focusAdminTab
+        ? document.getElementById(`admin-tab-${initialTab.toLowerCase()}`)
+        : document.querySelector(".admin-page h1");
+      if (focusTarget instanceof HTMLElement) {
+        if (!focusAdminTab) focusTarget.tabIndex = -1;
+        focusTarget.focus({ preventScroll: true });
+      }
+      if (focusAdminTab)
+        window.history.replaceState(
+          window.history.state,
+          "",
+          window.location.pathname,
+        );
+    });
+    return () => window.cancelAnimationFrame(focusFrame);
   }, [initialTab]);
   const [roomLifecycleNotice, setRoomLifecycleNotice] = useState("");
   const accountSaveTimer = useRef<number | null>(null);
@@ -3547,15 +3568,7 @@ function AdminView({
     { id: "LOGS", label: "安全日志" },
   ] as const;
   function activateTab(next: typeof tab, focus = false) {
-    if (focus) {
-      pendingAdminTabFocus = next;
-      suppressNextRouteHeadingFocus = true;
-    }
-    onTab(next);
-    if (focus)
-      window.requestAnimationFrame(() =>
-        document.getElementById(`admin-tab-${next.toLowerCase()}`)?.focus(),
-      );
+    onTab(next, focus);
   }
   function navigateTabs(event: ReactKeyboardEvent<HTMLButtonElement>) {
     const currentIndex = tabs.findIndex((item) => item.id === tab);
