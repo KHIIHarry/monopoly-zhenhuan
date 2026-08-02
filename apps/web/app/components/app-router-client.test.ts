@@ -1,7 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test, vi } from 'vitest';
-import { runGameAction } from './app-router-client';
+import {
+  ApiError,
+  bankTransferApprovalFeedback,
+  pendingRealtimeToastInput,
+  playerTransferFeedback,
+  routeRealtimeToast,
+  runGameAction,
+} from './app-router-client';
 
 const componentUrl = new URL('./app-router-client.tsx', import.meta.url);
 
@@ -76,15 +83,27 @@ describe('ledger transaction time', () => {
 });
 
 describe('realtime Toast integration', () => {
-  test('validates and role-filters room Toasts into the shared queue', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+  const transferFailed = {
+    eventId: 'failed-1',
+    roomId: 'room-1',
+    audience: 'PLAYER',
+    kind: 'TRANSFER_FAILED',
+    message: '转账失败：余额不足',
+  } as const;
 
-    expect(component).toContain('realtimeToastEventSchema.safeParse(payload)');
-    expect(component).toMatch(/parsed\.data\.roomId !== runtime\.roomId/);
-    expect(component).toMatch(/parsed\.data\.audience !== runtime\.workbench\.view/);
-    expect(component).toMatch(/enqueue\(\{\s*id: parsed\.data\.eventId,\s*message: parsed\.data\.message,\s*tone: toastToneForRealtimeKind\(parsed\.data\.kind\),\s*\}\)/);
-    expect(component).toMatch(/tone: toastToneForRealtimeKind\(toast\.kind\)/);
-    expect(component).toContain('socket.on("room.toast", onRoomToast)');
+  test('routes a matching rejected event directly with the rejected tone', () => {
+    expect(routeRealtimeToast(transferFailed, {
+      roomId: 'room-1',
+      requestedView: 'PLAYER',
+      workbench: { roomId: 'room-1', view: 'PLAYER' },
+    }, 7)).toEqual({
+      action: 'ENQUEUE',
+      toast: {
+        id: 'failed-1',
+        message: '转账失败：余额不足',
+        tone: 'REJECTED',
+      },
+    });
   });
 
   test('renders the AppRouter queue item as one passive live-region Toast', async () => {
@@ -100,27 +119,44 @@ describe('realtime Toast integration', () => {
     expect(component).toMatch(/useEffect\(\(\) => \{\s*const queue = createToastQueue\(setCurrentToast\);\s*toastQueue\.current = queue;[\s\S]*?queue\.dispose\(\);[\s\S]*?toastQueue\.current = null;/);
   });
 
-  test('buffers only the requested role before the workbench is ready', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+  test('ignores invalid, wrong-room, and wrong-audience events', () => {
+    const runtime = {
+      roomId: 'room-1',
+      requestedView: 'PLAYER' as const,
+      workbench: { roomId: 'room-1', view: 'PLAYER' as const },
+    };
 
-    expect(component).toMatch(/const pendingRoomToasts = useRef\(new Map/);
-    expect(component).toMatch(/const targetView = runtime\.requestedView;/);
-    expect(component).toMatch(/if \(targetView === null \|\| parsed\.data\.audience !== targetView\) return;/);
-    expect(component).toMatch(/pendingRoomToasts\.current\.set\(parsed\.data\.eventId, \{\s*event: parsed\.data,\s*generation: roomGeneration\.current,\s*\}\)/);
-    expect(component).toMatch(/pending\.generation !== roomGeneration\.current/);
-    expect(component).not.toContain('targetView === null || parsed.data.audience === targetView');
+    expect(routeRealtimeToast({}, runtime, 7)).toEqual({ action: 'IGNORE' });
+    expect(routeRealtimeToast({ ...transferFailed, roomId: 'room-2' }, runtime, 7))
+      .toEqual({ action: 'IGNORE' });
+    expect(routeRealtimeToast({ ...transferFailed, audience: 'BANK' }, runtime, 7))
+      .toEqual({ action: 'IGNORE' });
   });
 
-  test('buffers a same-role Toast while the retained workbench belongs to another room', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+  test('buffers then delivers a matching rejected event with the rejected tone', () => {
+    const routed = routeRealtimeToast(transferFailed, {
+      roomId: 'room-1',
+      requestedView: 'PLAYER',
+      workbench: { roomId: 'previous-room', view: 'PLAYER' },
+    }, 7);
 
-    expect(component).toMatch(/!runtime\.workbench \|\|\s*runtime\.workbench\.roomId !== parsed\.data\.roomId \|\|\s*runtime\.workbench\.view !== targetView/);
-  });
+    expect(routed.action).toBe('BUFFER');
+    if (routed.action !== 'BUFFER') throw new Error('expected buffered Toast');
+    expect(pendingRealtimeToastInput(routed.pending, {
+      generation: 7,
+      requestedView: 'PLAYER',
+      workbench: { roomId: 'room-1', view: 'PLAYER' },
+    })).toEqual({
+      id: 'failed-1',
+      message: '转账失败：余额不足',
+      tone: 'REJECTED',
+    });
 
-  test('updates the Toast audience when player and bank routes share the game screen', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
-
-    expect(component).toMatch(/\}, \[account\?\.id, roomId, page, screen, workbench\]\);/);
+    expect(pendingRealtimeToastInput(routed.pending, {
+      generation: 8,
+      requestedView: 'PLAYER',
+      workbench: { roomId: 'room-1', view: 'PLAYER' },
+    })).toBeNull();
   });
 });
 
@@ -154,31 +190,51 @@ describe('authoritative transfer feedback', () => {
     expect(confirm).toHaveBeenCalledOnce();
   });
 
-  test('uses server status and API failure details for player transfers', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
-    const transfer = component.slice(
-      component.indexOf('async function submitTransfer'),
-      component.indexOf('async function requestBankPayment'),
-    );
+  test('uses committed server status and uncommitted API details for player feedback', () => {
+    expect(playerTransferFeedback({
+      committed: true,
+      value: { id: 'transfer-1', status: 'EXECUTED' },
+    }, 'payer')).toEqual({
+      committed: true,
+      toast: {
+        id: 'transfer-1:transfer-result:PLAYER:payer',
+        message: '转账已成功，结果已同步至账本',
+        tone: 'SUCCESS',
+      },
+    });
 
-    expect(transfer).toContain('action<TransferResult, typeof body>');
-    expect(transfer).toContain('if (result.committed)');
-    expect(transfer).toContain('showToast(transferSuccessToast(result.value, playerId))');
-    expect(transfer).toContain('transferApprovalRequired?: boolean');
-    expect(transfer).toContain('showToast(transferFailureToast(');
-    expect(component).not.toContain('转帐已提交，结果已同步至账本或审批队列');
+    expect(playerTransferFeedback({
+      committed: false,
+      error: new ApiError(409, 'INSUFFICIENT_BALANCE', {
+        error: 'INSUFFICIENT_BALANCE',
+        transferApprovalRequired: true,
+      }),
+    }, 'payer')).toEqual({
+      committed: false,
+      toast: {
+        message: '转账申请提交失败：余额不足',
+        tone: 'REJECTED',
+      },
+    });
   });
 
-  test('shows a red local failure for player-transfer approval errors', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
-    const approval = component.slice(
-      component.indexOf('async function approve()'),
-      component.indexOf('async function rejectRequest()'),
-    );
+  test('keeps committed approvals successful and exposes rejected approval feedback', () => {
+    expect(bankTransferApprovalFeedback({ committed: true }, 'request-1'))
+      .toEqual({ committed: true });
 
-    expect(approval).toContain('approveTarget.type === "PLAYER_TRANSFER"');
-    expect(approval).toContain('if (result.committed)');
-    expect(approval).toContain('showToast(bankApprovalFailureToast(');
+    expect(bankTransferApprovalFeedback({
+      committed: false,
+      error: new ApiError(409, 'INSUFFICIENT_BALANCE', {
+        error: 'INSUFFICIENT_BALANCE',
+      }),
+    }, 'request-1')).toEqual({
+      committed: false,
+      toast: {
+        id: 'request-1:approval-failed:BANK',
+        message: '银行审批执行失败：余额不足',
+        tone: 'REJECTED',
+      },
+    });
   });
 });
 

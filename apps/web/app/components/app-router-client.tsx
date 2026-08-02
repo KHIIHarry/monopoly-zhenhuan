@@ -234,6 +234,71 @@ type ActionRunner = <T = unknown, B extends WriteBody = WriteBody>(
 ) => Promise<RoomActionResult<T, B>>;
 type PendingWriteIntent = { key: string; body: WriteBody; payload?: string };
 type PendingRoomToast = { event: RealtimeToastEvent; generation: number };
+type RealtimeToastRuntime = {
+  roomId: string | null;
+  requestedView: RealtimeToastEvent["audience"] | null;
+  workbench: {
+    roomId: string;
+    view: RealtimeToastEvent["audience"];
+  } | null;
+};
+type RealtimeToastRoute =
+  | { action: "IGNORE" }
+  | { action: "BUFFER"; pending: PendingRoomToast }
+  | { action: "ENQUEUE"; toast: ToastInput };
+
+function realtimeToastInput(event: RealtimeToastEvent): ToastInput {
+  return {
+    id: event.eventId,
+    message: event.message,
+    tone: toastToneForRealtimeKind(event.kind),
+  };
+}
+
+export function routeRealtimeToast(
+  payload: unknown,
+  runtime: RealtimeToastRuntime,
+  generation: number,
+): RealtimeToastRoute {
+  const parsed = realtimeToastEventSchema.safeParse(payload);
+  if (!parsed.success || parsed.data.roomId !== runtime.roomId)
+    return { action: "IGNORE" };
+  const targetView = runtime.requestedView;
+  if (targetView === null || parsed.data.audience !== targetView)
+    return { action: "IGNORE" };
+  if (
+    !runtime.workbench ||
+    runtime.workbench.roomId !== parsed.data.roomId ||
+    runtime.workbench.view !== targetView
+  )
+    return {
+      action: "BUFFER",
+      pending: { event: parsed.data, generation },
+    };
+  return { action: "ENQUEUE", toast: realtimeToastInput(parsed.data) };
+}
+
+export function pendingRealtimeToastInput(
+  pending: PendingRoomToast,
+  current: {
+    generation: number;
+    requestedView: RealtimeToastEvent["audience"] | null;
+    workbench: {
+      roomId: string;
+      view: RealtimeToastEvent["audience"];
+    };
+  },
+): ToastInput | null {
+  const event = pending.event;
+  if (
+    pending.generation !== current.generation ||
+    event.roomId !== current.workbench.roomId ||
+    current.requestedView !== current.workbench.view ||
+    event.audience !== current.workbench.view
+  )
+    return null;
+  return realtimeToastInput(event);
+}
 
 export async function runGameAction<T = unknown, B extends WriteBody = WriteBody>({
   owner,
@@ -375,7 +440,7 @@ function apiErrorMessage(status: number, code: string) {
   return "操作未完成，请检查输入后重试";
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
@@ -384,6 +449,63 @@ class ApiError extends Error {
     super(apiErrorMessage(status, code));
     this.name = "ApiError";
   }
+}
+
+type PlayerTransferActionResult =
+  | { committed: true; value: TransferResult }
+  | { committed: false; error?: unknown };
+type BankTransferApprovalActionResult =
+  | { committed: true }
+  | { committed: false; error?: unknown };
+
+function transferApiFailure(error: unknown) {
+  if (!(error instanceof ApiError))
+    return { code: "INTERNAL_ERROR", transferApprovalRequired: undefined };
+  const data =
+    error.data && typeof error.data === "object"
+      ? (error.data as {
+          error?: unknown;
+          transferApprovalRequired?: unknown;
+        })
+      : {};
+  return {
+    code: typeof data.error === "string" ? data.error : error.code,
+    transferApprovalRequired:
+      typeof data.transferApprovalRequired === "boolean"
+        ? data.transferApprovalRequired
+        : undefined,
+  };
+}
+
+export function playerTransferFeedback(
+  result: PlayerTransferActionResult,
+  playerId: string,
+): { committed: boolean; toast: ToastInput } {
+  if (result.committed)
+    return {
+      committed: true,
+      toast: transferSuccessToast(result.value, playerId),
+    };
+  const failure = transferApiFailure(result.error);
+  return {
+    committed: false,
+    toast: transferFailureToast(
+      failure.code,
+      failure.transferApprovalRequired,
+    ),
+  };
+}
+
+export function bankTransferApprovalFeedback(
+  result: BankTransferApprovalActionResult,
+  requestId: string,
+): { committed: true } | { committed: false; toast: ToastInput } {
+  if (result.committed) return { committed: true };
+  const failure = transferApiFailure(result.error);
+  return {
+    committed: false,
+    toast: bankApprovalFailureToast(failure.code, requestId),
+  };
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1806,29 +1928,20 @@ export default function AppRouterClient({
       refresh();
     };
     const onRoomToast = (payload: unknown) => {
-      const parsed = realtimeToastEventSchema.safeParse(payload);
-      if (!parsed.success) return;
-      const runtime = roomRuntime.current;
-      if (parsed.data.roomId !== runtime.roomId) return;
-      const targetView = runtime.requestedView;
-      if (targetView === null || parsed.data.audience !== targetView) return;
-      if (
-        !runtime.workbench ||
-        runtime.workbench.roomId !== parsed.data.roomId ||
-        runtime.workbench.view !== targetView
-      ) {
-        pendingRoomToasts.current.set(parsed.data.eventId, {
-          event: parsed.data,
-          generation: roomGeneration.current,
-        });
+      const routed = routeRealtimeToast(
+        payload,
+        roomRuntime.current,
+        roomGeneration.current,
+      );
+      if (routed.action === "IGNORE") return;
+      if (routed.action === "BUFFER") {
+        pendingRoomToasts.current.set(
+          routed.pending.event.eventId,
+          routed.pending,
+        );
         return;
       }
-      if (parsed.data.audience !== runtime.workbench.view) return;
-      enqueue({
-        id: parsed.data.eventId,
-        message: parsed.data.message,
-        tone: toastToneForRealtimeKind(parsed.data.kind),
-      });
+      enqueue(routed.toast);
     };
     roomInvalidator.current = refresh;
     socket.on("connect", () => {
@@ -1916,20 +2029,13 @@ export default function AppRouterClient({
   useEffect(() => {
     if (!workbench) return;
     for (const pending of pendingRoomToasts.current.values()) {
-      const toast = pending.event;
-      pendingRoomToasts.current.delete(toast.eventId);
-      if (
-        pending.generation !== roomGeneration.current ||
-        toast.roomId !== workbench.roomId ||
-        roomRuntime.current.requestedView !== workbench.view ||
-        toast.audience !== workbench.view
-      )
-        continue;
-      enqueue({
-        id: toast.eventId,
-        message: toast.message,
-        tone: toastToneForRealtimeKind(toast.kind),
+      pendingRoomToasts.current.delete(pending.event.eventId);
+      const toast = pendingRealtimeToastInput(pending, {
+        generation: roomGeneration.current,
+        requestedView: roomRuntime.current.requestedView,
+        workbench,
       });
+      if (toast) enqueue(toast);
     }
   }, [enqueue, workbench]);
 
@@ -5238,20 +5344,13 @@ function PlayerView({
       path: `/api/rooms/${snapshot.id}/transfers`,
       body,
     });
-    if (result.committed) {
+    const feedback = playerTransferFeedback(result, playerId);
+    if (feedback.committed) {
       setTransferAmount("");
       setTransferIsPlotFine(false);
       setPanel(null);
-      showToast(transferSuccessToast(result.value, playerId));
-      return;
     }
-    const details = result.error instanceof ApiError
-      ? result.error.data as { error?: string; transferApprovalRequired?: boolean }
-      : {};
-    showToast(transferFailureToast(
-      details.error ?? (result.error instanceof ApiError ? result.error.code : 'INTERNAL_ERROR'),
-      details.transferApprovalRequired,
-    ));
+    showToast(feedback.toast);
   }
 
   async function requestBankPayment(event: FormEvent) {
@@ -6275,18 +6374,13 @@ function BankView({
       const result = await action({
         path: `/api/rooms/${snapshot.id}/requests/${target.id}/approve`,
       });
-      if (result.committed) {
+      const feedback = bankTransferApprovalFeedback(result, target.id);
+      if (feedback.committed) {
         setApproveTarget(null);
         showNotice("审批已执行");
         return;
       }
-      const details = result.error instanceof ApiError
-        ? result.error.data as { error?: string }
-        : {};
-      showToast(bankApprovalFailureToast(
-        details.error ?? (result.error instanceof ApiError ? result.error.code : 'INTERNAL_ERROR'),
-        target.id,
-      ));
+      showToast(feedback.toast);
       return;
     }
     const ok = await idempotentAction(
