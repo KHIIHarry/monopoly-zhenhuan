@@ -1,22 +1,16 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
-import { hashPassword } from '../../apps/api/src/auth-domain.js';
+import { hashPassword, sessionCookieName } from '../../apps/api/src/auth-domain.js';
 
 const enabled = process.env.FUND_TOAST_REAL_STACK === '1';
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
 type RoomReference = { id: string; name: string };
-type RequestReference = { id: string; status: string };
 type PlayerReference = { id: string; accountId: string };
 type LandingReference = { id: string };
 
-async function postJson<T>(
-  context: BrowserContext,
-  path: string,
-  data: unknown,
-  key: string,
-): Promise<T> {
+async function postJson<T>(context: BrowserContext, path: string, data: unknown, key: string): Promise<T> {
   const response = await context.request.post(`${apiUrl}${path}`, {
     data,
     headers: { 'idempotency-key': key },
@@ -27,20 +21,35 @@ async function postJson<T>(
   return response.json() as Promise<T>;
 }
 
+async function patchJson<T>(context: BrowserContext, path: string, data: unknown, key: string): Promise<T> {
+  const response = await context.request.patch(`${apiUrl}${path}`, {
+    data,
+    headers: { 'idempotency-key': key },
+  });
+  if (!response.ok()) {
+    throw new Error(`PATCH ${path} failed with ${response.status()}: ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function loginRequest(context: BrowserContext, username: string, password: string) {
+  const response = await context.request.post(`${apiUrl}/api/auth/login`, {
+    data: { username, password },
+  });
+  if (!response.ok()) {
+    throw new Error(`POST /api/auth/login failed with ${response.status()}: ${await response.text()}`);
+  }
+}
+
 async function login(page: Page, username: string, password: string, localWebKit = false) {
   if (localWebKit) {
-    const response = await page.context().request.post(`${apiUrl}/api/auth/login`, {
-      data: { username, password },
-    });
-    if (!response.ok()) {
-      throw new Error(`POST /api/auth/login failed with ${response.status()}: ${await response.text()}`);
-    }
-    const setCookie = response.headers()['set-cookie'];
-    const token = setCookie?.match(/(?:^|;\s*)zhenhuan_session=([^;]+)/)?.[1];
-    if (!token) throw new Error('Login response did not include the session cookie');
+    await loginRequest(page.context(), username, password);
+    const cookies = await page.context().cookies(apiUrl);
+    const session = cookies.find((cookie) => cookie.name === 'zhenhuan_session');
+    if (!session) throw new Error('Login response did not include the session cookie');
     await page.context().addCookies([{
-      name: 'zhenhuan_session',
-      value: decodeURIComponent(token),
+      name: sessionCookieName,
+      value: session.value,
       url: new URL(apiUrl).origin,
       httpOnly: true,
       sameSite: 'Lax',
@@ -64,8 +73,38 @@ async function openRoom(page: Page, roomName: string, view: '玩家端' | '银�
   await expect(page.getByRole('button', { name: '刷新房间快照' })).toBeVisible();
 }
 
+async function submitTransfer(page: Page, recipient: string, amount: number) {
+  const dialog = page.getByRole('dialog', { name: '转帐' });
+  if (!(await dialog.isVisible())) {
+    await page.getByRole('button', { name: '转帐', exact: true }).click();
+  }
+  if (recipient === '银行') {
+    await dialog.getByRole('button', { name: '银行，管理审批、轮次与结算' }).click();
+  } else {
+    await dialog.getByRole('button', { name: new RegExp(`，${recipient}，`) }).click();
+  }
+  await dialog.getByLabel('转帐金额').fill(String(amount));
+  await dialog.getByRole('button', { name: '确认转帐' }).click();
+}
+
+async function approveTransfer(page: Page, amount: number) {
+  await page.getByRole('button', { name: `批准 ${amount} 两` }).click();
+  await page.getByRole('button', { name: '确认批准' }).click();
+}
+
+async function rejectTransfer(page: Page, amount: number, reason: string) {
+  await page.getByRole('button', { name: `拒绝 ${amount} 两` }).click();
+  await page.getByLabel('拒绝原因').fill(reason);
+  await page.getByRole('button', { name: '确认拒绝' }).click();
+}
+
+async function expectNoToast(page: Page) {
+  await page.waitForTimeout(350);
+  await expect(page.locator('.toast')).toHaveCount(0);
+}
+
 async function waitForNoToast(...pages: Page[]) {
-  await Promise.all(pages.map((page) => expect(page.locator('.toast')).toHaveCount(0, { timeout: 4_500 })));
+  await Promise.all(pages.map((page) => expect(page.locator('.toast')).toHaveCount(0, { timeout: 7_500 })));
 }
 
 async function expectToastPresentation(page: Page, tone: 'success' | 'rejected', mobile: boolean) {
@@ -88,6 +127,7 @@ async function expectToastPresentation(page: Page, tone: 'success' | 'rejected',
       iconWidth: icon ? getComputedStyle(icon).width : null,
       messageWrapped: message ? message.scrollHeight > message.clientHeight : true,
       paddingTop: style.paddingTop,
+      pointerEvents: style.pointerEvents,
       whiteSpace: style.whiteSpace,
       width: style.width,
     };
@@ -104,6 +144,7 @@ async function expectToastPresentation(page: Page, tone: 'success' | 'rejected',
     iconWidth: '13px',
     messageWrapped: false,
     paddingTop: '8px',
+    pointerEvents: 'none',
     whiteSpace: 'nowrap',
   });
   expect(presentation.backgroundColor).toBe(
@@ -122,9 +163,9 @@ async function expectToastPresentation(page: Page, tone: 'success' | 'rejected',
 test.describe('real fund-flow Toast delivery', () => {
   test.skip(!enabled, 'Set FUND_TOAST_REAL_STACK=1 and run against the Docker Compose stack.');
 
-  test('isolates audiences, queues committed funds, and reports rejected requests and landings', async ({ browser }, testInfo) => {
+  test('uses live transfer mode and isolates every Toast audience', async ({ browser }, testInfo) => {
     test.skip(!['desktop-chromium', 'iphone-webkit'].includes(testInfo.project.name));
-    test.setTimeout(120_000);
+    test.setTimeout(240_000);
 
     const runId = `${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`.toLowerCase();
     const password = `Toast-${runId}-Strong-42`;
@@ -138,6 +179,8 @@ test.describe('real fund-flow Toast delivery', () => {
     const contexts: BrowserContext[] = [];
     const accountIds: string[] = [];
     const roomIds: string[] = [];
+    const adminUsername = process.env.BOOTSTRAP_ADMIN_USERNAME ?? 'admin';
+    let adminSessionId: string | null = null;
     const mobile = testInfo.project.name === 'iphone-webkit';
     const newContext = async () => {
       const context = await browser.newContext({
@@ -153,6 +196,7 @@ test.describe('real fund-flow Toast delivery', () => {
 
     try {
       const passwordHash = await hashPassword(password);
+      const admin = await database.account.findUniqueOrThrow({ where: { username: adminUsername } });
       for (const user of Object.values(users)) {
         const account = await database.account.create({
           data: {
@@ -166,9 +210,32 @@ test.describe('real fund-flow Toast delivery', () => {
         accountIds.push(account.id);
       }
 
-      const [bankContext, payerContext, receiverContext, unrelatedContext] = await Promise.all([
-        newContext(), newContext(), newContext(), newContext(),
+      const [adminContext, bankContext, payerContext, receiverContext, unrelatedContext] = await Promise.all([
+        newContext(), newContext(), newContext(), newContext(), newContext(),
       ]);
+      const adminToken = `${randomUUID()}${randomUUID()}`;
+      const adminSession = await database.accountSession.create({
+        data: {
+          accountId: admin.id,
+          sessionTokenHash: createHash('sha256').update(adminToken).digest('hex'),
+          deviceId: randomUUID(),
+          deviceName: 'Fund Toast E2E',
+          browser: 'Playwright',
+          operatingSystem: 'Test',
+          userAgent: 'fund-flow-toast.spec.ts',
+          loginIp: '127.0.0.1',
+          lastIp: '127.0.0.1',
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        },
+      });
+      adminSessionId = adminSession.id;
+      await adminContext.addCookies([{
+        name: sessionCookieName,
+        value: adminToken,
+        url: new URL(apiUrl).origin,
+        httpOnly: true,
+        sameSite: 'Lax',
+      }]);
       const [bankPage, payerPage, receiverPage, unrelatedPage] = await Promise.all([
         bankContext.newPage(), payerContext.newPage(), receiverContext.newPage(), unrelatedContext.newPage(),
       ]);
@@ -177,71 +244,58 @@ test.describe('real fund-flow Toast delivery', () => {
       await login(receiverPage, users.receiver.username, password, mobile);
       await login(unrelatedPage, users.unrelated.username, password, mobile);
 
-      const createRoom = async (approvalRequired: boolean) => {
-        const room = await postJson<RoomReference>(bankContext, '/api/rooms', {
-          name: `${approvalRequired ? '审批' : '即时'}资金提醒 ${runId}`.slice(0, 40),
-          initialBalance: 5_000,
-          diceMode: 'PHYSICAL',
-          skillEnabled: true,
-          startReward: 1_000,
-          allowMidgameJoin: false,
-          visibility: 'PRIVATE',
-          transferApprovalRequired: approvalRequired,
-        }, `create-${approvalRequired}-${runId}`);
-        roomIds.push(room.id);
-        await Promise.all([
-          postJson(bankContext, `/api/rooms/${room.id}/join`, {}, `join-bank-${room.id}`),
-          postJson(payerContext, `/api/rooms/${room.id}/join`, {}, `join-payer-${room.id}`),
-          postJson(receiverContext, `/api/rooms/${room.id}/join`, {}, `join-receiver-${room.id}`),
-          postJson(unrelatedContext, `/api/rooms/${room.id}/join`, {}, `join-other-${room.id}`),
-        ]);
-        await Promise.all([
-          postJson(bankContext, `/api/rooms/${room.id}/select-bank`, {}, `seat-bank-${room.id}`),
-          postJson(payerContext, `/api/rooms/${room.id}/select-character`, { characterId: 'zhenhuan' }, `seat-payer-${room.id}`),
-          postJson(receiverContext, `/api/rooms/${room.id}/select-character`, { characterId: 'huashifei' }, `seat-receiver-${room.id}`),
-          postJson(unrelatedContext, `/api/rooms/${room.id}/select-character`, { characterId: 'anlingrong' }, `seat-other-${room.id}`),
-        ]);
-        await postJson(bankContext, `/api/rooms/${room.id}/start`, {}, `start-${room.id}`);
-        const persisted = await database.room.findUniqueOrThrow({
-          where: { id: room.id },
-          include: { members: { include: { player: true } } },
-        });
-        const players = Object.fromEntries(persisted.members
-          .filter((member): member is typeof member & { player: NonNullable<typeof member.player> } => member.player !== null)
-          .map((member) => [member.accountId, { id: member.player.id, accountId: member.accountId } satisfies PlayerReference]));
-        return { room, players };
-      };
-
-      const immediate = await createRoom(false);
-      const payer = immediate.players[accountIds[1]];
-      const receiver = immediate.players[accountIds[2]];
+      const room = await postJson<RoomReference>(bankContext, '/api/rooms', {
+        name: `实时转账提醒 ${runId}`.slice(0, 40),
+        initialBalance: 5_000,
+        diceMode: 'PHYSICAL',
+        skillEnabled: true,
+        startReward: 1_000,
+        allowMidgameJoin: false,
+        visibility: 'PRIVATE',
+        transferApprovalRequired: false,
+      }, `create-${runId}`);
+      roomIds.push(room.id);
+      await Promise.all([
+        postJson(bankContext, `/api/rooms/${room.id}/join`, {}, `join-bank-${runId}`),
+        postJson(payerContext, `/api/rooms/${room.id}/join`, {}, `join-payer-${runId}`),
+        postJson(receiverContext, `/api/rooms/${room.id}/join`, {}, `join-receiver-${runId}`),
+        postJson(unrelatedContext, `/api/rooms/${room.id}/join`, {}, `join-other-${runId}`),
+      ]);
+      await Promise.all([
+        postJson(bankContext, `/api/rooms/${room.id}/select-bank`, {}, `seat-bank-${runId}`),
+        postJson(payerContext, `/api/rooms/${room.id}/select-character`, { characterId: 'zhenhuan' }, `seat-payer-${runId}`),
+        postJson(receiverContext, `/api/rooms/${room.id}/select-character`, { characterId: 'huashifei' }, `seat-receiver-${runId}`),
+        postJson(unrelatedContext, `/api/rooms/${room.id}/select-character`, { characterId: 'anlingrong' }, `seat-other-${runId}`),
+      ]);
+      await postJson(bankContext, `/api/rooms/${room.id}/start`, {}, `start-${runId}`);
+      const persisted = await database.room.findUniqueOrThrow({
+        where: { id: room.id },
+        include: { members: { include: { player: true } } },
+      });
+      const players = Object.fromEntries(persisted.members
+        .filter((member): member is typeof member & { player: NonNullable<typeof member.player> } => member.player !== null)
+        .map((member) => [member.accountId, { id: member.player.id, accountId: member.accountId } satisfies PlayerReference]));
+      const payer = players[accountIds[1]];
+      const receiver = players[accountIds[2]];
       expect(payer).toBeTruthy();
       expect(receiver).toBeTruthy();
+
       await Promise.all([
-        openRoom(bankPage, immediate.room.name, '银行端'),
-        openRoom(payerPage, immediate.room.name, '玩家端'),
-        openRoom(receiverPage, immediate.room.name, '玩家端'),
-        openRoom(unrelatedPage, immediate.room.name, '玩家端'),
+        openRoom(bankPage, room.name, '银行端'),
+        openRoom(payerPage, room.name, '玩家端'),
+        openRoom(receiverPage, room.name, '玩家端'),
+        openRoom(unrelatedPage, room.name, '玩家端'),
       ]);
       await payerPage.waitForTimeout(400);
 
-      await postJson(payerContext, `/api/rooms/${immediate.room.id}/transfers`, {
-        fromPlayerId: payer.id,
-        recipientType: 'PLAYER',
-        toPlayerId: receiver.id,
-        amount: 500,
-        isPlotFine: false,
-      }, `immediate-transfer-${runId}`);
+      await submitTransfer(payerPage, '李四', 500);
       await Promise.all([
-        expect(payerPage.locator('.toast')).toHaveText('你向李四支付 500 两'),
-        expect(receiverPage.locator('.toast')).toHaveText('张三向你转入 500 两'),
-        expect(bankPage.locator('.toast')).toHaveText('张三向李四支付 500 两'),
+        expect(payerPage.locator('.toast-success')).toHaveText('转账已成功，结果已同步至账本'),
+        expect(receiverPage.locator('.toast-success')).toHaveText('张三向你转入 500 两'),
+        expect(bankPage.locator('.toast-success')).toHaveText('张三向李四支付 500 两'),
       ]);
-      await unrelatedPage.waitForTimeout(400);
-      await expect(unrelatedPage.locator('.toast')).toHaveCount(0);
-
+      await expectNoToast(unrelatedPage);
       await expectToastPresentation(payerPage, 'success', mobile);
-
       const toastBox = await payerPage.locator('.toast').boundingBox();
       expect(toastBox).toBeTruthy();
       if (mobile) {
@@ -249,14 +303,130 @@ test.describe('real fund-flow Toast delivery', () => {
       } else {
         expect(1440 - toastBox!.x - toastBox!.width).toBeCloseTo(24, 0);
       }
-      await payerPage.getByRole('button', { name: '刷新房间快照' }).click();
       await payerPage.screenshot({ path: testInfo.outputPath('fund-flow-toast-success.png'), fullPage: true });
       await waitForNoToast(bankPage, payerPage, receiverPage);
 
-      await postJson(bankContext, `/api/rooms/${immediate.room.id}/bank/adjust-balance`, {
+      await patchJson(adminContext, `/api/admin/rooms/${room.id}`, {
+        transferApprovalRequired: true,
+      }, `mode-on-${runId}`);
+      await expect.poll(async () => (await database.room.findUniqueOrThrow({ where: { id: room.id } })).transferApprovalRequired).toBe(true);
+      await expect.poll(async () => (await database.room.findUniqueOrThrow({ where: { id: room.id } })).status).toBe('PLAYING');
+
+      await submitTransfer(payerPage, '李四', 300);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('转账已提交，请等待银行审批'),
+        expect(bankPage.locator('.toast-success')).toHaveText('收到张三的转账申请：向李四支付 300 两'),
+      ]);
+      await Promise.all([expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await waitForNoToast(bankPage, payerPage);
+      await approveTransfer(bankPage, 300);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('银行审批通过，转账已成功，结果已同步至账本'),
+        expect(receiverPage.locator('.toast-success')).toHaveText('张三向你转入 300 两'),
+        expect(bankPage.locator('.toast-success')).toHaveText('张三向李四支付 300 两'),
+      ]);
+      await expectNoToast(unrelatedPage);
+      await waitForNoToast(bankPage, payerPage, receiverPage);
+
+      await submitTransfer(payerPage, '李四', 250);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('转账已提交，请等待银行审批'),
+        expect(bankPage.locator('.toast-success')).toHaveText('收到张三的转账申请：向李四支付 250 两'),
+      ]);
+      await waitForNoToast(bankPage, payerPage);
+      await rejectTransfer(bankPage, 250, '金额有误');
+      await expect(payerPage.locator('.toast-rejected')).toHaveText('转账申请已被银行拒绝：金额有误');
+      await expectToastPresentation(payerPage, 'rejected', mobile);
+      await Promise.all([expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await payerPage.screenshot({ path: testInfo.outputPath('fund-flow-toast-rejected.png'), fullPage: true });
+      await waitForNoToast(bankPage, payerPage);
+
+      await submitTransfer(payerPage, '银行', 120);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('转账已提交，请等待银行审批'),
+        expect(bankPage.locator('.toast-success')).toHaveText('收到张三的转账申请：向银行支付 120 两'),
+      ]);
+      await Promise.all([expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await waitForNoToast(bankPage, payerPage);
+      await approveTransfer(bankPage, 120);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('银行审批通过，转账已成功，结果已同步至账本'),
+        expect(bankPage.locator('.toast-success')).toHaveText('银行收到张三支付 120 两'),
+      ]);
+      await Promise.all([expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await waitForNoToast(bankPage, payerPage);
+
+      await database.player.update({ where: { id: receiver.id }, data: { status: 'LEFT' } });
+      await submitTransfer(payerPage, '李四', 130);
+      await Promise.all([
+        expect(payerPage.locator('.toast-rejected')).toHaveText('转账申请提交失败：玩家状态已变化，请刷新后重试'),
+        expect(bankPage.locator('.toast-rejected')).toHaveText('张三的转账申请提交失败：玩家状态已变化，请刷新后重试'),
+      ]);
+      await Promise.all([expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await database.player.update({ where: { id: receiver.id }, data: { status: 'ACTIVE' } });
+      await waitForNoToast(bankPage, payerPage);
+
+      await submitTransfer(payerPage, '李四', 200);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('转账已提交，请等待银行审批'),
+        expect(bankPage.locator('.toast-success')).toHaveText('收到张三的转账申请：向李四支付 200 两'),
+      ]);
+      const pendingFailure = await database.gameRequest.findFirstOrThrow({
+        where: { roomId: room.id, actorPlayerId: payer.id, type: 'PLAYER_TRANSFER', status: 'PENDING', amount: 200 },
+        orderBy: { createdAt: 'desc' },
+      });
+      const payerBalance = (await database.player.findUniqueOrThrow({ where: { id: payer.id }, select: { balance: true } })).balance;
+      await database.player.update({ where: { id: payer.id }, data: { balance: 10 } });
+      await waitForNoToast(bankPage, payerPage);
+      await approveTransfer(bankPage, 200);
+      await Promise.all([
+        expect(bankPage.locator('.toast-rejected')).toHaveText('银行审批执行失败：余额不足'),
+        expect(payerPage.locator('.toast-rejected')).toHaveText('银行审批执行失败：余额不足'),
+      ]);
+      await Promise.all([expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await expect.poll(async () => (await database.gameRequest.findUniqueOrThrow({ where: { id: pendingFailure.id } })).status).toBe('PENDING');
+      await database.player.update({ where: { id: payer.id }, data: { balance: payerBalance } });
+      await waitForNoToast(bankPage, payerPage);
+
+      await patchJson(adminContext, `/api/admin/rooms/${room.id}`, {
+        transferApprovalRequired: false,
+      }, `mode-off-${runId}`);
+      await expect.poll(async () => (await database.room.findUniqueOrThrow({ where: { id: room.id } })).transferApprovalRequired).toBe(false);
+      await expect.poll(async () => (await database.room.findUniqueOrThrow({ where: { id: room.id } })).status).toBe('PLAYING');
+
+      await submitTransfer(payerPage, '李四', 999_999);
+      await expect(payerPage.locator('.toast-rejected')).toHaveText('转账失败：余额不足');
+      await Promise.all([expectNoToast(bankPage), expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await waitForNoToast(payerPage);
+
+      await submitTransfer(payerPage, '李四', 90);
+      await Promise.all([
+        expect(payerPage.locator('.toast-success')).toHaveText('转账已成功，结果已同步至账本'),
+        expect(receiverPage.locator('.toast-success')).toHaveText('张三向你转入 90 两'),
+        expect(bankPage.locator('.toast-success')).toHaveText('张三向李四支付 90 两'),
+      ]);
+      await expectNoToast(unrelatedPage);
+      await waitForNoToast(bankPage, payerPage, receiverPage);
+
+      let abortTransfer = true;
+      await payerPage.route(`**/api/rooms/${room.id}/transfers`, async (route) => {
+        if (abortTransfer) {
+          abortTransfer = false;
+          await route.abort('failed');
+          return;
+        }
+        await route.continue();
+      });
+      await submitTransfer(payerPage, '李四', 80);
+      await expect(payerPage.locator('.toast-rejected')).toHaveText('转账失败：服务暂时不可用，请稍后重试');
+      await Promise.all([expectNoToast(bankPage), expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
+      await payerPage.unroute(`**/api/rooms/${room.id}/transfers`);
+      await waitForNoToast(payerPage);
+
+      await postJson(bankContext, `/api/rooms/${room.id}/bank/adjust-balance`, {
         playerId: payer.id, amount: 111, reason: '队列一',
       }, `queue-one-${runId}`);
-      await postJson(bankContext, `/api/rooms/${immediate.room.id}/bank/adjust-balance`, {
+      await postJson(bankContext, `/api/rooms/${room.id}/bank/adjust-balance`, {
         playerId: payer.id, amount: -222, reason: '队列二',
       }, `queue-two-${runId}`);
       await expect(payerPage.locator('.toast')).toHaveText('银行向你发放队列一 111 两');
@@ -266,73 +436,15 @@ test.describe('real fund-flow Toast delivery', () => {
       await expect(payerPage.locator('.toast')).toHaveCount(0, { timeout: 3_500 });
       await waitForNoToast(bankPage);
 
-      const approval = await createRoom(true);
-      const approvalPayer = approval.players[accountIds[1]];
-      const approvalReceiver = approval.players[accountIds[2]];
-      expect(approvalPayer).toBeTruthy();
-      expect(approvalReceiver).toBeTruthy();
-      await Promise.all([
-        openRoom(bankPage, approval.room.name, '银行端'),
-        openRoom(payerPage, approval.room.name, '玩家端'),
-        openRoom(receiverPage, approval.room.name, '玩家端'),
-        openRoom(unrelatedPage, approval.room.name, '玩家端'),
-      ]);
-      await payerPage.waitForTimeout(400);
-
-      const pendingApproval = await postJson<RequestReference>(payerContext, `/api/rooms/${approval.room.id}/transfers`, {
-        fromPlayerId: approvalPayer.id,
-        recipientType: 'PLAYER',
-        toPlayerId: approvalReceiver.id,
-        amount: 300,
-        isPlotFine: false,
-      }, `pending-approval-${runId}`);
-      expect(pendingApproval.status).toBe('PENDING');
-      await payerPage.waitForTimeout(500);
-      await Promise.all([bankPage, payerPage, receiverPage, unrelatedPage].map((page) => expect(page.locator('.toast')).toHaveCount(0)));
-
-      await postJson(bankContext, `/api/rooms/${approval.room.id}/requests/${pendingApproval.id}/approve`, {}, `approve-${runId}`);
-      await Promise.all([
-        expect(payerPage.locator('.toast')).toHaveText('你向李四支付 300 两'),
-        expect(receiverPage.locator('.toast')).toHaveText('张三向你转入 300 两'),
-        expect(bankPage.locator('.toast')).toHaveText('张三向李四支付 300 两'),
-      ]);
-      await expect(unrelatedPage.locator('.toast')).toHaveCount(0);
-      await waitForNoToast(bankPage, payerPage, receiverPage);
-
-      const pendingRejection = await postJson<RequestReference>(payerContext, `/api/rooms/${approval.room.id}/transfers`, {
-        fromPlayerId: approvalPayer.id,
-        recipientType: 'PLAYER',
-        toPlayerId: approvalReceiver.id,
-        amount: 250,
-        isPlotFine: false,
-      }, `pending-rejection-${runId}`);
-      await postJson(bankContext, `/api/rooms/${approval.room.id}/requests/${pendingRejection.id}/reject`, {
-        reason: '金额有误',
-      }, `reject-${runId}`);
-      await expect(payerPage.locator('.toast-rejected')).toHaveText('你的转帐申请已被银行拒绝：金额有误');
-      await expectToastPresentation(payerPage, 'rejected', mobile);
-      await receiverPage.waitForTimeout(400);
-      await Promise.all([bankPage, receiverPage, unrelatedPage].map((page) => expect(page.locator('.toast')).toHaveCount(0)));
-      await waitForNoToast(payerPage);
-
-      await Promise.all([
-        openRoom(bankPage, immediate.room.name, '银行端'),
-        openRoom(payerPage, immediate.room.name, '玩家端'),
-        openRoom(receiverPage, immediate.room.name, '玩家端'),
-        openRoom(unrelatedPage, immediate.room.name, '玩家端'),
-      ]);
-      const landing = await postJson<LandingReference>(payerContext, `/api/rooms/${immediate.room.id}/landings`, {
+      const landing = await postJson<LandingReference>(payerContext, `/api/rooms/${room.id}/landings`, {
         playerId: payer.id,
         propertyName: '甘露寺',
       }, `landing-rejection-${runId}`);
-      await postJson(bankContext, `/api/rooms/${immediate.room.id}/landings/${landing.id}/cancel-property-actions`, {
+      await postJson(bankContext, `/api/rooms/${room.id}/landings/${landing.id}/cancel-property-actions`, {
         reason: '现场落点有误',
       }, `cancel-landing-${runId}`);
       await expect(payerPage.locator('.toast-rejected')).toHaveText('你的落点申请已被银行拒绝：现场落点有误');
-      await expectToastPresentation(payerPage, 'rejected', mobile);
-      await payerPage.screenshot({ path: testInfo.outputPath('fund-flow-toast-rejected.png'), fullPage: true });
-      await receiverPage.waitForTimeout(400);
-      await Promise.all([bankPage, receiverPage, unrelatedPage].map((page) => expect(page.locator('.toast')).toHaveCount(0)));
+      await Promise.all([expectNoToast(bankPage), expectNoToast(receiverPage), expectNoToast(unrelatedPage)]);
     } finally {
       await Promise.allSettled(contexts.map((context) => context.close()));
       if (roomIds.length) {
@@ -351,6 +463,9 @@ test.describe('real fund-flow Toast delivery', () => {
           where: { id: { in: accountIds } },
           data: { status: 'DISABLED', canCreateRoom: false, deletedAt: revokedAt },
         });
+      }
+      if (adminSessionId) {
+        await database.accountSession.deleteMany({ where: { id: adminSessionId } });
       }
       await database.$disconnect();
     }
