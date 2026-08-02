@@ -8,7 +8,7 @@ const longDisplayName = '钮祜禄甄嬛并临时代理六宫事务超长昵称'
 const account = { id: 'account-1', username: 'zhenhuan', displayName: longDisplayName, isSuperAdmin: true, canCreateRoom: true, lastLoginAt: now };
 const room = (overrides: Partial<BrowserRoomSummary> = {}): BrowserRoomSummary => ({
   id: 'room-1', name: longRoomName, status: 'PLAYING', creator: '甄嬛', memberCount: 5, playerCount: 5, playerLimit: 5,
-  hasPassword: true, mine: true, characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true,
+  hasPassword: true, mine: true, canJoin: true, joinBlockedReason: null, availableCharacters: [], characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true,
   createdAt: '2026-07-29T00:05:00', startedAt: null, endedAt: null, ...overrides,
 });
 const dual = { characterId: 'zhenhuan', playerId: 'player-1', isBank: true, activeHere: true };
@@ -433,14 +433,16 @@ test('lobby and room management show room lifecycle times', async ({ page }) => 
   }
 });
 
-test('room list renders membership and lifecycle status badges', async ({ page }) => {
+test('room admission badges render membership and lifecycle status independently', async ({ page }) => {
   const joinedLobby = room({ id: 'joined-lobby', name: '已加入的准备房间', status: 'LOBBY', mine: true });
   const joinedPlaying = room({ id: 'joined-playing', name: '已加入的对局', status: 'PLAYING', mine: true });
   const joinableLobby = room({ id: 'joinable-lobby', name: '可加入的准备房间', status: 'LOBBY', mine: false, characterId: null, myCharacter: null, isBank: false });
   const joinablePlaying = room({ id: 'joinable-playing', name: '可加入的对局', status: 'PLAYING', mine: false, characterId: null, myCharacter: null, isBank: false });
+  const blockedDisabled = room({ id: 'blocked-disabled', name: '禁止中途加入房间', status: 'PLAYING', mine: false, canJoin: false, joinBlockedReason: 'MIDGAME_JOIN_DISABLED', characterId: null, myCharacter: null, isBank: false });
+  const blockedFull = room({ id: 'blocked-full', name: '人数已满房间', status: 'PLAYING', mine: false, canJoin: false, joinBlockedReason: 'PLAYER_LIMIT', characterId: null, myCharacter: null, isBank: false });
   const finished = room({ id: 'finished', name: '已结束的对局', status: 'FINISHED', mine: true });
 
-  await mockAuthenticated(page, [joinedLobby, joinedPlaying, joinableLobby, joinablePlaying, finished]);
+  await mockAuthenticated(page, [joinedLobby, joinedPlaying, joinableLobby, joinablePlaying, blockedDisabled, blockedFull, finished]);
   await page.goto('/rooms');
 
   for (const [name, badges] of [
@@ -448,6 +450,8 @@ test('room list renders membership and lifecycle status badges', async ({ page }
     ['已加入的对局', ['已加入', '游戏中']],
     ['可加入的准备房间', ['可加入', '准备中']],
     ['可加入的对局', ['可加入', '游戏中']],
+    ['禁止中途加入房间', ['不可加入', '游戏中']],
+    ['人数已满房间', ['不可加入', '游戏中']],
     ['已结束的对局', ['已结束']],
   ] as const) {
     const item = page.getByRole('button', { name: new RegExp(name) });
@@ -456,6 +460,8 @@ test('room list renders membership and lifecycle status badges', async ({ page }
 
   await expect(page.locator('.room-status-joined').first()).toHaveCSS('background-color', 'rgb(36, 104, 72)');
   await expect(page.locator('.room-status-joinable').first()).toHaveCSS('background-color', 'rgb(54, 95, 113)');
+  await expect(page.locator('.room-status-unavailable').first()).toHaveCSS('background-color', 'rgb(98, 105, 99)');
+  await expect(page.locator('.room-status-unavailable').first()).toHaveCSS('border-radius', '6px');
   await expect(page.locator('.room-status-lobby').first()).toHaveCSS('background-color', 'rgb(184, 137, 47)');
   await expect(page.locator('.room-status-playing').first()).toHaveCSS('background-color', 'rgb(116, 31, 40)');
   await expect(page.locator('.room-status-ended')).toHaveCSS('background-color', 'rgb(98, 105, 99)');

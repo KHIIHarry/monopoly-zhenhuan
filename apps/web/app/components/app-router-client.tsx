@@ -339,11 +339,11 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   SESSION_INVALID: "登录已失效，请重新登录",
   SESSION_LIMIT_REACHED: "当前账号已在2台设备登录",
   ROOM_PASSWORD_INVALID: "房间密码不正确",
+  MIDGAME_JOIN_DISABLED: "房间已开局，且不允许中途加入。",
   ROOM_CREATE_FORBIDDEN: "当前账号没有创建房间权限",
   ROOM_MEMBERSHIP_REQUIRED: "请先加入该房间",
   ROOM_CONTROL_LOST: "该房间已在另一台设备打开",
-  ROLE_ALREADY_TAKEN:
-    "该角色刚刚已被其他玩家选择，当前页面信息可能已过期，请刷新页面后重新加入房间。",
+  ROLE_ALREADY_TAKEN: "所选人物刚刚已被其他玩家选择，请重新选择。",
   BANK_ALREADY_TAKEN: "银行席位刚刚已被其他成员选择，请刷新页面后重试。",
   ACCOUNT_CHARACTER_LIMIT_REACHED:
     "每个账号在同一房间最多选择一名人物；如需更换，请申请角色交换。",
@@ -362,9 +362,8 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   ROOM_NOT_PLAYING: "房间当前不在游戏中",
   ROOM_ENDED: "房间已经结束，不能继续操作",
   MINIMUM_PLAYERS: "至少需要两位玩家才能开局",
-  PLAYER_LIMIT: "房间人数已满，请联系银行确认",
+  PLAYER_LIMIT: "房间人物已满，暂时无法加入。",
   PLAYER_COUNT_OUT_OF_RANGE: "玩家人数不符合开局要求",
-  MIDGAME_JOIN_DISABLED: "房间已开局，不能中途加入",
   CHARACTER_REQUIRED: "请选择人物后再加入",
   CHARACTER_TAKEN: "该人物已被选择，请换一位人物",
   UNKNOWN_CHARACTER: "人物信息无效，请重新选择",
@@ -718,6 +717,13 @@ type RoomSummary = {
   playerLimit: number;
   hasPassword: boolean;
   mine: boolean;
+  canJoin: boolean;
+  joinBlockedReason:
+    | "MIDGAME_JOIN_DISABLED"
+    | "PLAYER_LIMIT"
+    | "ROOM_FINISHED"
+    | null;
+  availableCharacters: Array<{ id: string; name: string }>;
   characterId: string | null;
   myCharacter: string | null;
   isBank: boolean;
@@ -1028,16 +1034,18 @@ const screenForPage = (page: AppPage): Screen => screens[page];
 const terminalRoom = (status: RoomStatus) =>
   status === "FINISHED" || status === "ENDED" || status === "CLOSED";
 type RoomStatusBadge = {
-  label: "已加入" | "可加入" | "准备中" | "游戏中" | "已结束";
-  tone: "joined" | "joinable" | "lobby" | "playing" | "ended";
+  label: "已加入" | "可加入" | "不可加入" | "准备中" | "游戏中" | "已结束";
+  tone: "joined" | "joinable" | "unavailable" | "lobby" | "playing" | "ended";
 };
 const roomStatusBadges = (room: RoomSummary): RoomStatusBadge[] => {
   if (terminalRoom(room.status)) return [{ label: "已结束", tone: "ended" }];
+  const accessBadge = room.mine
+    ? { label: "已加入" as const, tone: "joined" as const }
+    : room.canJoin
+      ? { label: "可加入" as const, tone: "joinable" as const }
+      : { label: "不可加入" as const, tone: "unavailable" as const };
   return [
-    {
-      label: room.mine ? "已加入" : "可加入",
-      tone: room.mine ? "joined" : "joinable",
-    },
+    accessBadge,
     {
       label: room.status === "PLAYING" ? "游戏中" : "准备中",
       tone: room.status === "PLAYING" ? "playing" : "lobby",
@@ -1484,6 +1492,11 @@ export default function AppRouterClient({
   }
 
   async function openRoom(room: RoomSummary) {
+    if (!room.mine && !terminalRoom(room.status) && !room.canJoin) {
+      const code = room.joinBlockedReason;
+      setError(code ? API_ERROR_MESSAGES[code] : "当前无法加入该房间");
+      return;
+    }
     if (!room.mine && !terminalRoom(room.status)) {
       go(roomPath("join", room.id));
       return;
@@ -1493,7 +1506,7 @@ export default function AppRouterClient({
     );
   }
 
-  async function joinRoom(password?: string) {
+  async function joinRoom(input: JoinRoomInput) {
     if (!selectedRoom) return;
     const roomId = selectedRoom.id;
     const owner = beginRoomTransition(roomId);
@@ -1501,11 +1514,24 @@ export default function AppRouterClient({
       const result = await write(
         {
           path: `/api/rooms/${roomId}/join`,
-          body: password ? { password } : {},
+          body: input,
         },
         { owner },
       );
-      if (!result.ok || !ownsRoom(owner)) return;
+      if (!result.ok) {
+        if (
+          ownsRoom(owner) &&
+          result.error instanceof ApiError &&
+          ["ROLE_ALREADY_TAKEN", "PLAYER_LIMIT"].includes(result.error.code)
+        ) {
+          const items = await loadRooms(owner);
+          if (ownsRoom(owner)) {
+            setSelectedRoom(items.find((room) => room.id === roomId) ?? null);
+          }
+        }
+        return;
+      }
+      if (!ownsRoom(owner)) return;
       await loadRooms(owner);
       if (!ownsRoom(owner)) return;
       if (await fetchSeats(owner, undefined, "AUTO")) result.confirm();
@@ -2484,6 +2510,8 @@ function Lobby({
   );
 }
 
+type JoinRoomInput = { password?: string; characterId?: string };
+
 function JoinRoom({
   room,
   busy,
@@ -2494,10 +2522,19 @@ function JoinRoom({
   room: RoomSummary;
   busy: boolean;
   error: string;
-  onJoin: (password?: string) => void;
+  onJoin: (input: JoinRoomInput) => void;
   onBack: () => void;
 }) {
   const [password, setPassword] = useState("");
+  const [characterId, setCharacterId] = useState("");
+  useEffect(() => {
+    if (
+      characterId &&
+      !room.availableCharacters.some((character) => character.id === characterId)
+    ) {
+      setCharacterId("");
+    }
+  }, [characterId, room.availableCharacters]);
   return (
     <main className="v2-page">
       <section className="v2-panel">
@@ -2517,6 +2554,22 @@ function JoinRoom({
             />
           </label>
         )}
+        {room.status === "PLAYING" && (
+          <label>
+            选择人物
+            <select
+              value={characterId}
+              onChange={(event) => setCharacterId(event.target.value)}
+            >
+              <option value="">请选择人物</option>
+              {room.availableCharacters.map((character) => (
+                <option key={character.id} value={character.id}>
+                  {character.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {error && (
           <p className="error" role="alert">
             {error}
@@ -2524,8 +2577,17 @@ function JoinRoom({
         )}
         <button
           className="primary"
-          disabled={busy || (room.hasPassword && !password)}
-          onClick={() => void onJoin(password || undefined)}
+          disabled={
+            busy ||
+            (room.hasPassword && !password) ||
+            (room.status === "PLAYING" && !characterId)
+          }
+          onClick={() =>
+            void onJoin({
+              ...(password ? { password } : {}),
+              ...(room.status === "PLAYING" ? { characterId } : {}),
+            })
+          }
         >
           加入房间
         </button>

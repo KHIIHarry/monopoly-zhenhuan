@@ -582,6 +582,22 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     return result;
   }
 
+  it('keeps unseated active members available for bank reassignment', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const admin = await createAuth({ superAdmin: true });
+    const unseated = await createAuth({ displayName: '未选人物成员' });
+    const room = await createRoom(creator.auth, 'Admin bank candidates');
+    const unseatedMembership = await service.joinRoom(unseated.auth, room.id, {}, 'join-unseated-bank-candidate');
+
+    const detail = await service.getAdminRoom(admin.auth, room.id);
+
+    expect(detail.members).toContainEqual(expect.objectContaining({
+      id: unseatedMembership.id,
+      characterId: null,
+      isBank: false,
+    }));
+  });
+
   function rejectionCode(result: PromiseSettledResult<unknown>) {
     return result.status === 'rejected' && result.reason instanceof Error
       ? (result.reason as Error & { code?: string }).code

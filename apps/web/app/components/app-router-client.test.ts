@@ -296,6 +296,38 @@ describe('room completion regressions', () => {
   });
 });
 
+describe('authoritative room admission', () => {
+  test('uses summary admission independently from lifecycle badges and blocked navigation', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('canJoin: boolean;');
+    expect(component).toContain('joinBlockedReason:');
+    expect(component).toContain('availableCharacters: Array<{ id: string; name: string }>');
+    expect(component).toContain('label: "已加入" | "可加入" | "不可加入" | "准备中" | "游戏中" | "已结束";');
+    expect(component).toMatch(/const accessBadge = room\.mine[\s\S]*?room\.canJoin[\s\S]*?label: "不可加入"[\s\S]*?tone: "unavailable"/);
+    expect(component).toMatch(/if \(!room\.mine && !terminalRoom\(room\.status\) && !room\.canJoin\)[\s\S]*?setError\(code \? API_ERROR_MESSAGES\[code\] : "当前无法加入该房间"\);[\s\S]*?return;/);
+  });
+
+  test('submits one join object and refreshes summaries after stale character conflicts', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('type JoinRoomInput = { password?: string; characterId?: string };');
+    expect(component).toContain('onJoin: (input: JoinRoomInput) => void;');
+    expect(component).toContain('room.availableCharacters.map((character) => (');
+    expect(component).toMatch(/body: input,/);
+    expect(component).toMatch(/ROLE_ALREADY_TAKEN[\s\S]*?PLAYER_LIMIT[\s\S]*?loadRooms\(owner\)[\s\S]*?setSelectedRoom\(items\.find\(\(room\) => room\.id === roomId\) \?\? null\)/);
+    expect(component).toContain('selectedRoom.members.map((member) => (');
+  });
+
+  test('uses the exact admission messages', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('MIDGAME_JOIN_DISABLED: "房间已开局，且不允许中途加入。"');
+    expect(component).toContain('PLAYER_LIMIT: "房间人物已满，暂时无法加入。"');
+    expect(component).toContain('ROLE_ALREADY_TAKEN: "所选人物刚刚已被其他玩家选择，请重新选择。"');
+  });
+});
+
 describe('shared player asset overview', () => {
   test('adds the player overview tab and shares one accordion across both views', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');

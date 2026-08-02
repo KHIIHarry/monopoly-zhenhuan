@@ -245,6 +245,7 @@
 .room-row .room-status-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border-radius: 6px; color: #fff; font-size: 12px; font-weight: 700; line-height: 1.2; white-space: nowrap; }
 .room-status-joined { background: #246848; }
 .room-status-joinable { background: #365f71; }
+.room-status-unavailable { background: #626963; }
 .room-status-lobby { background: #b8892f; }
 .room-status-playing { background: #741f28; }
 .room-status-ended { background: #626963; }

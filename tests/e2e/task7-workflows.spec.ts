@@ -6,7 +6,7 @@ import type { BrowserRoomStatus, BrowserRoomSummary, BrowserSeatSnapshot, Browse
 const now = '2026-07-27T08:00:00.000Z';
 const account = { id: 'account-1', username: 'zhenhuan', displayName: '甄嬛', isSuperAdmin: true, canCreateRoom: true, lastLoginAt: now };
 type RoomSummary = BrowserRoomSummary;
-const baseRoom: RoomSummary = { id: 'room-1', name: '碎玉轩夜局', status: 'PLAYING', creator: '甄嬛', memberCount: 2, playerCount: 1, playerLimit: 5, hasPassword: false, mine: true, characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true };
+const baseRoom: RoomSummary = { id: 'room-1', name: '碎玉轩夜局', status: 'PLAYING', creator: '甄嬛', memberCount: 2, playerCount: 1, playerLimit: 5, hasPassword: false, mine: true, canJoin: true, joinBlockedReason: null, availableCharacters: [], characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true };
 const snapshot: BrowserSnapshot & { stateVersion: number } = { id: 'room-1', stateVersion: 1, code: 'SYX', name: baseRoom.name, status: 'PLAYING', diceMode: 'PHYSICAL', redemptionFee: 500, startReward: 1_000, currentPlayerId: 'player-1', turn: null, players: [{ id: 'player-1', name: '甄嬛', characterId: 'zhenhuan', balance: 5_000, remainingSkipTurns: 0 }], properties: [], ledger: [], requests: [], landings: [], audit: [], reversalCandidate: null };
 
 type Membership = { characterId: string | null; playerId: string | null; isBank: boolean; activeHere: boolean };
@@ -61,6 +61,50 @@ async function openRoom(page: Page) {
   await page.goto('/');
   await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
 }
+
+test('room admission blocks authoritative nonmember summaries before navigation', async ({ page }) => {
+  const disabled = { ...baseRoom, id: 'disabled-room', name: '禁止中途加入房间', mine: false, canJoin: false, joinBlockedReason: 'MIDGAME_JOIN_DISABLED' as const, characterId: null, myCharacter: null, isBank: false };
+  const full = { ...baseRoom, id: 'full-room', name: '人数已满房间', mine: false, canJoin: false, joinBlockedReason: 'PLAYER_LIMIT' as const, characterId: null, myCharacter: null, isBank: false };
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [disabled, full] }));
+
+  await page.goto('/rooms');
+  await page.getByRole('button', { name: /禁止中途加入房间/ }).click();
+  await expect(page).toHaveURL(/\/rooms$/);
+  await expect(page.getByRole('alert')).toContainText('房间已开局，且不允许中途加入。');
+
+  await page.getByRole('button', { name: /人数已满房间/ }).click();
+  await expect(page).toHaveURL(/\/rooms$/);
+  await expect(page.getByRole('alert')).toContainText('房间人物已满，暂时无法加入。');
+});
+
+test('midgame join submits password and character atomically and refreshes stale roles', async ({ page }) => {
+  let summary = { ...baseRoom, name: '可中途加入房间', mine: false, hasPassword: true, characterId: null, myCharacter: null, isBank: false, availableCharacters: [{ id: 'meizhuang', name: '沈眉庄' }] };
+  const joinPayloads: unknown[] = [];
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [summary] }));
+  await page.route('**/api/rooms/room-1/join', async (route) => {
+    joinPayloads.push(route.request().postDataJSON());
+    summary = { ...summary, availableCharacters: [{ id: 'anlingrong', name: '安陵容' }] };
+    await route.fulfill({ status: 409, json: { error: 'ROLE_ALREADY_TAKEN' } });
+  });
+
+  await page.goto('/rooms');
+  await page.getByRole('button', { name: /可中途加入房间/ }).click();
+  await page.getByLabel('房间密码').fill('secret');
+  await page.getByLabel('选择人物').selectOption('meizhuang');
+  await page.getByRole('button', { name: '加入房间' }).click();
+
+  expect(joinPayloads).toEqual([{ password: 'secret', characterId: 'meizhuang' }]);
+  await expect(page).toHaveURL(/\/rooms\/room-1\/join$/);
+  await expect(page.getByRole('alert')).toContainText('所选人物刚刚已被其他玩家选择，请重新选择。');
+  await expect(page.getByLabel('选择人物')).toHaveValue('');
+  await expect(page.getByLabel('选择人物').getByRole('option')).toHaveText(['请选择人物', '安陵容']);
+});
 
 test('bank-first then character preserves bank and creates one stable Player identity', async ({ page }) => {
   await mockBase(page, { ...baseRoom, status: 'LOBBY', playerCount: 0, characterId: null, myCharacter: null, isBank: true });
