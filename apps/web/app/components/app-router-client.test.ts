@@ -239,6 +239,18 @@ describe('authoritative transfer feedback', () => {
 });
 
 describe('room completion regressions', () => {
+  test('reconciles members removed when a room starts without changing generic subscription recovery', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const handler = component.slice(
+      component.indexOf('const onRoomSubscriptionLost'),
+      component.indexOf('const onRoomToast'),
+    );
+
+    expect(handler).toContain('{ roomId?: unknown; reason?: unknown }');
+    expect(handler).toMatch(/notification\?\.reason === "ROOM_STARTED_WITHOUT_CAPABILITY"[\s\S]*?clearRoomState\(\);[\s\S]*?go\("\/rooms", true\);[\s\S]*?setError\("游戏已开始，你因未选择人物或银行身份已退出房间"\);[\s\S]*?loadRooms\(\)/);
+    expect(handler).toMatch(/snapshotRequestGeneration\.current \+= 1;\s*refresh\(\);/);
+  });
+
   test('keeps finish intent until its authoritative settlement has loaded', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
     const finishRoom = component.slice(

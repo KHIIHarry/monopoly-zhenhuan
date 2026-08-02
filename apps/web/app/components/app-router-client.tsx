@@ -1918,13 +1918,20 @@ export default function AppRouterClient({
     const onRoomSubscriptionLost = (payload: unknown) => {
       const notification =
         payload && typeof payload === "object"
-          ? (payload as { roomId?: unknown })
+          ? (payload as { roomId?: unknown; reason?: unknown })
           : null;
       const roomId =
         typeof notification?.roomId === "string" ? notification.roomId : null;
       if (!roomId || roomId !== roomRuntime.current.roomId) return;
       if (socketRoomSubscription.current === roomId)
         socketRoomSubscription.current = null;
+      if (notification?.reason === "ROOM_STARTED_WITHOUT_CAPABILITY") {
+        clearRoomState();
+        go("/rooms", true);
+        setError("游戏已开始，你因未选择人物或银行身份已退出房间");
+        void loadRooms().catch((caught) => void handleFailure(caught));
+        return;
+      }
       snapshotRequestGeneration.current += 1;
       refresh();
     };

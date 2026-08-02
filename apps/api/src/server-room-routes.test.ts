@@ -80,6 +80,16 @@ async function routeHarness() {
     })),
   };
   const games = {
+    start: vi.fn(async (
+      _actor: unknown,
+      _roomId: string,
+      _key: string,
+      afterCommit?: (event: { removedSessionIds: string[] }) => void,
+    ) => {
+      afterCommit?.({ removedSessionIds: ['private-session-id'] });
+      return { stateVersion: 24 };
+    }),
+    snapshot: vi.fn(async () => ({ id: 'room-1', stateVersion: 24, status: 'PLAYING' })),
     transfer: vi.fn(async () => ({ id: 'transfer-1', status: 'EXECUTED', stateVersion: 22 })),
   };
   const app = await buildApiApp({
@@ -158,6 +168,27 @@ describe('room join route contract', () => {
 
     expect(response.statusCode).toBe(400);
     expect(accounts.joinRoom).not.toHaveBeenCalled();
+  });
+});
+
+describe('room start route contract', () => {
+  it('passes the post-commit callback and keeps removed Session identifiers out of HTTP responses', async () => {
+    const { app, games, headers } = await routeHarness();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/start',
+      headers: { ...headers, 'idempotency-key': 'start-key' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(games.start).toHaveBeenCalledWith(
+      expect.any(Object),
+      'room-1',
+      'start-key',
+      expect.any(Function),
+    );
+    expect(response.json()).toEqual({ id: 'room-1', stateVersion: 24, status: 'PLAYING' });
+    expect(response.body).not.toContain('private-session-id');
   });
 });
 

@@ -588,6 +588,68 @@ test('retries the current room subscription after rejection and reverse control 
   }
 });
 
+test('returns a member removed at start to the room list', async ({ page }) => {
+  const httpServer = createServer();
+  const socketServer = new SocketServer(httpServer, {
+    cors: { origin: 'http://localhost:3000', credentials: true },
+    allowRequest: (request, callback) => callback(null, request.headers.cookie?.includes('task7_start_removal=1') ?? false),
+  });
+  const socketIds = new Set<string>();
+  let removed = false;
+  socketServer.on('connection', (socket) => {
+    socketIds.add(socket.id);
+    socket.on('disconnect', () => socketIds.delete(socket.id));
+    socket.on('room.subscribe', ({ roomId }: { roomId: string }) => { void socket.join(roomId); });
+    socket.on('room.unsubscribe', ({ roomId }: { roomId: string }) => { void socket.leave(roomId); });
+  });
+  await listenForSocketTest(httpServer);
+  await page.context().addCookies([{ name: 'task7_start_removal', value: '1', url: 'http://localhost:4000' }]);
+  const lobbyRoom = {
+    ...baseRoom,
+    status: 'LOBBY' as const,
+    characterId: null,
+    myCharacter: null,
+    isBank: false,
+  };
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: removed ? [] : [lobbyRoom] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({
+    json: removed ? [{ ...lobbyRoom, status: 'PLAYING', mine: false }] : [lobbyRoom],
+  }));
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: null, playerId: null, isBank: false, activeHere: true }, [], 'LOBBY'),
+  }));
+
+  try {
+    await page.goto('http://localhost:3000/');
+    await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+    await expect(page).toHaveURL(/\/rooms\/room-1\/seats$/);
+    await expect.poll(() => socketIds.size).toBeGreaterThan(0);
+
+    removed = true;
+    for (const socketId of socketIds) {
+      socketServer.sockets.sockets.get(socketId)?.emit('room.subscription-rejected', {
+        roomId: 'room-1',
+        reason: 'ROOM_STARTED_WITHOUT_CAPABILITY',
+      });
+    }
+
+    await expect(page).toHaveURL(/\/rooms$/);
+    await expect(page.getByRole('alert')).toContainText(
+      '游戏已开始，你因未选择人物或银行身份已退出房间',
+    );
+    await expect(page.getByRole('region', { name: '我参与的游戏' }))
+      .not.toContainText('碎玉轩夜局');
+    await expect(page.getByRole('region', { name: '可加入房间' }))
+      .toContainText('碎玉轩夜局');
+  } finally {
+    await page.close();
+    socketServer.disconnectSockets(true);
+    await socketServer.close();
+  }
+});
+
 test('socket seat refresh applies global session invalidation', async ({ page }) => {
   const httpServer = createServer();
   const socketServer = new SocketServer(httpServer, {
