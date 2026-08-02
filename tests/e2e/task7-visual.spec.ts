@@ -372,6 +372,9 @@ test('landing, login, long lobby, profile dialog, and admin remain accessible', 
     await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
     await assertSurface(page);
     await tabTo(page, dashboardTab);
+    await page.keyboard.press('Home');
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(dashboardTab).toBeFocused();
     await page.keyboard.press('ArrowRight');
     await expect(page).toHaveURL(/\/admin\/accounts$/);
     await expect(accountTab).toHaveAttribute('aria-selected', 'true');
@@ -383,7 +386,11 @@ test('landing, login, long lobby, profile dialog, and admin remain accessible', 
     await assertSurface(page);
     await page.keyboard.press('End');
     await expect(page).toHaveURL(/\/admin\/logs$/);
-    await expect(page.getByRole('tab', { name: '安全日志' })).toBeFocused();
+    const logsTab = page.getByRole('tab', { name: '安全日志' });
+    await expect(logsTab).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(page).toHaveURL(/\/admin\/logs$/);
+    await expect(logsTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('Home');
     await expect(page).toHaveURL(/\/admin$/);

@@ -762,6 +762,7 @@ test('socket seat refresh applies global session invalidation', async ({ page })
     await expect.poll(() => invalidSnapshotReads).toBeGreaterThan(0);
 
     await expect(page.getByRole('heading', { name: '账号登录' })).toBeVisible();
+    await expect(page).toHaveURL('http://localhost:3000/login');
     await expect(page.getByRole('main').getByRole('alert'))
       .toHaveText('当前登录已失效，请重新登录');
   } finally {

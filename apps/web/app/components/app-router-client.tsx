@@ -1154,6 +1154,8 @@ export default function AppRouterClient({
   const activeRoomTransition = useRef<number | null>(null);
   const snapshotRequestGeneration = useRef(0);
   const roomStateVersion = useRef(-1);
+  const sessionInvalidating = useRef(false);
+  const settlementRouteRequest = useRef<string | null>(null);
   const accountSocket = useRef<ReturnType<typeof io> | null>(null);
   const socketRoomSubscription = useRef<string | null>(null);
   const roomInvalidator = useRef<(() => void) | null>(null);
@@ -1202,6 +1204,7 @@ export default function AppRouterClient({
     );
     if (!routeError) return;
     setError(routeError);
+    if (page === "login") sessionInvalidating.current = false;
     window.history.replaceState(
       window.history.state,
       "",
@@ -1214,6 +1217,7 @@ export default function AppRouterClient({
     const publicPage =
       page === "home" || page === "login" || page === "forbidden";
     if (!account && !publicPage) {
+      if (sessionInvalidating.current) return;
       go(
         `/login?next=${encodeURIComponent(roomId ? roomPath(page === "player" ? "player" : page === "bank" ? "bank" : page === "settlement" ? "settlement" : page === "finish" ? "finish" : "seats", roomId) : page === "profile" ? "/profile" : page.startsWith("admin") ? "/admin" : "/rooms")}`,
         true,
@@ -1221,6 +1225,7 @@ export default function AppRouterClient({
       return;
     }
     if (!account) return;
+    if (page !== "settlement") settlementRouteRequest.current = null;
     if (page === "rooms") {
       void loadRooms().catch((caught) => void handleFailure(caught));
       return;
@@ -1253,6 +1258,8 @@ export default function AppRouterClient({
       return;
     }
     if (page === "settlement" && roomId) {
+      if (settlementRouteRequest.current === roomId) return;
+      settlementRouteRequest.current = roomId;
       const owner = beginRoomTransition(roomId);
       void runRoomTransition(owner, () => fetchSettlement(owner));
       return;
@@ -1386,6 +1393,7 @@ export default function AppRouterClient({
   }
 
   function invalidateLogin() {
+    sessionInvalidating.current = true;
     clearPassword();
     clearPendingIntents();
     clearRoomState();
