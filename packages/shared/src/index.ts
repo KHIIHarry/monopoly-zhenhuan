@@ -67,6 +67,18 @@ export function calculateToll(input: { tolls: number[]; level: number; mortgaged
   return input.tolls[input.level] ?? 0;
 }
 
+export function calculatePropertyBankSaleAmount(input: {
+  purchasePrice: number;
+  mortgagePrice: number;
+  mortgaged: boolean;
+  redemptionFee: number;
+}) {
+  const amount = input.mortgaged
+    ? input.purchasePrice - input.mortgagePrice - input.redemptionFee
+    : input.purchasePrice;
+  return Math.max(0, amount);
+}
+
 export function applySkill(code: string, input: SkillInput, characters: MasterCharacter[]): SkillInput {
   const config = characters.find((character) => character.skill.code === code)?.skill.config ?? {};
   switch (code) {

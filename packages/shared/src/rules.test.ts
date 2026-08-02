@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import masterData from '../../../甄嬛传大富翁_master-data.json';
-import { applySkill, calculateToll, loadMasterData, realtimeToastEventSchema, roll2d6, transferFailureReason } from './index.js';
+import { applySkill, calculatePropertyBankSaleAmount, calculateToll, loadMasterData, realtimeToastEventSchema, roll2d6, transferFailureReason } from './index.js';
 
 describe('master data', () => {
   it('loads exactly 26 properties without recalculating values', () => {
@@ -15,6 +15,17 @@ describe('2d6', () => {
   it('uses two independent six-sided dice', () => {
     const values = [0, 0.999999];
     expect(roll2d6(() => values.shift() ?? 0)).toEqual({ dice: [1, 6], total: 7 });
+  });
+});
+
+describe('property bank sale amount', () => {
+  it.each([
+    [{ purchasePrice: 1000, mortgagePrice: 500, mortgaged: false, redemptionFee: 200 }, 1000],
+    [{ purchasePrice: 1000, mortgagePrice: 500, mortgaged: true, redemptionFee: 200 }, 300],
+    [{ purchasePrice: 1000, mortgagePrice: 500, mortgaged: true, redemptionFee: 0 }, 500],
+    [{ purchasePrice: 1000, mortgagePrice: 500, mortgaged: true, redemptionFee: 800 }, 0],
+  ])('calculates %#', (input, expected) => {
+    expect(calculatePropertyBankSaleAmount(input)).toBe(expected);
   });
 });
 
