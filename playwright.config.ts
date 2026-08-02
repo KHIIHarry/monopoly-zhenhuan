@@ -11,6 +11,7 @@ export default {
   tsconfig: 'tests/e2e/tsconfig.json',
   testDir: './tests/e2e',
   fullyParallel: true,
+  workers: externalStack ? 1 : undefined,
   retries: process.env.CI ? 2 : 0,
   reporter: 'list',
   use: {

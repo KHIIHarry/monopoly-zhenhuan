@@ -59,6 +59,9 @@ import {
 } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const SESSION_INVALID_MESSAGE = "当前登录已失效，请重新登录";
+const ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE =
+  "游戏已开始，你因未选择人物或银行身份已退出房间";
 
 const characters = [
   { id: "zhenhuan", name: "钮祜禄·甄嬛" },
@@ -1085,6 +1088,9 @@ const formatRoomLifecycleTime = (value: string | null, emptyLabel: string) => {
   return `${date.getFullYear()}年${String(date.getMonth() + 1).padStart(2, "0")}月${String(date.getDate()).padStart(2, "0")}日 ${weekday} ${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
 };
 let lastFocusOutsideDialog: HTMLElement | null = null;
+let pendingRouteError: string | null = null;
+let pendingAdminTabFocus: string | null = null;
+let suppressNextRouteHeadingFocus = false;
 
 export default function AppRouterClient({
   page,
@@ -1186,6 +1192,12 @@ export default function AppRouterClient({
   }, []);
 
   useEffect(() => {
+    if (!pendingRouteError) return;
+    setError(pendingRouteError);
+    pendingRouteError = null;
+  }, [page]);
+
+  useEffect(() => {
     if (!authChecked) return;
     const publicPage =
       page === "home" || page === "login" || page === "forbidden";
@@ -1262,6 +1274,10 @@ export default function AppRouterClient({
   }, []);
 
   useEffect(() => {
+    if (suppressNextRouteHeadingFocus) {
+      suppressNextRouteHeadingFocus = false;
+      return;
+    }
     const heading = document.querySelector("h1");
     if (heading instanceof HTMLElement) {
       heading.tabIndex = -1;
@@ -1360,13 +1376,14 @@ export default function AppRouterClient({
     }
   }
 
-  function invalidateLogin(message = "当前登录已失效，请重新登录") {
+  function invalidateLogin(message = SESSION_INVALID_MESSAGE) {
     clearPassword();
     clearPendingIntents();
     clearRoomState();
     setAccount(null);
     setRooms([]);
     setError(message);
+    pendingRouteError = message;
     go("/login", true);
   }
 
@@ -1734,12 +1751,6 @@ export default function AppRouterClient({
       );
       if (!result.ok || !ownsRoom(owner)) return;
       if (await fetchSeats(owner, undefined, "AUTO")) {
-        const socket = accountSocket.current;
-        socketRoomSubscription.current = null;
-        if (socket?.connected) {
-          socket.emit("room.subscribe", { roomId });
-          socketRoomSubscription.current = roomId;
-        }
         result.confirm();
       }
     });
@@ -1953,8 +1964,9 @@ export default function AppRouterClient({
         socketRoomSubscription.current = null;
       if (notification?.reason === "ROOM_STARTED_WITHOUT_CAPABILITY") {
         clearRoomState();
+        pendingRouteError = ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE;
         go("/rooms", true);
-        setError("游戏已开始，你因未选择人物或银行身份已退出房间");
+        setError(ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE);
         void loadRooms().catch((caught) => void handleFailure(caught));
         return;
       }
@@ -3274,6 +3286,14 @@ function AdminView({
   const [roomSaveState, setRoomSaveState] = useState<
     "IDLE" | "SAVING" | "SUCCESS" | "ERROR"
   >("IDLE");
+
+  useEffect(() => {
+    if (pendingAdminTabFocus !== initialTab) return;
+    pendingAdminTabFocus = null;
+    window.requestAnimationFrame(() =>
+      document.getElementById(`admin-tab-${initialTab.toLowerCase()}`)?.focus(),
+    );
+  }, [initialTab]);
   const [roomLifecycleNotice, setRoomLifecycleNotice] = useState("");
   const accountSaveTimer = useRef<number | null>(null);
   const roomSaveTimer = useRef<number | null>(null);
@@ -3527,6 +3547,10 @@ function AdminView({
     { id: "LOGS", label: "安全日志" },
   ] as const;
   function activateTab(next: typeof tab, focus = false) {
+    if (focus) {
+      pendingAdminTabFocus = next;
+      suppressNextRouteHeadingFocus = true;
+    }
     onTab(next);
     if (focus)
       window.requestAnimationFrame(() =>

@@ -518,6 +518,7 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
       const revokeResponse = await secondDeviceContext.request.delete(`${config.apiUrl}/api/auth/sessions/${firstDeviceSession!.id}`);
       if (!revokeResponse.ok()) throw new Error(`DELETE /api/auth/sessions/:id failed with ${revokeResponse.status()}: ${await revokeResponse.text()}`);
       await expect(playerOnePage.getByRole('heading', { name: '账号登录' })).toBeVisible();
+      await expect(playerOnePage.getByText('当前登录已失效，请重新登录')).toBeVisible();
       expect(await database.accountSession.findUniqueOrThrow({ where: { id: firstDeviceSession!.id }, select: { revokeReason: true } }))
         .toMatchObject({ revokeReason: 'USER_REVOKED' });
     } finally {

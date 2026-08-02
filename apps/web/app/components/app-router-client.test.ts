@@ -246,8 +246,9 @@ describe('room completion regressions', () => {
       component.indexOf('const onRoomToast'),
     );
 
+    expect(component).toMatch(/const ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE =\s*"游戏已开始，你因未选择人物或银行身份已退出房间";/);
     expect(handler).toContain('{ roomId?: unknown; reason?: unknown }');
-    expect(handler).toMatch(/notification\?\.reason === "ROOM_STARTED_WITHOUT_CAPABILITY"[\s\S]*?clearRoomState\(\);[\s\S]*?go\("\/rooms", true\);[\s\S]*?setError\("游戏已开始，你因未选择人物或银行身份已退出房间"\);[\s\S]*?loadRooms\(\)/);
+    expect(handler).toMatch(/notification\?\.reason === "ROOM_STARTED_WITHOUT_CAPABILITY"[\s\S]*?clearRoomState\(\);[\s\S]*?pendingRouteError = ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE;[\s\S]*?go\("\/rooms", true\);[\s\S]*?setError\(ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE\);[\s\S]*?loadRooms\(\)/);
     expect(handler).toMatch(/snapshotRequestGeneration\.current \+= 1;\s*refresh\(\);/);
   });
 

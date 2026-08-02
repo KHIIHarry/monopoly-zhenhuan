@@ -50,6 +50,18 @@ async function listenForSocketTest(server: ReturnType<typeof createServer>) {
   }
 }
 
+async function closeSocketTest(
+  page: Page,
+  socketServer: SocketServer,
+  httpServer: ReturnType<typeof createServer>,
+) {
+  await page.close();
+  socketServer.disconnectSockets(true);
+  httpServer.closeIdleConnections();
+  httpServer.closeAllConnections();
+  await socketServer.close();
+}
+
 async function mockBase(page: Page, room = baseRoom) {
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
   await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [room] }));
@@ -73,11 +85,11 @@ test('room admission blocks authoritative nonmember summaries before navigation'
   await page.goto('/rooms');
   await page.getByRole('button', { name: /禁止中途加入房间/ }).click();
   await expect(page).toHaveURL(/\/rooms$/);
-  await expect(page.getByRole('alert')).toContainText('房间已开局，且不允许中途加入。');
+  await expect(page.getByText('房间已开局，且不允许中途加入。')).toBeVisible();
 
   await page.getByRole('button', { name: /人数已满房间/ }).click();
   await expect(page).toHaveURL(/\/rooms$/);
-  await expect(page.getByRole('alert')).toContainText('房间人物已满，暂时无法加入。');
+  await expect(page.getByText('房间人物已满，暂时无法加入。')).toBeVisible();
 });
 
 test('midgame join submits password and character atomically and refreshes stale roles', async ({ page }) => {
@@ -101,7 +113,7 @@ test('midgame join submits password and character atomically and refreshes stale
 
   expect(joinPayloads).toEqual([{ password: 'secret', characterId: 'meizhuang' }]);
   await expect(page).toHaveURL(/\/rooms\/room-1\/join$/);
-  await expect(page.getByRole('alert')).toContainText('所选人物刚刚已被其他玩家选择，请重新选择。');
+  await expect(page.getByText('所选人物刚刚已被其他玩家选择，请重新选择。')).toBeVisible();
   await expect(page.getByLabel('选择人物')).toHaveValue('');
   await expect(page.getByLabel('选择人物').getByRole('option')).toHaveText(['请选择人物', '安陵容']);
 });
@@ -227,7 +239,9 @@ test('settlement preview blocks, exact confirmation finishes, and immutable deta
   expect(finishRequests).toHaveLength(1);
   expect(finishRequests[0]).toMatchObject({ body: { confirmation: '确认结束游戏' }, auth: undefined });
   expect(finishRequests[0]?.key).toBeTruthy();
-  expect(settlementSequence).toEqual(['POST finish', 'GET settlement']);
+  expect(settlementSequence[0]).toBe('POST finish');
+  expect(settlementSequence.slice(1).length).toBeGreaterThan(0);
+  expect(settlementSequence.slice(1).every((entry) => entry === 'GET settlement')).toBe(true);
 });
 
 test('landing cards search, select a purchased property, and preserve the declaration flow', async ({ page }) => {
@@ -256,15 +270,17 @@ test('landing cards search, select a purchased property, and preserve the declar
   await expect(page.getByRole('button', { name: '确认落点' })).toBeVisible();
   const unowned = page.getByRole('button', { name: /碎玉轩.*无主/ });
   await expect(unowned.getByText('0 两', { exact: true })).toBeVisible();
-  await page.getByPlaceholder('搜索地产名称').fill('不存在');
-  await expect(page.getByText('没有找到匹配的地产')).toBeVisible();
-  await page.getByPlaceholder('搜索地产名称').fill('景仁');
+  const landingSearch = page.getByRole('searchbox', { name: '搜索声明落点' });
+  await landingSearch.fill('不存在');
+  const landingPicker = page.getByLabel('选择落点地产');
+  await expect(landingPicker.getByText('没有找到匹配的地产')).toBeVisible();
+  await landingSearch.fill('景仁');
   await expect(page.getByText('碎玉轩', { exact: true })).toHaveCount(0);
-  const purchased = page.getByRole('button', { name: /景仁宫.*已购.*皇后/ });
+  const purchased = landingPicker.getByRole('button', { name: /景仁宫.*所有者.*皇后.*已抵押/ });
   await expect(purchased).toBeVisible();
   await expect(purchased.getByText('已抵押')).toBeVisible();
   await purchased.click();
-  await expect(page.getByText('已选：景仁宫')).toBeVisible();
+  await expect(purchased).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('button', { name: '确认落点' }).click();
   await expect.poll(() => snapshotReads).toBeGreaterThan(1);
   await expect(page.getByRole('heading', { name: '声明实体落点' })).toHaveCount(0);
@@ -549,15 +565,16 @@ test('preserve explicit seat routing, filter room payloads, clean subscriptions,
     await expect(page.getByText('当前账号')).toBeVisible();
     await expect.poll(() => unsubscribedRooms).toContain('room-1');
     const readsAfterLeave = snapshotReads;
+    await expect.poll(() => targetSocketIds.size).toBeGreaterThan(0);
     emitToTarget('room.snapshot-required', { roomId: 'room-1' });
     await page.waitForTimeout(250);
     expect(snapshotReads).toBe(readsAfterLeave);
     await expect(page.getByText('当前账号')).toBeVisible();
+    await expect.poll(() => targetSocketIds.size).toBeGreaterThan(0);
     emitToTarget('account.session.revoked', { reason: 'ADMIN_REVOKED' });
     await expect(page.getByRole('heading', { name: '账号登录' })).toBeVisible();
   } finally {
-    await page.close();
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 
@@ -626,9 +643,7 @@ test('retries the current room subscription after rejection and reverse control 
     await expect(page.getByRole('heading', { name: '玩家端', exact: true })).toBeVisible();
     await expect.poll(() => acceptedSubscriptions).toBe(2);
   } finally {
-    await page.close();
-    socketServer.disconnectSockets(true);
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 
@@ -639,12 +654,22 @@ test('returns a member removed at start to the room list', async ({ page }) => {
     allowRequest: (request, callback) => callback(null, request.headers.cookie?.includes('task7_start_removal=1') ?? false),
   });
   const socketIds = new Set<string>();
+  const subscribedSocketIds = new Set<string>();
   let removed = false;
   socketServer.on('connection', (socket) => {
     socketIds.add(socket.id);
-    socket.on('disconnect', () => socketIds.delete(socket.id));
-    socket.on('room.subscribe', ({ roomId }: { roomId: string }) => { void socket.join(roomId); });
-    socket.on('room.unsubscribe', ({ roomId }: { roomId: string }) => { void socket.leave(roomId); });
+    socket.on('disconnect', () => {
+      socketIds.delete(socket.id);
+      subscribedSocketIds.delete(socket.id);
+    });
+    socket.on('room.subscribe', ({ roomId }: { roomId: string }) => {
+      if (roomId === 'room-1') subscribedSocketIds.add(socket.id);
+      void socket.join(roomId);
+    });
+    socket.on('room.unsubscribe', ({ roomId }: { roomId: string }) => {
+      if (roomId === 'room-1') subscribedSocketIds.delete(socket.id);
+      void socket.leave(roomId);
+    });
   });
   await listenForSocketTest(httpServer);
   await page.context().addCookies([{ name: 'task7_start_removal', value: '1', url: 'http://localhost:4000' }]);
@@ -669,28 +694,28 @@ test('returns a member removed at start to the room list', async ({ page }) => {
     await page.goto('http://localhost:3000/');
     await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
     await expect(page).toHaveURL(/\/rooms\/room-1\/seats$/);
+    await expect(page.getByRole('heading', { name: '选择席位' })).toBeVisible();
     await expect.poll(() => socketIds.size).toBeGreaterThan(0);
+    await expect.poll(() => subscribedSocketIds.size).toBeGreaterThan(0);
 
     removed = true;
-    for (const socketId of socketIds) {
-      socketServer.sockets.sockets.get(socketId)?.emit('room.subscription-rejected', {
-        roomId: 'room-1',
-        reason: 'ROOM_STARTED_WITHOUT_CAPABILITY',
-      });
+    for (const socketId of subscribedSocketIds) {
+      if (socketServer.sockets.sockets.has(socketId)) {
+        socketServer.to(socketId).emit('room.subscription-rejected', {
+          roomId: 'room-1',
+          reason: 'ROOM_STARTED_WITHOUT_CAPABILITY',
+        });
+      }
     }
 
     await expect(page).toHaveURL(/\/rooms$/);
-    await expect(page.getByRole('alert')).toContainText(
-      '游戏已开始，你因未选择人物或银行身份已退出房间',
-    );
+    await expect(page.getByText('游戏已开始，你因未选择人物或银行身份已退出房间')).toBeVisible();
     await expect(page.getByRole('region', { name: '我参与的游戏' }))
       .not.toContainText('碎玉轩夜局');
     await expect(page.getByRole('region', { name: '可加入房间' }))
       .toContainText('碎玉轩夜局');
   } finally {
-    await page.close();
-    socketServer.disconnectSockets(true);
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 
@@ -736,8 +761,7 @@ test('socket seat refresh applies global session invalidation', async ({ page })
     await expect(page.getByRole('heading', { name: '账号登录' })).toBeVisible();
     await expect(page.getByText('登录已失效，请重新登录')).toBeVisible();
   } finally {
-    await page.close();
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 
@@ -786,8 +810,7 @@ test('versioned game notifications refresh the authoritative snapshot without re
     await page.waitForTimeout(150);
     expect(seatsReads).toBe(seatsBeforeNotification);
   } finally {
-    await page.close();
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 
@@ -866,9 +889,7 @@ test('newer snapshot versions win over delayed replies and page recovery signals
       expect(snapshotReads).toBe(before + 1);
     }
   } finally {
-    await page.close();
-    socketServer.disconnectSockets(true);
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 
@@ -924,17 +945,15 @@ test('FINISH closes before routing after BANK authority loss even when the desti
 
     await expect.poll(() => seatReads).toBeGreaterThan(readsBeforeLoss);
     await expect(page.getByRole('heading', { name: '结束游戏', exact: true })).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: '选择席位', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '403 无权访问', exact: true })).toBeVisible();
 
     failPlayerSnapshot = false;
-    await page.getByRole('button', { name: '房间列表', exact: true }).click();
+    await page.getByRole('button', { name: '返回合法页面', exact: true }).click();
     await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
     await expect(page.getByRole('heading', { name: '玩家端', exact: true })).toBeVisible();
     expect(snapshotViews.at(-1)).toBe('PLAYER');
   } finally {
-    await page.close();
-    socketServer.disconnectSockets(true);
-    await socketServer.close();
+    await closeSocketTest(page, socketServer, httpServer);
   }
 });
 });

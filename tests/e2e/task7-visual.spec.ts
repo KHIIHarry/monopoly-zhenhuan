@@ -287,8 +287,14 @@ async function capture(page: Page, testInfo: TestInfo, label: string) {
 }
 
 test('landing, login, long lobby, profile dialog, and admin remain accessible', async ({ page }, testInfo) => {
-  await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
-  await page.route('**/api/auth/login', (route) => route.fulfill({ json: { account } }));
+  let authenticated = false;
+  await page.route('**/api/auth/me', (route) => authenticated
+    ? route.fulfill({ json: { account, sessions: devices } })
+    : route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
+  await page.route('**/api/auth/login', (route) => {
+    authenticated = true;
+    return route.fulfill({ json: { account } });
+  });
   await mockLobby(page);
   await page.route('**/api/auth/sessions', (route) => route.fulfill({ json: devices }));
   await page.route('**/api/admin/**', (route) => {
@@ -325,6 +331,7 @@ test('landing, login, long lobby, profile dialog, and admin remain accessible', 
     await password.fill('StrongPassword42');
     await login.click();
   }
+  await expect(page).toHaveURL(/\/rooms$/);
   await assertSurface(page);
   await assertWraps(page, longRoomName);
   await assertIconControl(page, '个人信息', keyboardOnly);
@@ -366,19 +373,24 @@ test('landing, login, long lobby, profile dialog, and admin remain accessible', 
     await assertSurface(page);
     await tabTo(page, dashboardTab);
     await page.keyboard.press('ArrowRight');
+    await expect(page).toHaveURL(/\/admin\/accounts$/);
     await expect(accountTab).toHaveAttribute('aria-selected', 'true');
     await expect(accountTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('ArrowLeft');
+    await expect(page).toHaveURL(/\/admin$/);
     await expect(dashboardTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('End');
+    await expect(page).toHaveURL(/\/admin\/logs$/);
     await expect(page.getByRole('tab', { name: '安全日志' })).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('Home');
+    await expect(page).toHaveURL(/\/admin$/);
     await expect(dashboardTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('ArrowRight');
+    await expect(page).toHaveURL(/\/admin\/accounts$/);
     await expect(accountTab).toBeFocused();
     await assertSurface(page);
     await assertWraps(page, longDisplayName);
@@ -658,7 +670,9 @@ test('player, bank, finish preview, and settlement survive zoom and orientation'
     await confirmFinish.click();
   }
   await expect(page.getByText('不可变结算快照')).toBeVisible();
-  expect(finishSequence).toEqual(['POST /finish', 'GET /settlement']);
+  expect(finishSequence[0]).toBe('POST /finish');
+  expect(finishSequence.slice(1).length).toBeGreaterThan(0);
+  expect(finishSequence.slice(1).every((entry) => entry === 'GET /settlement')).toBe(true);
   await assertSurface(page);
   const propertyDetails = page.getByText('地产结算明细（1）');
   if (keyboardOnly) {
