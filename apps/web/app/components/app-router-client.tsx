@@ -17,6 +17,7 @@ import {
 } from "@zhenhuan/shared";
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
+import { PlayerAssetAccordion } from "./player-asset-overview";
 import { createToastQueue, type ToastInput, type ToastItem } from "./toast-queue";
 import {
   bankApprovalFailureToast,
@@ -4678,9 +4679,9 @@ function Workbench({
   finish: () => void;
   leave: () => void;
 }) {
-  const [playerTab, setPlayerTab] = useState<"HOME" | "PROPERTY" | "LEDGER">(
-    "HOME",
-  );
+  const [playerTab, setPlayerTab] = useState<
+    "HOME" | "OVERVIEW" | "PROPERTY" | "LEDGER"
+  >("HOME");
   const [bankTab, setBankTab] = useState<
     "SUMMARY" | "APPROVAL" | "PROPERTY" | "LEDGER" | "TRANSACTION"
   >("SUMMARY");
@@ -4807,6 +4808,12 @@ function Workbench({
               onClick={() => setPlayerTab("HOME")}
             />
             <Nav
+              active={playerTab === "OVERVIEW"}
+              icon={<Users />}
+              label="概览"
+              onClick={() => setPlayerTab("OVERVIEW")}
+            />
+            <Nav
               active={playerTab === "PROPERTY"}
               icon={<Landmark />}
               label="地产"
@@ -4889,7 +4896,7 @@ function PlayerView({
   snapshot: Snapshot;
   skillEnabled: boolean;
   busy: boolean;
-  tab: "HOME" | "PROPERTY" | "LEDGER";
+  tab: "HOME" | "OVERVIEW" | "PROPERTY" | "LEDGER";
   action: ActionRunner;
   showNotice: (message: string) => void;
   showToast: (toast: ToastInput) => void;
@@ -5639,6 +5646,18 @@ function PlayerView({
               .filter((entry) => entry.playerId === me.id)
               .slice(0, 3)}
             compact
+          />
+        </>
+      )}
+      {tab === "OVERVIEW" && (
+        <>
+          <SectionTitle
+            title="玩家资产概览"
+            action={snapshot.players.length + " 人"}
+          />
+          <PlayerAssetAccordion
+            players={snapshot.players}
+            properties={snapshot.properties}
           />
         </>
       )}
@@ -6725,7 +6744,10 @@ function BankView({
             title="玩家总览"
             action={`${snapshot.players.length} 人`}
           />
-          <PlayerList players={snapshot.players} />
+          <PlayerAssetAccordion
+            players={snapshot.players}
+            properties={snapshot.properties}
+          />
           <SectionTitle title="待审批" action={`${pending.length} 项`} />
           {pending.length ? (
             <ApprovalList
@@ -7688,27 +7710,6 @@ function AuditList({ entries }: { entries: AuditEntry[] }) {
           </div>
           <p>{entry.reason?.trim() || "系统操作"}</p>
         </article>
-      ))}
-    </div>
-  );
-}
-
-function PlayerList({ players }: { players: Player[] }) {
-  return (
-    <div className="player-list">
-      {players.map((player) => (
-        <div key={player.id}>
-          <span className="avatar">{player.name[0]}</span>
-          <div>
-            <strong>{player.name}</strong>
-            <small>
-              {player.characterId && `${characterName(player.characterId)} · `}
-              停轮 {player.remainingSkipTurns}
-            </small>
-          </div>
-          <b>{formatMoney(player.balance)} 两</b>
-          <ChevronRight />
-        </div>
       ))}
     </div>
   );
