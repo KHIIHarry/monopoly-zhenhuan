@@ -18,6 +18,27 @@ const migrationsThroughV1Safety = [
   '202607260005_transaction_bound_history_capability',
 ];
 
+const migrationsBeforeBankRoleSwaps = [
+  ...migrationsThroughV1Safety,
+  '202607260006_account_room_v2',
+  '202607270007_dual_role_capabilities',
+  '202607270008_playable_player_allocations',
+  '202607270009_inactive_player_allocations',
+  '202607270010_transactional_settlement',
+  '202607270011_security_log_append_only',
+  '202607280012_room_state_version',
+  '202607280013_physical_delete_history_capability',
+  '202607280014_configured_super_admins',
+  '202607280014_physical_delete_ledger_capability',
+  '202607290015_remove_auto_skip_turn',
+];
+
+const migrationsBeforeElectronicStartRewardGuard = [
+  ...migrationsBeforeBankRoleSwaps,
+  '202608010016_bank_role_swaps',
+  '202608010017_physical_landing_lifecycle',
+];
+
 function configuredTestDatabaseUrl() {
   const rawUrl = process.env.TEST_DATABASE_URL;
   if (!rawUrl) return undefined;
@@ -390,4 +411,261 @@ integration('V2.1 populated legacy migration', () => {
       }
     }
   }, 120_000);
+
+  it('cancels legacy in-game pending bank swaps during migration 016', async () => {
+    const schemaName = `bank_swap_migration_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+    const isolatedUrl = new URL(testDatabaseUrl);
+    isolatedUrl.searchParams.set('schema', schemaName);
+    let schemaCreated = false;
+    let db: PrismaClient | undefined;
+
+    try {
+      executeSql(testDatabaseUrl!, `CREATE SCHEMA "${schemaName}";`);
+      schemaCreated = true;
+      for (const migration of migrationsBeforeBankRoleSwaps) {
+        executeMigration(isolatedUrl.toString(), migration);
+      }
+      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      const creator = await db.account.create({ data: {
+        username: `bank-swap-creator-${randomUUID()}`,
+        passwordHash: 'migration-test-password-hash',
+        displayName: 'Bank swap migration creator',
+      } });
+      const requesterAccount = await db.account.create({ data: {
+        username: `bank-swap-requester-${randomUUID()}`,
+        passwordHash: 'migration-test-password-hash',
+        displayName: 'Bank swap migration requester',
+      } });
+      const targetAccount = await db.account.create({ data: {
+        username: `bank-swap-target-${randomUUID()}`,
+        passwordHash: 'migration-test-password-hash',
+        displayName: 'Bank swap migration target',
+      } });
+      const room = await db.room.create({ data: {
+        code: randomUUID().slice(0, 8).toUpperCase(),
+        name: 'Legacy pending bank swap',
+        status: 'PLAYING',
+        ruleProfile: 'CUSTOM',
+        difficulty: 'CUSTOM',
+        participantCount: 5,
+        playerLimit: 5,
+        bankMode: 'DEDICATED_MODERATOR',
+        characterAssignmentMode: 'PLAYER_SELECT',
+        initialBalance: 5_000,
+        diceMode: 'ELECTRONIC',
+        skillEnabled: true,
+        storyMoneyCounterpartyMode: 'TREASURY',
+        transferApprovalRequired: false,
+        startReward: 1_000,
+        victoryMode: 'LAST_SOLVENT',
+        createdBy: creator.username,
+        createdByAccountId: creator.id,
+        visibility: 'PRIVATE',
+        allowMidgameJoin: false,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      } });
+      const requester = await db.roomMembership.create({ data: {
+        roomId: room.id,
+        accountId: requesterAccount.id,
+        displayNameSnapshot: requesterAccount.displayName,
+      } });
+      const target = await db.roomMembership.create({ data: {
+        roomId: room.id,
+        accountId: targetAccount.id,
+        displayNameSnapshot: targetAccount.displayName,
+        isBank: true,
+      } });
+      executeSql(isolatedUrl.toString(), `
+        INSERT INTO "RoleSwapRequest" (
+          "id", "roomId", "requesterMembershipId", "targetMembershipId",
+          "targetCharacterId", "status", "updatedAt"
+        ) VALUES (
+          'legacy-pending-bank-swap', '${room.id}', '${requester.id}', '${target.id}',
+          'legacy-target-character', 'PENDING_BANK', CURRENT_TIMESTAMP
+        );
+      `);
+      await db.$disconnect();
+      db = undefined;
+
+      executeMigration(isolatedUrl.toString(), '202608010016_bank_role_swaps');
+      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+
+      await expect(db.roleSwapRequest.findUniqueOrThrow({
+        where: { id: 'legacy-pending-bank-swap' },
+      })).resolves.toMatchObject({
+        kind: 'CHARACTER',
+        status: 'CANCELLED',
+        rejectionReason: 'ROLE_SWAP_LOBBY_ONLY',
+        resolvedAt: expect.any(Date),
+      });
+      expect(await db.roleSwapRequest.count({
+        where: { roomId: room.id, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } },
+      })).toBe(0);
+    } finally {
+      await db?.$disconnect();
+      if (schemaCreated) {
+        executeSql(testDatabaseUrl!, `DROP SCHEMA "${schemaName}" CASCADE;`);
+      }
+    }
+  }, 120_000);
+
+  it('installs the electronic start-reward guard without rewriting duplicate history', async () => {
+    const schemaName = `start_reward_guard_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+    const isolatedUrl = new URL(testDatabaseUrl);
+    isolatedUrl.searchParams.set('schema', schemaName);
+    let schemaCreated = false;
+    let db: PrismaClient | undefined;
+
+    try {
+      executeSql(testDatabaseUrl!, `CREATE SCHEMA "${schemaName}";`);
+      schemaCreated = true;
+      for (const migration of migrationsBeforeElectronicStartRewardGuard) {
+        executeMigration(isolatedUrl.toString(), migration);
+      }
+
+      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      const creator = await db.account.create({ data: {
+        username: `start-reward-creator-${randomUUID()}`,
+        passwordHash: 'migration-test-password-hash',
+        displayName: 'Start reward migration creator',
+      } });
+      const room = await db.room.create({ data: {
+        code: randomUUID().slice(0, 8).toUpperCase(),
+        name: 'Legacy duplicate start rewards',
+        status: 'PLAYING',
+        ruleProfile: 'CUSTOM',
+        difficulty: 'CUSTOM',
+        participantCount: 2,
+        playerLimit: 5,
+        bankMode: 'DEDICATED_MODERATOR',
+        characterAssignmentMode: 'PLAYER_SELECT',
+        initialBalance: 5_000,
+        diceMode: 'ELECTRONIC',
+        skillEnabled: true,
+        storyMoneyCounterpartyMode: 'TREASURY',
+        transferApprovalRequired: false,
+        startReward: 1_000,
+        victoryMode: 'LAST_SOLVENT',
+        createdBy: creator.username,
+        createdByAccountId: creator.id,
+        visibility: 'PRIVATE',
+        allowMidgameJoin: false,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      } });
+      const membership = await db.roomMembership.create({ data: {
+        roomId: room.id,
+        accountId: creator.id,
+        displayNameSnapshot: creator.displayName,
+      } });
+      const player = await db.player.create({ data: {
+        roomId: room.id,
+        memberId: membership.id,
+        pawnColor: '#ffffff',
+        balance: 5_000,
+      } });
+      const turn = await db.turn.create({ data: {
+        roomId: room.id,
+        turnNumber: 1,
+        playerId: player.id,
+        status: 'ENDED',
+      } });
+      await db.gameRequest.createMany({ data: [
+        {
+          id: 'legacy-start-reward-one',
+          roomId: room.id,
+          type: 'START_REWARD',
+          status: 'EXECUTED',
+          actorPlayerId: player.id,
+          turnId: turn.id,
+          amount: 1_000,
+          idempotencyKey: 'legacy-start-reward-one',
+        },
+        {
+          id: 'legacy-start-reward-two',
+          roomId: room.id,
+          type: 'START_REWARD',
+          status: 'REVERSED',
+          actorPlayerId: player.id,
+          turnId: turn.id,
+          amount: 1_000,
+          idempotencyKey: 'legacy-start-reward-two',
+        },
+      ] });
+      await db.$disconnect();
+      db = undefined;
+
+      executeMigration(isolatedUrl.toString(), '202608010018_electronic_start_reward_turn_guard');
+      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+
+      expect(await db.gameRequest.count({ where: { turnId: turn.id, type: 'START_REWARD' } })).toBe(2);
+      await expect(db.gameRequest.create({ data: {
+        roomId: room.id,
+        type: 'START_REWARD',
+        status: 'PENDING',
+        actorPlayerId: player.id,
+        turnId: turn.id,
+        amount: 1_000,
+        idempotencyKey: 'new-duplicate-start-reward',
+      } })).rejects.toThrow(/one electronic START_REWARD per turn/);
+    } finally {
+      await db?.$disconnect();
+      if (schemaCreated) {
+        executeSql(testDatabaseUrl!, `DROP SCHEMA "${schemaName}" CASCADE;`);
+      }
+    }
+  }, 120_000);
+
+  it('upgrades an already-deployed start-reward unique index to the history-safe trigger', async () => {
+    const schemaName = `start_reward_upgrade_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+    const isolatedUrl = new URL(testDatabaseUrl);
+    isolatedUrl.searchParams.set('schema', schemaName);
+    let schemaCreated = false;
+    let db: PrismaClient | undefined;
+
+    try {
+      executeSql(testDatabaseUrl!, `CREATE SCHEMA "${schemaName}";`);
+      schemaCreated = true;
+      for (const migration of migrationsBeforeElectronicStartRewardGuard) {
+        executeMigration(isolatedUrl.toString(), migration);
+      }
+      executeSql(isolatedUrl.toString(), `
+        CREATE UNIQUE INDEX "GameRequest_one_electronic_start_reward_per_turn"
+          ON "GameRequest"("turnId")
+          WHERE "turnId" IS NOT NULL
+            AND "type" = 'START_REWARD'
+            AND "status" IN ('PENDING', 'APPROVED', 'EXECUTED', 'REVERSED');
+      `);
+
+      executeMigration(
+        isolatedUrl.toString(),
+        '202608020020_electronic_start_reward_history_safe_guard',
+      );
+      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+
+      const indexes = await db.$queryRaw<Array<{ indexname: string }>>`
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = ${schemaName}
+          AND indexname = 'GameRequest_one_electronic_start_reward_per_turn'
+      `;
+      const triggers = await db.$queryRaw<Array<{ trigger_name: string }>>`
+        SELECT trigger.tgname AS trigger_name
+        FROM pg_trigger AS trigger
+        JOIN pg_class AS target ON target.oid = trigger.tgrelid
+        JOIN pg_namespace AS namespace ON namespace.oid = target.relnamespace
+        WHERE namespace.nspname = ${schemaName}
+          AND target.relname = 'GameRequest'
+          AND trigger.tgname = 'GameRequest_one_start_reward_per_turn'
+          AND NOT trigger.tgisinternal
+      `;
+      expect(indexes).toEqual([]);
+      expect(triggers).toEqual([{ trigger_name: 'GameRequest_one_start_reward_per_turn' }]);
+    } finally {
+      await db?.$disconnect();
+      if (schemaCreated) {
+        executeSql(testDatabaseUrl!, `DROP SCHEMA "${schemaName}" CASCADE;`);
+      }
+    }
+  }, 120_000);
+
 });

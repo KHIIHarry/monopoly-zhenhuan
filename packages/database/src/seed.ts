@@ -5,7 +5,7 @@ import { loadMasterData, type RawMasterData } from '@zhenhuan/shared';
 import { prisma } from './index.js';
 
 const source = fileURLToPath(
-  new URL('../../../甄嬛传大富翁_master-data.json', import.meta.url),
+  new URL('../../../monopoly-zhenhuan_master-data.json', import.meta.url),
 );
 
 function bootstrapPasswordHash(password: string) {

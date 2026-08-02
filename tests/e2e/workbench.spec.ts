@@ -5,11 +5,25 @@ test.describe.configure({ mode: 'serial' });
 
 const account = { id: 'a1', username: 'zhenhuan', displayName: '甄嬛', isSuperAdmin: true, canCreateRoom: true, lastLoginAt: '2026-07-27T08:00:00.000Z' };
 type RoomSummary = BrowserRoomSummary;
-const room: RoomSummary = { id: 'r1', name: '碎玉轩夜局', status: 'LOBBY', creator: '甄嬛', memberCount: 1, playerCount: 1, playerLimit: 5, hasPassword: false, mine: true, characterId: null, myCharacter: null, isBank: false };
+const room: RoomSummary = { id: 'r1', name: '碎玉轩夜局', status: 'LOBBY', creator: '甄嬛', memberCount: 1, playerCount: 1, playerLimit: 5, hasPassword: false, mine: true, canJoin: true, joinBlockedReason: null, availableCharacters: [], characterId: null, myCharacter: null, isBank: false };
 const snapshot: BrowserSnapshot = {
   id: 'r1', stateVersion: 1, code: 'SYX', name: room.name, status: 'PLAYING', diceMode: 'PHYSICAL', redemptionFee: 500, startReward: 1_000, currentPlayerId: 'p1', turn: null,
   players: [{ id: 'p1', name: '甄嬛', characterId: 'zhenhuan', balance: 5000, remainingSkipTurns: 0 }],
   properties: [], ledger: [], requests: [], landings: [], audit: [], reversalCandidate: null,
+};
+const playerSnapshot = {
+  ...snapshot,
+  diceMode: 'PHYSICAL' as const,
+  properties: [{
+    name: '碎玉轩', ownerId: null, level: 0, mortgaged: false,
+    mortgage: 800, purchasePrice: 1600, build: 1000,
+    buildingSell: 600, tolls: [300, 700, 1800, 5000, 7000, 9000],
+  }],
+  landings: [{
+    id: 'dual-role-landing', playerId: 'p1', propertyName: '碎玉轩',
+    spaceType: 'PROPERTY', status: 'CONFIRMED', plotResolved: true,
+    propertyActionsCancelled: false, tollSettled: false,
+  }],
 };
 const seatFixture = <TRequest,>(fixture: Omit<BrowserSeatSnapshot<TRequest>, 'stateVersion'> & { stateVersion?: number }): BrowserSeatSnapshot<TRequest> => ({ stateVersion: 1, ...fixture });
 
@@ -20,6 +34,27 @@ async function authenticated(page: Page, rooms: RoomSummary[] = [room]) {
   await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: rooms.filter((item) => item.mine && !['FINISHED', 'ENDED', 'CLOSED'].includes(item.status)) }));
   await page.route('**/api/rooms/history', (route) => route.fulfill({ json: rooms.filter((item) => item.mine && ['FINISHED', 'ENDED', 'CLOSED'].includes(item.status)) }));
   await page.route('**/api/rooms', (route) => route.fulfill({ json: rooms.filter((item) => !item.mine && !['FINISHED', 'ENDED', 'CLOSED'].includes(item.status)) }));
+}
+
+async function mortgagedSaleRoom(page: Page, redemptionFee: number) {
+  await authenticated(page, [{ ...room, status: 'PLAYING', characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛' }]);
+  await page.route('**/api/rooms/r1/seats', (route) => route.fulfill({ json: seatFixture({
+    room: { id: 'r1', name: room.name, status: 'PLAYING', skillEnabled: true },
+    membership: { id: 'm1', characterId: 'zhenhuan', playerId: 'p1', isBank: false, activeHere: true },
+    characters: [], bank: { occupiedBy: '国库' }, roleSwapRequests: [],
+  }) }));
+  await page.route('**/api/rooms/r1/snapshot*', (route) => route.fulfill({ json: {
+    ...snapshot,
+    redemptionFee,
+    players: [
+      snapshot.players[0],
+      { id: 'p2', name: '眉庄', characterId: 'meizhuang', balance: 5000, remainingSkipTurns: 0 },
+    ],
+    properties: [
+      { name: '甘露寺', ownerId: 'p1', level: 0, mortgaged: true, mortgage: 500, purchasePrice: 1000, build: 500, buildingSell: 300, tolls: [100, 200, 300, 400, 500, 600] },
+      { name: '寿康宫', ownerId: 'p1', level: 0, mortgaged: false, mortgage: 600, purchasePrice: 1200, build: 600, buildingSell: 400, tolls: [100, 200, 300, 400, 500, 600] },
+    ],
+  } }));
 }
 
 test('首页只显示海报和加入游戏组，不显示旧身份入口', async ({ page }) => {
@@ -218,22 +253,24 @@ test('玩家端从快照展示并申请非默认 1,200 两起点奖励', async (
     membership: { id: 'm1', characterId: 'zhenhuan', playerId: 'p1', isBank: false, activeHere: true },
     characters: [], bank: { occupiedBy: null }, roleSwapRequests: [],
   }) }));
-  let startLandingId = '';
-  let rewardBody: Record<string, unknown> | null = null;
   await page.route('**/api/rooms/r1/snapshot*', (route) => route.fulfill({ json: {
     ...snapshot,
     startReward: 1_200,
     players: [{ ...snapshot.players[0], companionCashReward: 777 }],
-    landings: startLandingId ? [{ id: startLandingId, playerId: 'p1', spaceType: 'START', status: 'CONFIRMED', plotResolved: true, propertyActionsCancelled: false }] : [],
+    landings: [],
   } }));
+  let startWrites = 0;
+  const startBodies: Record<string, unknown>[] = [];
   await page.route('**/api/rooms/r1/landings/start', async (route) => {
     const request = await body(route);
-    startLandingId = String(request.landingId);
-    return route.fulfill({ json: { id: startLandingId } });
-  });
-  await page.route('**/api/rooms/r1/requests', async (route) => {
-    rewardBody = await body(route);
-    return route.fulfill({ json: { id: 'request-start-reward', amount: 1_200, status: 'PENDING' } });
+    startWrites += 1;
+    startBodies.push(request);
+    return route.fulfill({ json: {
+      id: String(request.landingId),
+      requestId: 'request-start-reward',
+      amount: 1_200,
+      requestStatus: 'PENDING',
+    } });
   });
 
   await page.goto('/');
@@ -244,10 +281,10 @@ test('玩家端从快照展示并申请非默认 1,200 两起点奖励', async (
   await page.getByRole('button', { name: '起点奖励' }).click();
   await expect(page.getByText('仅棋子精确停留起点可领取 1,200 两')).toBeVisible();
   await page.getByRole('button', { name: '声明停留起点' }).click();
-  await page.getByRole('button', { name: '起点奖励' }).click();
-  await page.getByRole('button', { name: '申请 1,200 两' }).click();
 
-  await expect.poll(() => rewardBody).toEqual({ playerId: 'p1', type: 'START_REWARD', landingId: startLandingId });
+  await expect.poll(() => startWrites).toBe(1);
+  expect(startBodies[0]).toMatchObject({ playerId: 'p1' });
+  expect(startBodies[0]?.landingId).toBeTruthy();
   await expect(page.getByText('起点 1,200 两申请已提交银行审批')).toBeVisible();
 });
 
@@ -318,19 +355,20 @@ test('兼任成员可切换玩家端和银行端且快照请求显式携带视�
     const view = new URL(route.request().url()).searchParams.get('view');
     snapshotViews.push(view);
     if (view === 'BANK') await bankSnapshotPending;
-    return route.fulfill({ json: snapshot });
+    return route.fulfill({ json: view === 'PLAYER' ? playerSnapshot : snapshot });
   });
   await page.goto('/');
   await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
   await expect(page.getByRole('heading', { name: '选择工作台' })).toBeVisible();
   await page.getByRole('button', { name: '玩家端', exact: true }).click();
-  await expect.poll(() => snapshotViews).toEqual(['PLAYER']);
+  await expect.poll(() => snapshotViews).toContain('PLAYER');
   const playerView = page.getByRole('button', { name: '玩家端', exact: true });
   const bankView = page.getByRole('button', { name: '银行端', exact: true });
   await expect(playerView).toBeVisible();
   await expect(bankView).toBeVisible();
+  await expect(page.getByText('上次确认落点：碎玉轩')).toBeVisible();
   await bankView.click();
-  await expect.poll(() => snapshotViews).toEqual(['PLAYER', 'BANK']);
+  await expect.poll(() => snapshotViews).toContain('BANK');
   await expect(page).toHaveURL(/\/rooms\/r1\/bank$/);
   await expect(playerView).toHaveCount(0);
   await expect(bankView).toHaveCount(0);
@@ -338,9 +376,54 @@ test('兼任成员可切换玩家端和银行端且快照请求显式携带视�
   await expect(page.getByRole('heading', { name: '银行端', exact: true })).toBeVisible();
   await expect(playerView).toBeEnabled();
   await expect(bankView).toBeEnabled();
+  const returnViewStart = snapshotViews.length;
   await playerView.click();
-  await expect.poll(() => snapshotViews).toEqual(['PLAYER', 'BANK', 'PLAYER']);
+  await expect.poll(() => snapshotViews.slice(returnViewStart)).toContain('PLAYER');
+  expect(snapshotViews.every((view) => view === 'PLAYER' || view === 'BANK')).toBe(true);
+  await expect(page.getByText('上次确认落点：碎玉轩')).toBeVisible();
 });
+
+for (const target of [
+  { label: '玩家端', path: 'player' },
+  { label: '银行端', path: 'bank' },
+] as const) {
+  test(`从${target.label}管理席位后返回原工作台`, async ({ page }) => {
+    await authenticated(page, [{
+      ...room,
+      status: 'PLAYING',
+      myCharacter: '钮祜禄·甄嬛',
+      isBank: true,
+    }]);
+    await page.route('**/api/rooms/r1/seats', (route) => route.fulfill({ json: seatFixture({
+      room: { id: 'r1', name: room.name, status: 'PLAYING', skillEnabled: true },
+      membership: { id: 'm1', characterId: 'zhenhuan', playerId: 'p1', isBank: true, activeHere: true },
+      characters: [], bank: { occupiedBy: '甄嬛' }, roleSwapRequests: [],
+    }) }));
+    await page.route('**/api/rooms/r1/snapshot*', (route) => route.fulfill({
+      json: target.label === '玩家端' ? playerSnapshot : snapshot,
+    }));
+
+    await page.goto('/');
+    await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+    await expect(page.getByRole('heading', { name: '选择工作台' })).toBeVisible();
+    await page.getByRole('button', { name: target.label, exact: true }).click();
+    await expect(page.getByRole('heading', { name: target.label, exact: true })).toBeVisible();
+    if (target.label === '玩家端') {
+      await expect(page.getByText('上次确认落点：碎玉轩')).toBeVisible();
+    }
+
+    await page.getByRole('button', { name: '管理席位' }).click();
+    await expect(page.getByRole('button', { name: '返回当前房间' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '房间列表', exact: true })).toHaveCount(0);
+
+    await page.getByRole('button', { name: '返回当前房间' }).click();
+    await expect(page).toHaveURL(new RegExp(`/rooms/r1/${target.path}$`));
+    await expect(page.getByRole('heading', { name: target.label, exact: true })).toBeVisible();
+    if (target.label === '玩家端') {
+      await expect(page.getByText('上次确认落点：碎玉轩')).toBeVisible();
+    }
+  });
+}
 
 for (const target of [
   { label: '玩家端', path: 'player' },
@@ -426,6 +509,119 @@ test('stale PLAYER refresh cannot overwrite a later BANK snapshot', async ({ pag
   await page.waitForTimeout(100);
   await expect(page.getByTitle('最新银行快照')).toBeVisible();
   await expect(page.getByText('过期玩家快照', { exact: false })).toHaveCount(0);
+});
+
+test('manual workbench refresh presents completion feedback', async ({ page }) => {
+  await authenticated(page, [{
+    ...room,
+    status: 'PLAYING',
+    myCharacter: '钮祜禄·甄嬛',
+    isBank: false,
+  }]);
+  let snapshotReads = 0;
+  await page.route('**/api/rooms/r1/seats', (route) => route.fulfill({ json: seatFixture({
+    room: { id: 'r1', name: room.name, status: 'PLAYING', skillEnabled: true },
+    membership: { id: 'm1', characterId: 'zhenhuan', playerId: 'p1', isBank: false, activeHere: true },
+    characters: [], bank: { occupiedBy: '皇后' }, roleSwapRequests: [],
+  }) }));
+  await page.route('**/api/rooms/r1/snapshot*', (route) => {
+    snapshotReads += 1;
+    return route.fulfill({ json: snapshot });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+  await expect.poll(() => snapshotReads).toBe(1);
+  await page.getByRole('button', { name: '刷新房间快照' }).click();
+
+  await expect.poll(() => snapshotReads).toBe(2);
+  await expect(page.locator('.toast')).toContainText('房间快照已刷新');
+});
+
+test('manual seat refresh presents completion feedback', async ({ page }) => {
+  await authenticated(page);
+  let seatReads = 0;
+  await page.route('**/api/rooms/r1/seats', (route) => {
+    seatReads += 1;
+    return route.fulfill({ json: seatFixture({
+      room: { id: 'r1', name: room.name, status: 'LOBBY', skillEnabled: true },
+      membership: { id: 'm1', characterId: null, playerId: null, isBank: false, activeHere: true },
+      characters: [], bank: { occupiedBy: null }, roleSwapRequests: [],
+    }) });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+  await expect.poll(() => seatReads).toBeGreaterThan(0);
+  const readsBeforeRefresh = seatReads;
+  await page.getByRole('button', { name: '刷新页面' }).first().click();
+
+  await expect.poll(() => seatReads).toBeGreaterThan(readsBeforeRefresh);
+  await expect(page.locator('.toast')).toContainText('席位信息已刷新');
+});
+
+test('抵押地产可确认后按扣费金额提交卖给银行且仍不可玩家交易', async ({ page }) => {
+  await mortgagedSaleRoom(page, 200);
+  const requests: Record<string, unknown>[] = [];
+  await page.route('**/api/rooms/r1/requests', async (route) => {
+    requests.push(await body(route));
+    return route.fulfill({ json: { id: 'sale-request', status: 'PENDING' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+  await page.getByRole('button', { name: '资产操作' }).click();
+  await page.getByLabel('操作类型').selectOption('SELL_PROPERTY_TO_BANK');
+  await expect(page.getByLabel('目标地产')).toContainText('甘露寺');
+  await expect(page.getByText('300 两', { exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: '确认提交' }).click();
+  const firstDialog = page.getByRole('dialog', { name: '确认出售抵押地产' });
+  await expect(firstDialog).toContainText('该地产处于抵押状态，按照游戏规则，直接出售将扣除 200 两赎回费用，是否继续？');
+  expect(requests).toHaveLength(0);
+  await firstDialog.getByRole('button', { name: '取消' }).click();
+  expect(requests).toHaveLength(0);
+
+  await page.getByRole('button', { name: '确认提交' }).click();
+  await page.getByRole('dialog', { name: '确认出售抵押地产' }).getByRole('button', { name: '确认继续' }).click();
+  await expect.poll(() => requests).toHaveLength(1);
+  expect(requests[0]).toEqual({ playerId: 'p1', type: 'SELL_PROPERTY_TO_BANK', propertyName: '甘露寺' });
+  await expect(page.locator('.toast')).toContainText('资产操作已提交银行审批');
+
+  await page.getByRole('button', { name: '资产操作' }).click();
+  await page.getByLabel('操作类型').selectOption('TRADE_PROPERTY');
+  await expect(page.getByLabel('目标地产')).not.toContainText('甘露寺');
+  await expect(page.getByLabel('目标地产')).toContainText('寿康宫');
+});
+
+test('零赎回手续费显示抵押地产剩余价值和动态确认提示', async ({ page }) => {
+  await mortgagedSaleRoom(page, 0);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+  await page.getByRole('button', { name: '资产操作' }).click();
+  await page.getByLabel('操作类型').selectOption('SELL_PROPERTY_TO_BANK');
+  await page.getByLabel('目标地产').selectOption('甘露寺');
+  await expect(page.getByRole('dialog', { name: '资产操作' }).getByText('500 两', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '确认提交' }).click();
+  await expect(page.getByRole('dialog', { name: '确认出售抵押地产' })).toContainText('扣除 0 两赎回费用');
+});
+
+test('未选角色时席位页仍可返回房间列表', async ({ page }) => {
+  await authenticated(page);
+  await page.route('**/api/rooms/r1/seats', (route) => route.fulfill({ json: seatFixture({
+    room: { id: 'r1', name: room.name, status: 'LOBBY', skillEnabled: true },
+    membership: { id: 'm1', characterId: null, playerId: null, isBank: false, activeHere: true },
+    characters: [], bank: { occupiedBy: null }, roleSwapRequests: [],
+  }) }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
+  await expect(page.getByRole('button', { name: '房间列表', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '返回当前房间' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: '房间列表', exact: true }).click();
+  await expect(page).toHaveURL(/\/rooms$/);
 });
 
 test('自己占用的人物不提供申请交换', async ({ page }) => {

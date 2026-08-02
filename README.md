@@ -33,6 +33,8 @@ PostgreSQL 是唯一持久化状态来源。资金、产权、审批、回合、
 - 人物能力和银行能力可由同一成员兼任，但人物 Player、资金和资产只有一份。
 - 离线不会释放人物或银行席位。
 
+房间的赎回手续费默认为 200 两，支持设置为 0，仅可在创建房间和大厅阶段修改。赎回地产需支付“抵押价 + 赎回手续费”；抵押地产也可无需先赎回而申请卖给银行，卖回金额为 `max(0, 购买价 - 抵押价 - 赎回手续费)`。抵押地产卖回仍需银行审批，批准后恢复无主并清除抵押状态。
+
 ## 统一转帐
 
 - 玩家端“转帐”可选择其他人物玩家或银行作为收款对象；收款人使用人物卡片选择，付款人本人不会出现在列表中。
@@ -170,7 +172,7 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml \
 - 本地 `docker compose up -d` 由 API 容器依次生成 Prisma Client、部署 migration、执行幂等 seed，再启动 API。
 - 生产 `docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml up -d` 先由一次性 `migrate` 容器执行 migration 与 seed；该容器成功退出后 API 才启动。
 
-Prisma schema 和 forward-only migrations 位于 `packages/database/prisma/`。seed 从 `甄嬛传大富翁_master-data.json` 校验并写入 26 块地产和五名人物；不会通过清空数据库处理兼容问题。
+Prisma schema 和 forward-only migrations 位于 `packages/database/prisma/`。seed 从 `monopoly-zhenhuan_master-data.json` 校验并写入 26 块地产和五名人物；不会通过清空数据库处理兼容问题。
 
 ## 生产部署
 

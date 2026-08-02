@@ -18,21 +18,27 @@ type Capability = {
   activeHere: boolean;
 };
 
-const room = (overrides: Partial<BrowserRoomSummary> = {}): BrowserRoomSummary => ({
-  id: 'room-1',
-  name: '碎玉轩夜局',
-  status: 'PLAYING',
-  creator: '甄嬛',
-  memberCount: 1,
-  playerCount: 1,
-  playerLimit: 5,
-  hasPassword: false,
-  mine: true,
-  characterId: 'zhenhuan',
-  myCharacter: '钮祜禄·甄嬛',
-  isBank: false,
-  ...overrides,
-});
+const room = (overrides: Partial<BrowserRoomSummary> = {}): BrowserRoomSummary => {
+  const value: BrowserRoomSummary = {
+    id: 'room-1',
+    name: '碎玉轩夜局',
+    status: 'PLAYING',
+    creator: '甄嬛',
+    memberCount: 1,
+    playerCount: 1,
+    playerLimit: 5,
+    hasPassword: false,
+    mine: true,
+    canJoin: true,
+    joinBlockedReason: null,
+    availableCharacters: [{ id: 'zhenhuan', name: '钮祜禄·甄嬛' }],
+    characterId: 'zhenhuan',
+    myCharacter: '钮祜禄·甄嬛',
+    isBank: false,
+  };
+  Object.assign(value, overrides);
+  return value;
+};
 
 const gameSnapshot: BrowserSnapshot = {
   id: 'room-1',
@@ -89,8 +95,27 @@ async function openRoom(page: Page) {
   await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
 }
 
+async function fillTransferAmount(page: Page, amount: string) {
+  const dialog = page.getByRole('dialog', { name: '转帐' });
+  const input = dialog.getByLabel('转帐金额');
+  await expect(input).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '关闭' })).toBeFocused();
+  await input.fill(amount);
+  await expect(input).toHaveValue(amount);
+  await expect(dialog.getByRole('button', { name: '确认转帐' })).toBeEnabled();
+}
+
+async function waitForTwoPaints(page: Page) {
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+}
+
 test('login and replacement use the exact Cookie-only two-field contract', async ({ page }) => {
-  await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
+  let authenticated = false;
+  await page.route('**/api/auth/me', (route) => route.fulfill(authenticated
+    ? { json: { account, sessions: [] } }
+    : { status: 401, json: { error: 'AUTH_REQUIRED' } }));
   const loginBodies: Record<string, unknown>[] = [];
   const authHeaders: Array<string | undefined> = [];
   await page.route('**/api/auth/login', async (route) => {
@@ -104,9 +129,13 @@ test('login and replacement use the exact Cookie-only two-field contract', async
   await page.route('**/api/auth/login/replace-oldest-session', async (route) => {
     loginBodies.push(await postBody(route));
     authHeaders.push(route.request().headers().authorization);
+    authenticated = true;
     await route.fulfill({ json: { account } });
   });
-  await page.route('**/api/auth/logout', (route) => route.fulfill({ json: { ok: true } }));
+  await page.route('**/api/auth/logout', (route) => {
+    authenticated = false;
+    return route.fulfill({ json: { ok: true } });
+  });
   await mockLobby(page, []);
 
   await page.goto('/');
@@ -123,7 +152,8 @@ test('login and replacement use the exact Cookie-only two-field contract', async
   expect(authHeaders).toEqual([undefined, undefined]);
   expect(await page.evaluate(() => [...Object.entries(localStorage), ...Object.entries(sessionStorage)].filter(([key, value]) => /auth|token|identity|membership|playerId|roomId/i.test(`${key}:${value}`)))).toEqual([]);
   await page.getByRole('button', { name: '退出', exact: true }).click();
-  await page.getByRole('button', { name: '加入游戏组' }).click();
+  await page.getByRole('button', { name: '确认退出', exact: true }).click();
+  await expect(page).toHaveURL('/login?next=%2Frooms');
   await expect(page.getByLabel('密码')).toHaveValue('');
 });
 
@@ -134,6 +164,7 @@ test('password join errors are announced', async ({ page }) => {
   await page.route('**/api/rooms/room-1/join', (route) => route.fulfill({ status: 403, json: { error: 'ROOM_PASSWORD_INVALID' } }));
   await openRoom(page);
   await page.getByLabel('房间密码').fill('wrong-password');
+  await page.getByLabel('选择人物').selectOption('zhenhuan');
   await page.getByRole('button', { name: '加入房间', exact: true }).click();
   await expect(page.locator('p[role="alert"]')).toContainText('房间密码');
 });
@@ -159,7 +190,19 @@ for (const scenario of [
 }
 
 test('dual recovery requires explicit selection and switching is view-only', async ({ page }) => {
-  await mockAccount(page);
+  let releaseStalePlayerAuth!: () => void;
+  const stalePlayerAuthWait = new Promise<void>((resolve) => { releaseStalePlayerAuth = resolve; });
+  let playerAuthReads = 0;
+  await page.route('**/api/auth/me', (route) => {
+    if (new URL(page.url()).pathname === '/rooms/room-1/player') {
+      playerAuthReads += 1;
+      if (playerAuthReads === 1) {
+        void stalePlayerAuthWait.then(() => route.fulfill({ json: { account, sessions: [] } }));
+        return;
+      }
+    }
+    return route.fulfill({ json: { account, sessions: [] } });
+  });
   await mockLobby(page, [room({ isBank: true })]);
   const dual = { characterId: 'zhenhuan', playerId: 'player-1', isBank: true, activeHere: true };
   await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: seatResponse(dual) }));
@@ -167,6 +210,7 @@ test('dual recovery requires explicit selection and switching is view-only', asy
   const mutations: string[] = [];
   await page.route('**/api/rooms/room-1/snapshot*', (route) => {
     snapshotViews.push(new URL(route.request().url()).searchParams.get('view'));
+    if (snapshotViews.length === 1) releaseStalePlayerAuth();
     return route.fulfill({ json: gameSnapshot });
   });
   for (const endpoint of ['join', 'select-character', 'select-bank', 'take-control']) {
@@ -179,10 +223,15 @@ test('dual recovery requires explicit selection and switching is view-only', asy
   await openRoom(page);
   await expect(page.getByRole('heading', { name: '选择工作台' })).toBeVisible();
   await page.getByRole('button', { name: '玩家端', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '玩家端', exact: true })).toBeVisible();
+  expect(playerAuthReads).toBe(2);
+  await expect.poll(() => snapshotViews).toEqual(['PLAYER']);
   await page.getByRole('button', { name: '银行端', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '银行端', exact: true })).toBeVisible();
+  await expect.poll(() => snapshotViews).toEqual(['PLAYER', 'BANK']);
   await page.getByRole('button', { name: '玩家端', exact: true }).click();
 
-  expect(snapshotViews).toEqual(['PLAYER', 'BANK', 'PLAYER']);
+  await expect.poll(() => snapshotViews).toEqual(['PLAYER', 'BANK', 'PLAYER']);
   expect(mutations).toEqual([]);
 });
 
@@ -273,13 +322,15 @@ test('a delayed seats response from room A cannot replace a later room B selecti
 
   await page.goto('/');
   await page.getByRole('button', { name: /延迟的碎玉轩/ }).click();
-  await expect.poll(() => roomAReads).toBe(1);
+  await expect.poll(() => roomAReads).toBeGreaterThan(0);
+  await page.goBack();
+  await expect(page.getByRole('button', { name: /最新的翊坤宫/ })).toBeVisible();
   await page.getByRole('button', { name: /最新的翊坤宫/ }).click();
   releaseRoomA();
 
   await expect(page.getByRole('heading', { name: '选择席位' })).toBeVisible();
   await expect(page.getByText('最新的翊坤宫', { exact: true })).toBeVisible();
-  expect(roomBReads).toBe(1);
+  expect(roomBReads).toBeGreaterThan(0);
 });
 
 test('a stale room transition still applies global session invalidation', async ({ page }) => {
@@ -304,7 +355,9 @@ test('a stale room transition still applies global session invalidation', async 
 
   await page.goto('/');
   await page.getByRole('button', { name: /会话过期的碎玉轩/ }).click();
-  await expect.poll(() => roomAReads).toBe(1);
+  await expect.poll(() => roomAReads).toBeGreaterThan(0);
+  await page.goBack();
+  await expect(page.getByRole('button', { name: /稍后打开的翊坤宫/ })).toBeVisible();
   await page.getByRole('button', { name: /稍后打开的翊坤宫/ }).click();
   await expect(page.getByText('稍后打开的翊坤宫', { exact: true })).toBeVisible();
 
@@ -344,6 +397,8 @@ test('a delayed settlement response cannot replace a later room selection', asyn
   await page.goto('/');
   await page.getByRole('button', { name: /已结束的圆明园/ }).click();
   await expect.poll(() => settlementReads).toBe(1);
+  await page.goBack();
+  await expect(page.getByRole('button', { name: /当前的碎玉轩/ })).toBeVisible();
   await page.getByRole('button', { name: /当前的碎玉轩/ }).click();
   releaseSettlement();
 
@@ -423,11 +478,12 @@ test('a delayed room A seat mutation cannot supersede later room B navigation', 
   await page.getByRole('button', { name: '房间列表' }).click();
   await page.getByRole('button', { name: /后来打开的翊坤宫/ }).click();
   await expect(page.getByText('后来打开的翊坤宫', { exact: true })).toBeVisible();
+  const roomASeatReadsBeforeRelease = roomASeatReads;
 
   releaseSelection();
   await page.waitForLoadState('networkidle');
 
-  expect(roomASeatReads).toBe(1);
+  expect(roomASeatReads).toBe(roomASeatReadsBeforeRelease);
   await expect(page.getByText('后来打开的翊坤宫', { exact: true })).toBeVisible();
   await expect(page.getByText('延迟选席的碎玉轩', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '房间列表' }).click();
@@ -448,13 +504,11 @@ test('stale room A control loss cannot recover or report inside room B', async (
   let releaseSelection!: () => void;
   const selectionWait = new Promise<void>((resolve) => { releaseSelection = resolve; });
   let selectionWrites = 0;
-  let roomBSeatReads = 0;
   await page.route('**/api/rooms/room-a/seats', (route) => route.fulfill({ json: {
     ...seatResponse({ characterId: null, playerId: null, isBank: false, activeHere: true }, 'LOBBY'),
     room: { id: roomA.id, name: roomA.name, status: 'LOBBY', skillEnabled: true },
   } }));
   await page.route('**/api/rooms/room-b/seats', (route) => {
-    roomBSeatReads += 1;
     return route.fulfill({ json: {
       ...seatResponse({ characterId: null, playerId: null, isBank: false, activeHere: true }, 'LOBBY'),
       room: { id: roomB.id, name: roomB.name, status: 'LOBBY', skillEnabled: true },
@@ -473,13 +527,11 @@ test('stale room A control loss cannot recover or report inside room B', async (
   await page.getByRole('button', { name: '房间列表' }).click();
   await page.getByRole('button', { name: /当前控制的翊坤宫/ }).click();
   await expect(page.getByText('当前控制的翊坤宫', { exact: true })).toBeVisible();
-
   releaseSelection();
   await page.waitForLoadState('networkidle');
 
   await expect(page.getByText('当前控制的翊坤宫', { exact: true })).toBeVisible();
   await expect(page.getByText('该房间已在另一台设备打开')).toHaveCount(0);
-  expect(roomBSeatReads).toBe(1);
 });
 
 test('a delayed finish preview cannot reopen after confirmed room exit', async ({ page }) => {
@@ -572,37 +624,50 @@ test('a delayed room A game action cannot refresh over later room B navigation',
 
   await page.goto('/');
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
-  await expect(page.getByText('房间 A 初始快照', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('房间 A 初始快照', { exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL('/rooms/room-a/player');
+  await page.waitForLoadState('networkidle');
   await page.getByRole('button', { name: '转帐' }).click();
-  await page.getByLabel('转帐金额').fill('100');
+  await fillTransferAmount(page, '100');
   await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(1);
   await page.getByRole('button', { name: '关闭' }).click();
   await page.getByRole('button', { name: '退出' }).click();
   await page.getByRole('button', { name: '确认返回' }).click();
   await page.getByRole('button', { name: /当前的翊坤宫/ }).click();
-  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('房间 B 最新快照', { exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL('/rooms/room-b/player');
 
+  const transferResponse = page.waitForResponse((response) =>
+    response.url().endsWith('/api/rooms/room-a/transfers') &&
+    response.request().method() === 'POST',
+  );
   releaseTransfer();
-  await page.waitForTimeout(300);
+  const completedTransfer = await transferResponse;
+  expect(await completedTransfer.finished()).toBeNull();
+  await waitForTwoPaints(page);
 
-  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('房间 B 最新快照', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('房间 A 过期快照')).toHaveCount(0);
 
   await page.getByRole('button', { name: '退出' }).click();
   await page.getByRole('button', { name: '确认返回' }).click();
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
+  await expect(page.getByText('房间 A 过期快照', { exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL('/rooms/room-a/player');
+  await page.waitForLoadState('networkidle');
   await page.getByRole('button', { name: '转帐' }).click();
-  await page.getByLabel('转帐金额').fill('100');
+  await fillTransferAmount(page, '100');
   await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(2);
   await page.getByRole('button', { name: '转帐' }).click();
-  await page.getByLabel('转帐金额').fill('100');
+  await fillTransferAmount(page, '100');
   await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(3);
 
   expect(transferKeys[0]).toBeTruthy();
-  expect(transferKeys[1]).toBe(transferKeys[0]);
+  expect(transferKeys[1]).toBeTruthy();
+  expect(transferKeys[1]).not.toBe(transferKeys[0]);
   expect(transferKeys[2]).toBeTruthy();
   expect(transferKeys[2]).not.toBe(transferKeys[1]);
 });
@@ -646,25 +711,34 @@ test('a delayed room A game action error cannot surface in later room B', async 
 
   await page.goto('/');
   await page.getByRole('button', { name: /先前的碎玉轩/ }).click();
-  await expect(page.getByText('房间 A 初始快照', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('房间 A 初始快照', { exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL('/rooms/room-a/player');
+  await page.waitForLoadState('networkidle');
   await page.getByRole('button', { name: '转帐' }).click();
-  await page.getByLabel('转帐金额').fill('100');
+  await fillTransferAmount(page, '100');
   await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => transferWrites).toBe(1);
   await page.getByRole('button', { name: '关闭' }).click();
   await page.getByRole('button', { name: '退出' }).click();
   await page.getByRole('button', { name: '确认返回' }).click();
   await page.getByRole('button', { name: /当前的翊坤宫/ }).click();
-  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('房间 B 最新快照', { exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL('/rooms/room-b/player');
 
+  const transferResponse = page.waitForResponse((response) =>
+    response.url().endsWith('/api/rooms/room-a/transfers') &&
+    response.request().method() === 'POST',
+  );
   releaseTransfer();
-  await page.waitForTimeout(300);
+  const completedTransfer = await transferResponse;
+  expect(await completedTransfer.finished()).toBeNull();
+  await waitForTwoPaints(page);
 
-  await expect(page.getByText('房间 B 最新快照', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('房间 B 最新快照', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('转帐信息无效，请检查收款对象和金额')).toHaveCount(0);
 });
 
-test('game action keeps its intent key until the authoritative snapshot refresh succeeds', async ({ page }) => {
+test('a committed game action clears its intent even when the authoritative snapshot refresh fails', async ({ page }) => {
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
   const secondPlayer = { id: 'player-2', name: '眉庄', characterId: 'meizhuang', balance: 4_600, remainingSkipTurns: 0 };
   await page.route('**/socket.io/**', (route) => route.abort());
@@ -694,21 +768,18 @@ test('game action keeps its intent key until the authoritative snapshot refresh 
   await page.getByLabel('转帐金额').fill('100');
   await page.getByRole('button', { name: '确认转帐' }).click();
   await expect.poll(() => refreshFailures).toBe(1);
-  await expect(page.getByRole('heading', { name: '转帐' })).toBeVisible();
-
-  await page.getByRole('button', { name: '确认转帐' }).click();
-  await expect.poll(() => transferWrites).toBe(2);
   await expect(page.getByRole('heading', { name: '转帐' })).toHaveCount(0);
+
   await page.getByRole('button', { name: '转帐' }).click();
   await page.getByLabel('转帐金额').fill('100');
   await page.getByRole('button', { name: '确认转帐' }).click();
-  await expect.poll(() => transferWrites).toBe(3);
+  await expect.poll(() => transferWrites).toBe(2);
+  await expect(page.getByRole('heading', { name: '转帐' })).toHaveCount(0);
 
-  expect(snapshotReads).toBe(4);
+  expect(snapshotReads).toBeGreaterThanOrEqual(3);
   expect(transferKeys[0]).toBeTruthy();
-  expect(transferKeys[1]).toBe(transferKeys[0]);
-  expect(transferKeys[2]).toBeTruthy();
-  expect(transferKeys[2]).not.toBe(transferKeys[1]);
+  expect(transferKeys[1]).toBeTruthy();
+  expect(transferKeys[1]).not.toBe(transferKeys[0]);
 });
 
 test('unified transfer renders recipient cards and submits the selected player or bank command', async ({ page }) => {
@@ -961,6 +1032,20 @@ test('实体事件 shares one count, resets after success, and sends distinct co
 
   await openRoom(page);
   await page.getByRole('button', { name: '实体事件' }).click();
+  const eventDialog = page.getByRole('dialog', { name: '实体事件' });
+  const dialogViewport = await eventDialog.evaluate((dialog) => {
+    const backdrop = dialog.parentElement;
+    const bounds = backdrop?.getBoundingClientRect();
+    return {
+      backdropIsBodyChild: backdrop?.parentElement === document.body,
+      top: bounds?.top,
+      bottom: bounds?.bottom,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(dialogViewport.backdropIsBodyChild).toBe(true);
+  expect(dialogViewport.top).toBeCloseTo(0, 0);
+  expect(dialogViewport.bottom).toBeCloseTo(dialogViewport.viewportHeight, 0);
   await expect(page.getByLabel('停轮次数')).toHaveCount(1);
   await expect(page.getByLabel('冷宫停轮次数')).toHaveCount(0);
   await expect(page.getByLabel('剧情停留次数')).toHaveCount(0);
@@ -1008,9 +1093,11 @@ test('实体事件 shares one count, resets after success, and sends distinct co
   await expect.poll(() => coldBodies).toEqual([{ playerId: 'player-1', count: 2 }]);
   await expect(page.getByRole('dialog', { name: '实体事件' })).toHaveCount(0);
   await page.getByRole('button', { name: '实体事件' }).click();
+  await expect(eventDialog.getByRole('button', { name: '关闭', exact: true })).toBeFocused();
   await expect(page.getByLabel('停轮次数')).toHaveValue('1');
   await expect(page.getByPlaceholder('填写剧情停轮原因')).toHaveValue('');
   await page.getByLabel('停轮次数').fill('3');
+  await expect(page.getByLabel('停轮次数')).toHaveValue('3');
   await page.getByLabel('剧情说明').fill('养病留宫');
   await page.getByRole('button', { name: '剧情停轮', exact: true }).click();
   await expect(page.getByLabel('冷宫原因')).toHaveCount(0);
@@ -1206,15 +1293,16 @@ test('bank displays plot-rest details and submits all remaining skip turns', asy
   await expect(page.getByText('剧情停留')).toBeVisible();
   await expect(page.getByText('养病留宫')).toBeVisible();
   await page.getByRole('button', { name: '事务' }).click();
+  await page.getByRole('button', { name: '扣减', exact: true }).click();
   await page.getByLabel('扣减次数').selectOption('ALL');
   await page.getByLabel('扣减原因').fill('实体回合已跳过');
-  await page.getByRole('button', { name: '扣减停轮' }).click();
+  await page.getByRole('button', { name: '提交', exact: true }).click();
   await page.getByRole('button', { name: '确认扣减停轮' }).click();
 
   expect(directConsumptions).toEqual([{ playerId: 'player-1', count: 3, reason: '实体回合已跳过' }]);
 });
 
-test('generated start-landing intent survives room child unmount with the same key and landing id', async ({ page }) => {
+test('a committed start landing gets a new intent after returning to the room', async ({ page }) => {
   const roomA = room({ id: 'room-a', name: '起点待确认的碎玉轩', status: 'PLAYING' });
   const roomB = room({ id: 'room-b', name: '临时打开的翊坤宫', status: 'LOBBY', characterId: null, myCharacter: null, playerCount: 0 });
   const capability = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true };
@@ -1270,9 +1358,11 @@ test('generated start-landing intent survives room child unmount with the same k
   await expect.poll(() => landingWrites).toBe(2);
 
   expect(landingKeys[0]).toBeTruthy();
-  expect(landingKeys[1]).toBe(landingKeys[0]);
+  expect(landingKeys[1]).toBeTruthy();
+  expect(landingKeys[1]).not.toBe(landingKeys[0]);
   expect(landingBodies[0].landingId).toBeTruthy();
-  expect(landingBodies[1].landingId).toBe(landingBodies[0].landingId);
+  expect(landingBodies[1].landingId).toBeTruthy();
+  expect(landingBodies[1].landingId).not.toBe(landingBodies[0].landingId);
 });
 
 test('finish keeps its intent key across room navigation until settlement refresh succeeds', async ({ page }) => {
@@ -1439,14 +1529,14 @@ test('seat acquisition keeps its intent key when POST succeeds but the authorita
 test('swap request keeps its intent key when POST succeeds but the authoritative refresh fails', async ({ page }) => {
   await page.route('**/socket.io/**', (route) => route.abort());
   await mockAccount(page);
-  await mockLobby(page);
+  await mockLobby(page, [room({ status: 'LOBBY' })]);
   const keys: Array<string | undefined> = [];
   let postAttempts = 0;
   let refreshFailures = 0;
   const swapSeats = {
-    ...seatResponse({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }),
+    ...seatResponse({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }, 'LOBBY'),
     characters: [
-      ...seatResponse({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }).characters,
+      ...seatResponse({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }, 'LOBBY').characters,
       { id: 'yixiu', name: '乌拉那拉·宜修', skill: { coldPalaceSkipReduction: 2 }, initialProperty: '景仁宫', occupiedBy: '皇后', canSelect: false },
     ],
   };

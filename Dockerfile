@@ -32,7 +32,7 @@ COPY --from=build /app/packages/database/dist ./packages/database/dist
 COPY --from=build /app/packages/database/prisma ./packages/database/prisma
 COPY --from=build /app/packages/shared/package.json ./packages/shared/package.json
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
-COPY --from=build /app/甄嬛传大富翁_master-data.json ./甄嬛传大富翁_master-data.json
+COPY --from=build /app/monopoly-zhenhuan_master-data.json ./monopoly-zhenhuan_master-data.json
 
 FROM runtime AS api
 USER node

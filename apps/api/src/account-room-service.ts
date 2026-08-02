@@ -184,6 +184,7 @@ function roomCreationSummary(room: {
   diceMode: string;
   skillEnabled: boolean;
   startReward: number;
+  redemptionFee: number;
   allowMidgameJoin: boolean;
   visibility: string;
   transferApprovalRequired: boolean;
@@ -200,6 +201,7 @@ function roomCreationSummary(room: {
     diceMode: room.diceMode,
     skillEnabled: room.skillEnabled,
     startReward: room.startReward,
+    redemptionFee: room.redemptionFee,
     allowMidgameJoin: room.allowMidgameJoin,
     visibility: room.visibility,
     transferApprovalRequired: room.transferApprovalRequired,
@@ -265,7 +267,8 @@ function roleSwapSummary(request: {
   requesterMembershipId: string;
   targetMembershipId: string;
   requesterCharacterId: string | null;
-  targetCharacterId: string;
+  targetCharacterId: string | null;
+  kind: 'CHARACTER' | 'BANK';
   status: string;
   rejectionReason: string | null;
   createdAt: Date;
@@ -279,6 +282,7 @@ function roleSwapSummary(request: {
     targetMembershipId: request.targetMembershipId,
     requesterCharacterId: request.requesterCharacterId,
     targetCharacterId: request.targetCharacterId,
+    kind: request.kind,
     status: request.status,
     rejectionReason: request.rejectionReason,
     createdAt: request.createdAt,
@@ -939,28 +943,59 @@ export class AccountRoomService {
       lock: (tx) => this.lockRoom(tx, roomId),
       authorize: async () => undefined,
       mutate: async (tx) => {
-        const room = required(await tx.room.findUnique({ where: { id: roomId }, select: { stateVersion: true } }), 'ROOM_NOT_FOUND');
-        await this.allowPhysicalHistoryDelete(tx);
-        await tx.securityLog.deleteMany({ where: { detailsJson: { path: ['roomId'], equals: roomId } } });
-        await tx.settlementPlayer.deleteMany({ where: { settlement: { roomId } } });
-        await tx.gameSettlement.deleteMany({ where: { roomId } });
-        await tx.gameResult.deleteMany({ where: { roomId } });
-        await tx.ledgerEntry.deleteMany({ where: { roomId } });
-        await tx.gameTransaction.deleteMany({ where: { roomId } });
-        await tx.debtRecord.deleteMany({ where: { roomId } });
-        await tx.skipTurnEntry.deleteMany({ where: { roomId } });
-        await tx.landingEvent.deleteMany({ where: { roomId } });
-        await tx.gameRequest.deleteMany({ where: { roomId } });
-        await tx.turn.deleteMany({ where: { roomId } });
-        await tx.roleSwapRequest.deleteMany({ where: { roomId } });
-        await tx.auditLog.deleteMany({ where: { roomId } });
-        await tx.roomProperty.deleteMany({ where: { roomId } });
-        await tx.player.deleteMany({ where: { roomId } });
-        await tx.roomMembership.deleteMany({ where: { roomId } });
-        await tx.idempotencyRecord.deleteMany({ where: { OR: [{ scope: { contains: `:room:${roomId}:` } }, { scope: { endsWith: `:${roomId}` } }] } });
-        await tx.room.delete({ where: { id: roomId } });
-        return { value: { deleted: true as const, id: roomId, stateVersion: room.stateVersion + 1 } };
+        const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
+        const existingArchive = await tx.auditLog.findFirst({
+          where: { roomId, action: 'ADMIN_ROOM_ARCHIVED' },
+          select: { id: true },
+        });
+        if (existingArchive) {
+          return { value: { deleted: true as const, id: roomId }, mutationCreated: false };
+        }
+        const archivedAt = new Date();
+        await tx.gameRequest.updateMany({
+          where: { roomId, status: 'PENDING' },
+          data: { status: 'CANCELLED', rejectionReason: 'ADMIN_ROOM_ARCHIVED', resolvedAt: archivedAt },
+        });
+        await tx.roomProperty.updateMany({
+          where: { roomId, lockedByRequestId: { not: null } },
+          data: { lockedByRequestId: null, version: { increment: 1 } },
+        });
+        await tx.roleSwapRequest.updateMany({
+          where: { roomId, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } },
+          data: { status: 'CANCELLED', rejectionReason: 'ADMIN_ROOM_ARCHIVED', resolvedAt: archivedAt },
+        });
+        await tx.landingEvent.updateMany({
+          where: { roomId, status: { in: ['DECLARED', 'CONFIRMED'] } },
+          data: { status: 'INVALIDATED', invalidatedAt: archivedAt, propertyActionsCancelled: true },
+        });
+        await tx.turn.updateMany({
+          where: { roomId, status: 'ACTIVE' },
+          data: { status: 'ENDED', endedAt: archivedAt },
+        });
+        const archivedStatus = room.status === 'FINISHED' ? 'FINISHED' : 'CLOSED';
+        await tx.room.update({
+          where: { id: roomId },
+          data: { status: archivedStatus, currentTurnPlayerId: null, turnNumber: null },
+        });
+        await tx.auditLog.create({ data: {
+          roomId,
+          actorRole: 'ADMIN',
+          action: 'ADMIN_ROOM_ARCHIVED',
+          entityType: 'Room',
+          entityId: roomId,
+          beforeJson: { status: room.status },
+          afterJson: { status: archivedStatus },
+          createdAt: archivedAt,
+        } });
+        await tx.securityLog.create({ data: {
+          actorAccountId: auth.account.id,
+          action: 'ADMIN_ROOM_ARCHIVED',
+          detailsJson: { roomId, previousStatus: room.status, status: archivedStatus },
+          createdAt: archivedAt,
+        } });
+        return { value: { deleted: true as const, id: roomId } };
       },
+      roomId,
     });
     return { ...result.value, created: result.created };
   }
@@ -1045,6 +1080,7 @@ export class AccountRoomService {
         diceMode: room.diceMode,
         skillEnabled: room.skillEnabled,
         startReward: room.startReward,
+        redemptionFee: room.redemptionFee,
         allowMidgameJoin: room.allowMidgameJoin,
         visibility: room.visibility,
         transferApprovalRequired: room.transferApprovalRequired,
@@ -1078,7 +1114,7 @@ export class AccountRoomService {
 
   async updateAdminRoom(auth: AuthenticatedSession, roomId: string, input: {
     name?: string; visibility?: string; diceMode?: 'ELECTRONIC' | 'PHYSICAL'; skillEnabled?: boolean;
-    startReward?: number; allowMidgameJoin?: boolean; transferApprovalRequired?: boolean; initialBalance?: number;
+    startReward?: number; redemptionFee?: number; allowMidgameJoin?: boolean; transferApprovalRequired?: boolean; initialBalance?: number;
   }, key: string) {
     const result = await this.executeAdminWrite({
       auth,
@@ -1095,7 +1131,7 @@ export class AccountRoomService {
       mutate: async (tx) => {
         const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
         const keys = Object.keys(input);
-        const lobbyOnly = ['diceMode', 'skillEnabled', 'startReward', 'initialBalance'];
+        const lobbyOnly = ['diceMode', 'skillEnabled', 'startReward', 'redemptionFee', 'initialBalance'];
         if (room.status !== 'LOBBY' && keys.some((field) => lobbyOnly.includes(field))) fail('ROOM_CONFIG_LIFECYCLE_CONFLICT');
         if (input.initialBalance !== undefined) {
           const [players, initialLedgers] = await Promise.all([
@@ -1256,7 +1292,7 @@ export class AccountRoomService {
     return result.value;
   }
 
-  async createRoom(auth: AuthenticatedSession, input: { name: string; password?: string; initialBalance: number; diceMode: 'ELECTRONIC' | 'PHYSICAL'; skillEnabled: boolean; startReward: number; allowMidgameJoin: boolean; visibility: 'PUBLIC' | 'PRIVATE'; transferApprovalRequired: boolean }, key: string) {
+  async createRoom(auth: AuthenticatedSession, input: { name: string; password?: string; initialBalance: number; diceMode: 'ELECTRONIC' | 'PHYSICAL'; skillEnabled: boolean; startReward: number; redemptionFee: number; allowMidgameJoin: boolean; visibility: 'PUBLIC' | 'PRIVATE'; transferApprovalRequired: boolean }, key: string) {
     if (!auth.account.canCreateRoom) fail('ROOM_CREATE_FORBIDDEN');
     const passwordHash = input.password ? await hashPassword(input.password) : null;
     return this.executeIdempotent(`account:${auth.account.id}:rooms:create`, key, input, async (tx) => {
@@ -1265,7 +1301,7 @@ export class AccountRoomService {
       const room = await tx.room.create({ data: {
         code: randomBytes(4).toString('hex').toUpperCase(), name: input.name, status: 'LOBBY', ruleProfile: 'CUSTOM', difficulty: 'CUSTOM', participantCount: 5, playerLimit: 5,
         bankMode: 'DEDICATED_MODERATOR', characterAssignmentMode: 'PLAYER_SELECT', initialBalance: input.initialBalance, diceMode: input.diceMode, skillEnabled: input.skillEnabled,
-        storyMoneyCounterpartyMode: 'TREASURY', transferApprovalRequired: input.transferApprovalRequired, startReward: input.startReward,
+        storyMoneyCounterpartyMode: 'TREASURY', transferApprovalRequired: input.transferApprovalRequired, startReward: input.startReward, redemptionFee: input.redemptionFee,
         victoryMode: 'LAST_SOLVENT', createdBy: auth.account.username, createdByAccountId: auth.account.id, passwordHash, visibility: input.visibility,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), allowMidgameJoin: input.allowMidgameJoin,
       } });
@@ -1417,6 +1453,12 @@ export class AccountRoomService {
     const characters = await this.db.character.findMany({ where: { enabled: true }, include: { initialProperty: true }, orderBy: { name: 'asc' } });
     const memberships = new Map(room.members.filter((member) => member.characterId).map((member) => [member.characterId, member]));
     const mine = room.members.find((member) => member.accountId === auth.account.id);
+    if (
+      room.visibility === 'PRIVATE'
+      && !mine
+      && room.createdByAccountId !== auth.account.id
+      && !this.isConfiguredSuperAdmin(auth.account.username)
+    ) fail('ROOM_NOT_FOUND');
     const relevantSwapWhere: Prisma.RoleSwapRequestWhereInput | undefined = mine
       ? mine.isBank
         ? { roomId }
@@ -1443,6 +1485,7 @@ export class AccountRoomService {
     ])).flat().sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)) : [];
     const canMutate = mine?.activeSessionId === auth.session.id
       && !['ENDED', 'FINISHED', 'CLOSED'].includes(room.status);
+    const canSwapRoles = canMutate && room.status === 'LOBBY';
     return {
       stateVersion: room.stateVersion,
       room: { id: room.id, name: room.name, status: room.status, skillEnabled: room.skillEnabled },
@@ -1457,10 +1500,10 @@ export class AccountRoomService {
         requesterDisplayName: request.requester.displayNameSnapshot,
         targetDisplayName: request.target.displayNameSnapshot,
         actions: {
-          canAccept: canMutate && request.targetMembershipId === mine?.id && request.status === 'PENDING_TARGET',
+          canAccept: canSwapRoles && request.targetMembershipId === mine?.id && request.status === 'PENDING_TARGET',
           canReject: canMutate && request.targetMembershipId === mine?.id && request.status === 'PENDING_TARGET',
           canCancel: canMutate && request.requesterMembershipId === mine?.id && ['PENDING_TARGET', 'PENDING_BANK'].includes(request.status),
-          canApproveBank: canMutate && Boolean(mine?.isBank) && request.status === 'PENDING_BANK',
+          canApproveBank: canSwapRoles && Boolean(mine?.isBank) && request.status === 'PENDING_BANK',
         },
       })),
     };
@@ -1699,12 +1742,26 @@ export class AccountRoomService {
 
   async requestRoleSwap(auth: AuthenticatedSession, roomId: string, targetCharacterId: string, key: string) {
     return this.executeControlledIdempotent(auth, { roomId }, 'request', key, { roomId, targetCharacterId }, undefined, async (tx, requester) => {
+      if (requester.room.status !== 'LOBBY') fail('ROLE_SWAP_LOBBY_ONLY');
       const target = required(await tx.roomMembership.findFirst({ where: { roomId, characterId: targetCharacterId, status: 'ACTIVE' } }), 'SWAP_TARGET_NOT_FOUND');
       if (target.id === requester.id) fail('SWAP_TARGET_NOT_FOUND');
       const open = await tx.roleSwapRequest.findFirst({ where: { roomId, requesterMembershipId: requester.id, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } } });
       if (open) fail('SWAP_REQUEST_PENDING');
-      const created = await tx.roleSwapRequest.create({ data: { roomId, requesterMembershipId: requester.id, targetMembershipId: target.id, requesterCharacterId: requester.characterId, targetCharacterId } });
-      await tx.auditLog.create({ data: { roomId, actorMemberId: requester.id, actorRole: 'PLAYER', action: 'ROLE_SWAP_REQUESTED', entityType: 'RoleSwapRequest', entityId: created.id, afterJson: { requesterCharacterId: requester.characterId, targetCharacterId } } });
+      const created = await tx.roleSwapRequest.create({ data: { roomId, requesterMembershipId: requester.id, targetMembershipId: target.id, requesterCharacterId: requester.characterId, targetCharacterId, kind: 'CHARACTER' } });
+      await tx.auditLog.create({ data: { roomId, actorMemberId: requester.id, actorRole: 'PLAYER', action: 'ROLE_SWAP_REQUESTED', entityType: 'RoleSwapRequest', entityId: created.id, afterJson: { kind: 'CHARACTER', requesterCharacterId: requester.characterId, targetCharacterId } } });
+      return roleSwapSummary(created);
+    });
+  }
+
+  async requestBankSwap(auth: AuthenticatedSession, roomId: string, key: string) {
+    return this.executeControlledIdempotent(auth, { roomId }, 'request-bank', key, { roomId, targetRole: 'BANK' }, undefined, async (tx, requester) => {
+      if (requester.room.status !== 'LOBBY') fail('ROLE_SWAP_LOBBY_ONLY');
+      if (requester.isBank) fail('SWAP_TARGET_NOT_FOUND');
+      const target = required(await tx.roomMembership.findFirst({ where: { roomId, isBank: true, status: 'ACTIVE' } }), 'SWAP_TARGET_NOT_FOUND');
+      const open = await tx.roleSwapRequest.findFirst({ where: { roomId, requesterMembershipId: requester.id, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } } });
+      if (open) fail('SWAP_REQUEST_PENDING');
+      const created = await tx.roleSwapRequest.create({ data: { roomId, requesterMembershipId: requester.id, targetMembershipId: target.id, requesterCharacterId: null, targetCharacterId: null, kind: 'BANK' } });
+      await tx.auditLog.create({ data: { roomId, actorMemberId: requester.id, actorRole: 'PLAYER', action: 'ROLE_SWAP_REQUESTED', entityType: 'RoleSwapRequest', entityId: created.id, afterJson: { kind: 'BANK' } } });
       return roleSwapSummary(created);
     });
   }
@@ -1744,6 +1801,8 @@ export class AccountRoomService {
     onInitialBalance?: (transactionId: string) => void,
   ) {
     const request = required(await tx.roleSwapRequest.findUnique({ where: { id: requestId }, include: { room: true } }), 'SWAP_REQUEST_NOT_FOUND');
+    if (request.kind === 'BANK') return this.executeBankSwap(tx, request, actorMemberId, actorRole, bankApprovedById);
+    const targetCharacterId = required(request.targetCharacterId, 'SWAP_CONFLICT');
     const requester = await tx.roomMembership.findUnique({ where: { id: request.requesterMembershipId }, include: { player: true } });
     const target = await tx.roomMembership.findUnique({ where: { id: request.targetMembershipId }, include: { player: true } });
     const characterDrift = !requester || !target
@@ -1752,7 +1811,7 @@ export class AccountRoomService {
       || requester.roomId !== request.roomId
       || target.roomId !== request.roomId
       || requester.characterId !== request.requesterCharacterId
-      || target.characterId !== request.targetCharacterId
+      || target.characterId !== targetCharacterId
       || (requester.characterId !== null && requester.player?.characterId !== requester.characterId)
       || (requester.characterId === null && requester.player?.characterId !== null && requester.player !== null)
       || target.player?.characterId !== target.characterId;
@@ -1795,7 +1854,7 @@ export class AccountRoomService {
         await tx.ledgerEntry.create({ data: { roomId: request.roomId, transactionId: transaction.id, playerId: requesterPlayer.id, amount: initialBalance, balanceBefore: 0, balanceAfter: initialBalance, type: 'INITIAL_BALANCE', description: '初始资金', createdBy: requester.id } });
       }
       if (request.room.status === 'LOBBY') {
-        const character = required(await tx.character.findUnique({ where: { id: request.targetCharacterId } }), 'SWAP_CONFLICT');
+        const character = required(await tx.character.findUnique({ where: { id: targetCharacterId } }), 'SWAP_CONFLICT');
         await tx.roomProperty.updateMany({ where: { roomId: request.roomId, propertyDefinitionId: character.initialPropertyId, ownerPlayerId: null }, data: { ownerPlayerId: requesterPlayer.id, version: { increment: 1 } } });
       }
     } else if (!request.requesterCharacterId) {
@@ -1807,11 +1866,38 @@ export class AccountRoomService {
       requesterPlayer = await tx.player.update({ where: { id: requesterPlayer.id }, data: allocation });
     }
 
-    await tx.roomMembership.update({ where: { id: requester.id }, data: { characterId: request.targetCharacterId } });
+    const initialPalaceTransfers = [{
+      characterId: targetCharacterId,
+      fromPlayerId: target.player.id,
+      toPlayerId: requesterPlayer.id,
+    }];
+    if (request.requesterCharacterId && requester.player) {
+      initialPalaceTransfers.push({
+        characterId: request.requesterCharacterId,
+        fromPlayerId: requester.player.id,
+        toPlayerId: target.player.id,
+      });
+    }
+    for (const transfer of initialPalaceTransfers) {
+      const character = required(await tx.character.findUnique({
+        where: { id: transfer.characterId },
+        select: { initialPropertyId: true },
+      }), 'SWAP_CONFLICT');
+      await tx.roomProperty.updateMany({
+        where: {
+          roomId: request.roomId,
+          propertyDefinitionId: character.initialPropertyId,
+          ownerPlayerId: transfer.fromPlayerId,
+        },
+        data: { ownerPlayerId: transfer.toPlayerId, version: { increment: 1 } },
+      });
+    }
+
+    await tx.roomMembership.update({ where: { id: requester.id }, data: { characterId: targetCharacterId } });
     await tx.player.update({
       where: { id: requesterPlayer.id },
       data: {
-        characterId: request.targetCharacterId,
+        characterId: targetCharacterId,
         status: requesterPlayer.status === 'LEFT' ? 'ACTIVE' : requesterPlayer.status,
       },
     });
@@ -1821,7 +1907,27 @@ export class AccountRoomService {
       await tx.player.update({ where: { id: targetPlayer.id }, data: { characterId: request.requesterCharacterId } });
     }
     const updated = await tx.roleSwapRequest.update({ where: { id: request.id }, data: { status: 'APPROVED', bankApprovedById, resolvedAt: new Date() } });
-    await tx.auditLog.create({ data: { roomId: request.roomId, actorMemberId, actorRole, action: 'ROLE_SWAP_EXECUTED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: before, afterJson: { requesterCharacterId: request.targetCharacterId, targetCharacterId: request.requesterCharacterId } } });
+    await tx.auditLog.create({ data: { roomId: request.roomId, actorMemberId, actorRole, action: 'ROLE_SWAP_EXECUTED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: before, afterJson: { kind: 'CHARACTER', requesterCharacterId: targetCharacterId, targetCharacterId: request.requesterCharacterId } } });
+    return updated;
+  }
+
+  private async executeBankSwap(
+    tx: Prisma.TransactionClient,
+    request: Awaited<ReturnType<Prisma.TransactionClient['roleSwapRequest']['findUniqueOrThrow']>>,
+    actorMemberId: string,
+    actorRole: 'PLAYER' | 'BANK',
+    bankApprovedById?: string,
+  ) {
+    const requester = await tx.roomMembership.findUnique({ where: { id: request.requesterMembershipId } });
+    const target = await tx.roomMembership.findUnique({ where: { id: request.targetMembershipId } });
+    if (!requester || !target || requester.status !== 'ACTIVE' || target.status !== 'ACTIVE' || requester.roomId !== request.roomId || target.roomId !== request.roomId || requester.isBank || !target.isBank) {
+      return this.conflictRoleSwap(tx, request, actorMemberId, actorRole, 'BANK_DRIFT');
+    }
+    const before = { requesterIsBank: requester.isBank, targetIsBank: target.isBank };
+    await tx.roomMembership.update({ where: { id: target.id }, data: { isBank: false } });
+    await tx.roomMembership.update({ where: { id: requester.id }, data: { isBank: true } });
+    const updated = await tx.roleSwapRequest.update({ where: { id: request.id }, data: { status: 'APPROVED', bankApprovedById, resolvedAt: new Date() } });
+    await tx.auditLog.create({ data: { roomId: request.roomId, actorMemberId, actorRole, action: 'ROLE_SWAP_EXECUTED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: before, afterJson: { kind: 'BANK', requesterIsBank: true, targetIsBank: false } } });
     return updated;
   }
 
@@ -1832,12 +1938,12 @@ export class AccountRoomService {
       initialBalanceTransactionId = null;
       const request = required(await tx.roleSwapRequest.findUnique({ where: { id: requestId }, include: { room: true } }), 'SWAP_REQUEST_NOT_FOUND');
       if (request.targetMembershipId !== targetActor.id || request.status !== 'PENDING_TARGET') fail('SWAP_REQUEST_NOT_PENDING');
-      await tx.auditLog.create({ data: { roomId, actorMemberId: targetActor.id, actorRole: 'PLAYER', action: 'ROLE_SWAP_TARGET_ACCEPTED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: { status: request.status }, afterJson: { status: request.room.status === 'PLAYING' ? 'PENDING_BANK' : 'APPROVED' } } });
-      const updated = request.room.status === 'PLAYING'
-        ? await tx.roleSwapRequest.update({ where: { id: request.id }, data: { status: 'PENDING_BANK' } })
-        : await this.executeSwap(tx, request.id, targetActor.id, 'PLAYER', undefined, (transactionId) => {
-            initialBalanceTransactionId = transactionId;
-          });
+      if (request.room.status !== 'LOBBY') fail('ROLE_SWAP_LOBBY_ONLY');
+      const targetActorRole = request.kind === 'BANK' ? 'BANK' : 'PLAYER';
+      await tx.auditLog.create({ data: { roomId, actorMemberId: targetActor.id, actorRole: targetActorRole, action: 'ROLE_SWAP_TARGET_ACCEPTED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: { status: request.status }, afterJson: { status: 'APPROVED' } } });
+      const updated = await this.executeSwap(tx, request.id, targetActor.id, targetActorRole, undefined, (transactionId) => {
+        initialBalanceTransactionId = transactionId;
+      });
       return roleSwapSummary(updated);
     }, async (_result, roomId) => {
       if (initialBalanceTransactionId) await this.toastNotifier?.fundsCommitted(roomId, initialBalanceTransactionId);
@@ -1847,7 +1953,7 @@ export class AccountRoomService {
   async resolveRoleSwap(auth: AuthenticatedSession, requestId: string, action: 'REJECT' | 'CANCEL' | 'APPROVE_BANK', key: string, reason?: string) {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
     return this.executeControlledIdempotent(auth, { requestId }, `${action.toLowerCase()}:${requestId}`, key, { requestId, action, reason }, action === 'APPROVE_BANK' ? 'BANK' : undefined, async (tx, actor, roomId) => {
-      const request = required(await tx.roleSwapRequest.findUnique({ where: { id: requestId } }), 'SWAP_REQUEST_NOT_FOUND');
+      const request = required(await tx.roleSwapRequest.findUnique({ where: { id: requestId }, include: { room: true } }), 'SWAP_REQUEST_NOT_FOUND');
       if (action === 'CANCEL') {
         if (request.requesterMembershipId !== actor.id || !['PENDING_TARGET', 'PENDING_BANK'].includes(request.status)) fail('SWAP_REQUEST_NOT_PENDING');
         const updated = await tx.roleSwapRequest.update({ where: { id: request.id }, data: { status: 'CANCELLED', resolvedAt: new Date() } });
@@ -1861,6 +1967,7 @@ export class AccountRoomService {
         return roleSwapSummary(updated);
       }
       if (request.status !== 'PENDING_BANK') fail('SWAP_REQUEST_NOT_PENDING');
+      if (request.room.status !== 'LOBBY') fail('ROLE_SWAP_LOBBY_ONLY');
       await tx.auditLog.create({ data: { roomId, actorMemberId: actor.id, actorRole: 'BANK', action: 'ROLE_SWAP_BANK_CONFIRMED', entityType: 'RoleSwapRequest', entityId: request.id, beforeJson: { status: request.status }, afterJson: { status: 'APPROVED' } } });
       return roleSwapSummary(await this.executeSwap(tx, request.id, actor.id, 'BANK', actor.id));
     });

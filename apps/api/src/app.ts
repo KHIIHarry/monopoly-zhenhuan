@@ -347,7 +347,7 @@ app.get('/api/admin/rooms', async (request) => {
 app.get('/api/admin/rooms/:id', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); return accounts.getAdminRoom(auth, id); });
 app.patch('/api/admin/rooms/:id', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
-  const body = z.object({ name: z.string().trim().min(1).max(40).optional(), visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']).optional(), skillEnabled: z.boolean().optional(), startReward: z.number().int().nonnegative().optional(), allowMidgameJoin: z.boolean().optional(), transferApprovalRequired: z.boolean().optional(), initialBalance: z.number().int().nonnegative().optional() }).strict().refine((value) => Object.keys(value).length > 0).parse(request.body);
+  const body = z.object({ name: z.string().trim().min(1).max(40).optional(), visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']).optional(), skillEnabled: z.boolean().optional(), startReward: z.number().int().nonnegative().optional(), redemptionFee: z.number().int().nonnegative().optional(), allowMidgameJoin: z.boolean().optional(), transferApprovalRequired: z.boolean().optional(), initialBalance: z.number().int().nonnegative().optional() }).strict().refine((value) => Object.keys(value).length > 0).parse(request.body);
   const result = await accounts.updateAdminRoom(auth, id, body, idempotencyKey(request.headers['idempotency-key']));
   notifyVersion(id, result);
   return result;
@@ -378,11 +378,11 @@ app.get('/api/admin/rooms/:id/audit-logs', async (request) => {
 });
 
 app.get('/api/rooms', async (request) => accounts.listRooms(await authenticate(request)));
-app.get('/api/rooms/mine', async (request) => (await accounts.listRooms(await authenticate(request))).filter((room) => room.mine && room.status !== 'FINISHED'));
-app.get('/api/rooms/history', async (request) => (await accounts.listRooms(await authenticate(request))).filter((room) => room.mine && room.status === 'FINISHED'));
+app.get('/api/rooms/mine', async (request) => (await accounts.listRooms(await authenticate(request))).filter((room) => room.mine && !['ENDED', 'FINISHED', 'CLOSED'].includes(room.status)));
+app.get('/api/rooms/history', async (request) => (await accounts.listRooms(await authenticate(request))).filter((room) => room.mine && ['ENDED', 'FINISHED', 'CLOSED'].includes(room.status)));
 app.post('/api/rooms', async (request) => {
   const auth = await authenticate(request);
-  const body = z.object({ name: z.string().trim().min(1).max(40), password: z.string().max(100).optional(), initialBalance: z.number().int().nonnegative(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']), skillEnabled: z.boolean().default(true), startReward: z.number().int().nonnegative().default(1000), allowMidgameJoin: z.boolean().default(false), visibility: z.enum(['PUBLIC', 'PRIVATE']).default('PUBLIC'), transferApprovalRequired: z.boolean().default(false) }).parse(request.body);
+  const body = z.object({ name: z.string().trim().min(1).max(40), password: z.string().max(100).optional(), initialBalance: z.number().int().nonnegative(), diceMode: z.enum(['ELECTRONIC', 'PHYSICAL']), skillEnabled: z.boolean().default(true), startReward: z.number().int().nonnegative().default(1000), redemptionFee: z.number().int().nonnegative().default(200), allowMidgameJoin: z.boolean().default(false), visibility: z.enum(['PUBLIC', 'PRIVATE']).default('PUBLIC'), transferApprovalRequired: z.boolean().default(false) }).parse(request.body);
   return accounts.createRoom(auth, body, idempotencyKey(request.headers['idempotency-key']));
 });
 app.post('/api/rooms/:id/join', async (request) => {
@@ -411,7 +411,7 @@ app.post('/api/rooms/:id/take-control', async (request) => {
   return result;
 });
 
-app.post('/api/rooms/:id/role-swap-requests', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const { targetCharacterId } = z.object({ targetCharacterId: z.string() }).parse(request.body); const result = await accounts.requestRoleSwap(auth, id, targetCharacterId, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(id, result); return result; });
+app.post('/api/rooms/:id/role-swap-requests', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const body = z.union([z.object({ targetCharacterId: z.string() }).strict(), z.object({ targetRole: z.literal('BANK') }).strict()]).parse(request.body); const result = 'targetRole' in body ? await accounts.requestBankSwap(auth, id, idempotencyKey(request.headers['idempotency-key'])) : await accounts.requestRoleSwap(auth, id, body.targetCharacterId, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(id, result); return result; });
 app.post('/api/role-swap-requests/:id/accept', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const result = await accounts.acceptRoleSwap(auth, id, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(result.roomId, result); return result; });
 app.post('/api/role-swap-requests/:id/reject', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const { reason } = z.object({ reason: z.string().trim().min(1) }).parse(request.body); const result = await accounts.resolveRoleSwap(auth, id, 'REJECT', idempotencyKey(request.headers['idempotency-key']), reason); notifyVersion(result.roomId, result); return result; });
 app.post('/api/role-swap-requests/:id/approve-bank', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const result = await accounts.resolveRoleSwap(auth, id, 'APPROVE_BANK', idempotencyKey(request.headers['idempotency-key'])); notifyVersion(result.roomId, result); return result; });

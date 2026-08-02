@@ -97,7 +97,10 @@ async function assertSurface(page: Page) {
       scrollLeft: scroll.getBoundingClientRect().left,
       intersection: Math.max(0, Math.min(nav.getBoundingClientRect().bottom, scroll.getBoundingClientRect().bottom) - Math.max(nav.getBoundingClientRect().top, scroll.getBoundingClientRect().top)),
     } : null;
-    const distortedTools = [...document.querySelectorAll('.workbench-tools > button:not(.icon)')].filter(visible).map((element) => {
+    const distortedTools = [...document.querySelectorAll('.workbench-tools > button:not(.icon)')].filter(visible).filter((element) => {
+      const label = element.querySelector('span');
+      return !element.classList.contains('workbench-tool-seat') || !label || visible(label);
+    }).map((element) => {
       const rect = element.getBoundingClientRect(); return { text: element.textContent?.trim(), width: rect.width, height: rect.height };
     }).filter((item) => item.width < 75.5 || item.height > 64);
     const navGridAutoFlow = nav && visible(nav) ? getComputedStyle(nav).gridAutoFlow : null;
@@ -156,6 +159,7 @@ async function assertDesktopWorkbenchSidebar(page: Page) {
 }
 
 async function assertPlayerWorkbenchHeader(page: Page, playerName: string) {
+  await expect(page.locator('.workbench-room-meta')).toBeVisible();
   const metrics = await page.evaluate(() => {
     const scroll = document.querySelector<HTMLElement>('.workbench-scroll');
     const header = scroll?.querySelector<HTMLElement>('header');
@@ -169,14 +173,14 @@ async function assertPlayerWorkbenchHeader(page: Page, playerName: string) {
     });
     return {
       heading: header.querySelector('h1')?.textContent?.trim() ?? '',
-      roomMetaCount: header.querySelectorAll('p, small').length,
+      roomMeta: header.querySelector<HTMLElement>('.workbench-room-meta')?.textContent?.trim() ?? '',
       bandEdges,
     };
   });
 
   expect(metrics, 'player workbench header and status bands are present').not.toBeNull();
   expect(metrics!.heading).toBe(playerName);
-  expect(metrics!.roomMetaCount).toBe(0);
+  expect(metrics!.roomMeta).toBe(`${longRoomName} • YKGSUMMER`);
   for (const edge of metrics!.bandEdges) {
     expect(edge.leftGap).toBeLessThanOrEqual(1);
     expect(edge.rightGap).toBeLessThanOrEqual(1);

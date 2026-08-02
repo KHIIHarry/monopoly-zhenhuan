@@ -96,7 +96,7 @@ const integration = describe.skipIf(!baseUrl);
 const workspaceRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const migrationRoot = fileURLToPath(new URL('../../../packages/database/prisma/migrations/', import.meta.url));
 const prismaCli = fileURLToPath(new URL('../../../node_modules/prisma/build/index.js', import.meta.url));
-const masterDataSource = new URL('../../../甄嬛传大富翁_master-data.json', import.meta.url);
+const masterDataSource = new URL('../../../monopoly-zhenhuan_master-data.json', import.meta.url);
 const isolatedSchemaName = `game_service_${process.pid}_${randomUUID().replaceAll('-', '')}`;
 let url: string | undefined;
 let isolatedSchemaCreated = false;
@@ -224,6 +224,7 @@ class V2GameFixtureFacade {
       ...input,
       skillEnabled: true,
       startReward: 1_000,
+      redemptionFee: 200,
       allowMidgameJoin: false,
       visibility: 'PUBLIC',
       transferApprovalRequired: false,
@@ -555,7 +556,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
 
     const cancelled = await first.cancelLandingPropertyActions(room.id, landing.id, bank.token, '现场取消', 'cancel-landing-once');
     const replayedCancellation = await second.cancelLandingPropertyActions(room.id, landing.id, bank.token, '现场取消', 'cancel-landing-once');
-    expect(replayedCancellation).toMatchObject({ id: cancelled.id, propertyActionsCancelled: true, plotResolved: true });
+    expect(replayedCancellation).toMatchObject({ id: cancelled.id, status: 'INVALIDATED', propertyActionsCancelled: true, plotResolved: true });
     expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'CANCEL_LANDING_PROPERTY_ACTIONS' } })).toBe(1);
   });
 
@@ -583,10 +584,32 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect(await firstDb.landingEvent.findUniqueOrThrow({ where: { id: property.id } })).toMatchObject({ status: 'DECLARED' });
     await expect(first.declareLanding(room.id, a.playerId, '甘露寺', a.token, 'property-landing-key')).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
 
+    await firstDb.room.update({ where: { id: room.id }, data: { startReward: 1_200 } });
     const start = await first.declareStartLanding(room.id, a.playerId, 'start-landing-keyed', a.token, 'start-landing-key');
     const startReplay = await second.declareStartLanding(room.id, a.playerId, 'start-landing-keyed', a.token, 'start-landing-key');
-    expect(startReplay).toMatchObject({ id: start.id, declaredAt: start.declaredAt.toISOString() });
-    expect(await firstDb.landingEvent.findUniqueOrThrow({ where: { id: start.id } })).toMatchObject({ status: 'DECLARED' });
+    expect(startReplay).toMatchObject({
+      id: start.id,
+      requestId: start.requestId,
+      requestStatus: 'PENDING',
+      amount: 1_200,
+      declaredAt: start.declaredAt.toISOString(),
+    });
+    expect(start).toMatchObject({ id: 'start-landing-keyed', requestStatus: 'PENDING', amount: 1_200 });
+    expect(await firstDb.landingEvent.findUniqueOrThrow({ where: { id: start.id } })).toMatchObject({
+      status: 'CONFIRMED',
+      spaceType: 'START',
+      plotResolved: true,
+    });
+    expect(await firstDb.gameRequest.findMany({
+      where: { roomId: room.id, landingEventId: start.id, type: 'START_REWARD' },
+    })).toEqual([
+      expect.objectContaining({
+        id: start.requestId,
+        actorPlayerId: a.playerId,
+        status: 'PENDING',
+        amount: 1_200,
+      }),
+    ]);
     await expect(first.declareStartLanding(room.id, a.playerId, 'different-start-landing', a.token, 'start-landing-key')).rejects.toThrow('IDEMPOTENCY_KEY_REUSED');
   });
 
@@ -1373,13 +1396,11 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       fundsCommitted: (roomId, transactionId) => { committed.push({ roomId, transactionId }); },
       requestRejected: () => undefined,
     });
-    const landing = await first.declareStartLanding(room.id, a.playerId, 'notify-start-reward-landing', a.token, 'notify-start-reward-landing');
-    await first.confirmLanding(room.id, landing.id, bank.token, true);
-    const request = await first.createRequest(room.id, a.playerId, { type: 'START_REWARD', landingId: landing.id }, 'notify-start-reward-request');
+    const submitted = await first.declareStartLanding(room.id, a.playerId, 'notify-start-reward-landing', a.token, 'notify-start-reward-landing');
     const bankActor = state.banks.get(bank.token)!;
 
-    const approved = await game.approve(bankActor, room.id, request.id, 'notify-start-reward-approval');
-    const replay = await game.approve(bankActor, room.id, request.id, 'notify-start-reward-approval');
+    const approved = await game.approve(bankActor, room.id, submitted.requestId, 'notify-start-reward-approval');
+    const replay = await game.approve(bankActor, room.id, submitted.requestId, 'notify-start-reward-approval');
 
     expect(replay).toEqual(approved);
     expect(committed).toEqual([{ roomId: room.id, transactionId: approved.transactionId }]);
@@ -2415,20 +2436,166 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     }
   });
 
-  it('invalidates a player physical landing and its pending request when a new landing is declared', async () => {
-    const { room, a, b, bank } = await physicalRoom();
-    const oldLanding = await firstDb.landingEvent.findFirstOrThrow({ where: { roomId: room.id, playerId: a.playerId, property: { definition: { name: '甘露寺' } } } });
-    const staleRequest = await first.createRequest(room.id, a.playerId, { type: 'BUY_PROPERTY', propertyName: '甘露寺' }, 'stale-physical-purchase');
+  it('closes a confirmed physical landing without cancelling its submitted request', async () => {
+    const { room, a, bank } = await physicalRoom();
+    const oldLanding = await firstDb.landingEvent.findFirstOrThrow({
+      where: {
+        roomId: room.id,
+        playerId: a.playerId,
+        status: 'CONFIRMED',
+        property: { definition: { name: '甘露寺' } },
+      },
+    });
+    const pending = await first.createRequest(
+      room.id,
+      a.playerId,
+      { type: 'BUY_PROPERTY', propertyName: '甘露寺' },
+      'buy-before-next-physical-move',
+    );
 
-    const newLanding = await first.declareLanding(room.id, a.playerId, '景仁宫', a.token, 'new-physical-landing');
-    await first.confirmLanding(room.id, newLanding.id, bank.token, true);
+    const nextLanding = await first.declareLanding(
+      room.id,
+      a.playerId,
+      '景仁宫',
+      a.token,
+      'next-physical-move',
+    );
 
-    expect(await firstDb.landingEvent.findUniqueOrThrow({ where: { id: oldLanding.id } })).toMatchObject({ status: 'INVALIDATED' });
-    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: staleRequest.id } })).toMatchObject({ status: 'CANCELLED' });
-    expect(await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, definition: { name: '甘露寺' } } })).toMatchObject({ lockedByRequestId: null });
-    await firstDb.roomProperty.updateMany({ where: { roomId: room.id, definition: { name: '甘露寺' } }, data: { ownerPlayerId: b.playerId } });
-    await expect(first.payToll(room.id, a.playerId, '甘露寺', 'stale-physical-toll')).rejects.toThrow('CONFIRMED_LANDING_REQUIRED');
-    await expect(first.createRequest(room.id, a.playerId, { type: 'BUY_PROPERTY', propertyName: '景仁宫' }, 'current-physical-purchase')).resolves.toMatchObject({ status: 'PENDING' });
+    expect(await firstDb.landingEvent.findUniqueOrThrow({
+      where: { id: oldLanding.id },
+    })).toMatchObject({ status: 'CLOSED', propertyActionsCancelled: false });
+    expect(await firstDb.landingEvent.findUniqueOrThrow({
+      where: { id: nextLanding.id },
+    })).toMatchObject({ status: 'DECLARED' });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({
+      where: { id: pending.id },
+    })).toMatchObject({ status: 'PENDING', landingEventId: oldLanding.id });
+
+    await expect(
+      first.approve(room.id, pending.id, bank.token, 'approve-closed-landing-request'),
+    ).resolves.toMatchObject({ status: 'EXECUTED' });
+  });
+
+  it('invalidates an unconfirmed physical declaration when the player corrects it', async () => {
+    const { room, a } = await physicalRoom();
+    const confirmed = await firstDb.landingEvent.findFirstOrThrow({
+      where: { roomId: room.id, playerId: a.playerId, status: 'CONFIRMED' },
+    });
+    await firstDb.landingEvent.update({
+      where: { id: confirmed.id },
+      data: { status: 'INVALIDATED', invalidatedAt: new Date() },
+    });
+
+    const firstDeclaration = await first.declareLanding(
+      room.id, a.playerId, '甘露寺', a.token, 'physical-correction-first',
+    );
+    const corrected = await first.declareLanding(
+      room.id, a.playerId, '景仁宫', a.token, 'physical-correction-second',
+    );
+
+    expect(await firstDb.landingEvent.findUniqueOrThrow({
+      where: { id: firstDeclaration.id },
+    })).toMatchObject({ status: 'INVALIDATED' });
+    expect(corrected).toMatchObject({ status: 'DECLARED' });
+  });
+
+  it('does not use a closed physical landing for a new toll payment', async () => {
+    const { room, a, b } = await physicalRoom();
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: b.playerId },
+    });
+    const oldLanding = await firstDb.landingEvent.findFirstOrThrow({
+      where: { roomId: room.id, playerId: a.playerId, status: 'CONFIRMED' },
+    });
+    await first.declareLanding(
+      room.id, a.playerId, '景仁宫', a.token, 'close-before-toll',
+    );
+
+    await expect(
+      first.payToll(room.id, a.playerId, '甘露寺', 'late-physical-toll'),
+    ).rejects.toThrow('CONFIRMED_LANDING_REQUIRED');
+    expect(await firstDb.landingEvent.findUniqueOrThrow({
+      where: { id: oldLanding.id },
+    })).toMatchObject({ status: 'CLOSED' });
+  });
+
+  it('invalidates a bank-cancelled landing and cancels its pending request', async () => {
+    const { room, a, bank } = await physicalRoom();
+    const landing = await firstDb.landingEvent.findFirstOrThrow({
+      where: { roomId: room.id, playerId: a.playerId, status: 'CONFIRMED' },
+    });
+    const request = await first.createRequest(
+      room.id,
+      a.playerId,
+      { type: 'BUY_PROPERTY', propertyName: '甘露寺' },
+      'buy-before-bank-invalidation',
+    );
+
+    await first.cancelLandingPropertyActions(
+      room.id, landing.id, bank.token, '现场落点有误', 'invalidate-landing',
+    );
+
+    expect(await firstDb.landingEvent.findUniqueOrThrow({
+      where: { id: landing.id },
+    })).toMatchObject({
+      status: 'INVALIDATED',
+      propertyActionsCancelled: true,
+      invalidatedAt: expect.any(Date),
+    });
+    expect(await firstDb.gameRequest.findUniqueOrThrow({
+      where: { id: request.id },
+    })).toMatchObject({ status: 'CANCELLED' });
+  });
+
+  it('keeps a confirmed physical landing active after one landing event', async () => {
+    const { room, a, b } = await physicalRoom();
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: b.playerId },
+    });
+    const landing = await firstDb.landingEvent.findFirstOrThrow({
+      where: { roomId: room.id, playerId: a.playerId, status: 'CONFIRMED' },
+    });
+
+    await first.payToll(room.id, a.playerId, '甘露寺', 'first-shared-landing-event');
+
+    expect(await firstDb.landingEvent.findUniqueOrThrow({
+      where: { id: landing.id },
+    })).toMatchObject({ status: 'CONFIRMED' });
+    expect((await first.snapshot(room.id)).landings).toContainEqual(
+      expect.objectContaining({ id: landing.id, status: 'CONFIRMED', tollSettled: true }),
+    );
+  });
+
+  it('serializes physical landing confirmation against the next declaration', async () => {
+    const { room, a, bank } = await physicalRoom();
+    const pending = await first.declareLanding(
+      room.id, a.playerId, '景仁宫', a.token, 'physical-race-pending',
+    );
+
+    const attempts = await Promise.allSettled([
+      first.confirmLanding(
+        room.id, pending.id, bank.token, true, 'physical-race-confirm',
+      ),
+      second.declareLanding(
+        room.id, a.playerId, '永寿宫', a.token, 'physical-race-next',
+      ),
+    ]);
+    if (attempts[1].status === 'rejected') {
+      await second.declareLanding(
+        room.id, a.playerId, '永寿宫', a.token, 'physical-race-next-retry',
+      );
+    }
+
+    expect(await firstDb.landingEvent.count({
+      where: {
+        roomId: room.id,
+        playerId: a.playerId,
+        turnId: null,
+        status: { in: ['DECLARED', 'CONFIRMED'] },
+      },
+    })).toBe(1);
   });
 
   it('derives the active build discount in snapshots', async () => {
@@ -2639,34 +2806,91 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     });
   });
 
-  it('stores the configured start reward amount on its pending request', async () => {
-    const { room, a, bank } = await physicalRoom();
+  it('submits one configured start reward approval without a bank landing confirmation', async () => {
+    const { room, a } = await physicalRoom();
     await firstDb.room.update({ where: { id: room.id }, data: { startReward: 1_200 } });
-    const landing = await first.declareStartLanding(room.id, a.playerId, 'start-reward-landing', a.token, 'start-reward-landing-key');
-    await first.confirmLanding(room.id, landing.id, bank.token, true);
-
-    const request = await first.createRequest(room.id, a.playerId, { type: 'START_REWARD', landingId: landing.id }, 'start-reward-request');
-
-    expect(request.amount).toBe(1_200);
+    const submitted = await first.declareStartLanding(room.id, a.playerId, 'start-reward-landing', a.token, 'start-reward-landing-key');
     const snapshot = await first.snapshot(room.id);
-    expect(snapshot).toMatchObject({ startReward: 1_200 });
-    expect(snapshot.requests.find((item) => item.id === request.id)).toMatchObject({ amount: 1_200 });
+
+    expect(snapshot.landings).not.toContainEqual(
+      expect.objectContaining({ id: submitted.id, status: 'DECLARED' }),
+    );
+    expect(snapshot.requests).toContainEqual(expect.objectContaining({
+      id: submitted.requestId,
+      type: 'START_REWARD',
+      status: 'PENDING',
+      amount: 1_200,
+    }));
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: submitted.requestId } })).toMatchObject({
+      landingEventId: submitted.id,
+    });
   });
 
-  it('rejects an electronic start reward after its confirmed landing turn expires', async () => {
+  it('cancels an electronic start reward when its confirmed landing turn expires', async () => {
     const room = await first.createRoom({ name: '过期起点奖励', initialBalance: 5000, diceMode: 'ELECTRONIC' });
     const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
     await first.joinPlayer(room.code, '乙', 'huashifei');
     const bank = await first.joinBank(room.code, '国库');
     await first.start(room.id, bank.token, 'start-room');
     await first.roll(room.id, a.playerId, 'roll-before-start-landing');
-    const landing = await first.declareStartLanding(room.id, a.playerId, 'stale-start-landing', a.token, 'stale-start-landing-key');
-    await first.confirmLanding(room.id, landing.id, bank.token, true);
+    const submitted = await first.declareStartLanding(room.id, a.playerId, 'stale-start-landing', a.token, 'stale-start-landing-key');
+    const balanceBefore = (await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).balance;
     await first.endTurn(room.id, a.playerId, 'end-start-landing-turn');
 
+    expect(await firstDb.gameRequest.findUniqueOrThrow({ where: { id: submitted.requestId } })).toMatchObject({
+      status: 'CANCELLED',
+      rejectionReason: 'TURN_ENDED',
+    });
     await expect(
-      first.createRequest(room.id, a.playerId, { type: 'START_REWARD', landingId: landing.id }, 'stale-start-reward'),
-    ).rejects.toThrow('START_LANDING_TURN_EXPIRED');
+      first.approve(room.id, submitted.requestId, bank.token, 'approve-stale-start-reward'),
+    ).rejects.toThrow('REQUEST_NOT_PENDING');
+    expect((await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).balance).toBe(balanceBefore);
+  });
+
+  it.each([
+    { terminalStatus: 'EXECUTED', reverse: false },
+    { terminalStatus: 'REVERSED', reverse: true },
+  ])('rejects another electronic start reward after the turn reward is $terminalStatus', async ({ reverse }) => {
+    const room = await first.createRoom({ name: `电子起点终态-${reverse}`, initialBalance: 5000, diceMode: 'ELECTRONIC' });
+    const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
+    await first.joinPlayer(room.code, '乙', 'huashifei');
+    const bank = await first.joinBank(room.code, '国库');
+    await first.start(room.id, bank.token, `terminal-start-room-${reverse}`);
+    await first.roll(room.id, a.playerId, `terminal-start-roll-${reverse}`);
+
+    const submitted = await first.declareStartLanding(
+      room.id,
+      a.playerId,
+      `terminal-start-landing-${reverse}`,
+      a.token,
+      `terminal-start-key-${reverse}`,
+    );
+    const approved = await first.approve(
+      room.id,
+      submitted.requestId,
+      bank.token,
+      `approve-terminal-start-reward-${reverse}`,
+    );
+    if (reverse) {
+      await first.reverseLatest(
+        room.id,
+        approved.transactionId!,
+        bank.token,
+        '撤销起点奖励',
+        'reverse-terminal-start-reward',
+      );
+    }
+
+    await expect(first.declareStartLanding(
+      room.id,
+      a.playerId,
+      `duplicate-start-landing-${reverse}`,
+      a.token,
+      `duplicate-start-key-${reverse}`,
+    )).rejects.toThrow('START_REWARD_ALREADY_SETTLED');
+    expect(await firstDb.gameRequest.count({
+      where: { roomId: room.id, turnId: submitted.turnId, type: 'START_REWARD' },
+    })).toBe(1);
   });
 
   it('rejects every player-initiated property request outside the current electronic turn', async () => {
@@ -2725,6 +2949,91 @@ integration('PrismaGameService PostgreSQL transactions', () => {
 
     await expect(first.payToll(room.id, a.playerId, '甘露寺', 'mortgaged-toll')).rejects.toThrow('MORTGAGED_PROPERTY');
     expect(await firstDb.player.findMany({ where: { id: { in: [a.playerId, b.playerId] } }, orderBy: { id: 'asc' }, select: { id: true, balance: true } })).toEqual(before);
+  });
+
+  it.each([
+    [200, 300],
+    [0, 500],
+    [800, 0],
+  ])('sells a mortgaged property to the bank with a %i redemption fee', async (redemptionFee, expectedAmount) => {
+    const { room, a, bank } = await physicalRoom();
+    await firstDb.room.update({ where: { id: room.id }, data: { redemptionFee } });
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: a.playerId, buildingLevel: 0, mortgaged: true },
+    });
+    const balanceBefore = (await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).balance;
+
+    const request = await first.createRequest(
+      room.id,
+      a.playerId,
+      { type: 'SELL_PROPERTY_TO_BANK', propertyName: '甘露寺' },
+      `mortgaged-bank-sale-${redemptionFee}`,
+    );
+
+    expect(request).toMatchObject({ amount: expectedAmount, status: 'PENDING' });
+    expect(await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, definition: { name: '甘露寺' } } }))
+      .toMatchObject({ ownerPlayerId: a.playerId, buildingLevel: 0, mortgaged: true, lockedByRequestId: request.id });
+
+    const approved = await first.approve(room.id, request.id, bank.token, `approve-mortgaged-bank-sale-${redemptionFee}`);
+
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } }))
+      .toMatchObject({ balance: balanceBefore + expectedAmount });
+    expect(await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, definition: { name: '甘露寺' } } }))
+      .toMatchObject({ ownerPlayerId: null, buildingLevel: 0, mortgaged: false, lockedByRequestId: null });
+
+    if (redemptionFee === 200) {
+      await first.reverseLatest(room.id, approved.transactionId!, bank.token, '撤销抵押地产卖回', 'reverse-mortgaged-bank-sale');
+      expect(await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } })).toMatchObject({ balance: balanceBefore });
+      expect(await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, definition: { name: '甘露寺' } } }))
+        .toMatchObject({ ownerPlayerId: a.playerId, buildingLevel: 0, mortgaged: true, lockedByRequestId: null });
+    }
+  });
+
+  it('approves a legacy unmortgaged bank-sale request without propertyMortgaged in its payload', async () => {
+    const { room, a, bank } = await physicalRoom();
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: a.playerId, buildingLevel: 0, mortgaged: false },
+    });
+    const request = await first.createRequest(
+      room.id,
+      a.playerId,
+      { type: 'SELL_PROPERTY_TO_BANK', propertyName: '甘露寺' },
+      'legacy-unmortgaged-bank-sale',
+    );
+    const stored = await firstDb.gameRequest.findUniqueOrThrow({ where: { id: request.id } });
+    const legacyPayload = { ...(stored.payload as Record<string, unknown>) };
+    delete legacyPayload.propertyMortgaged;
+    await firstDb.gameRequest.update({
+      where: { id: request.id },
+      data: { payload: legacyPayload },
+    });
+
+    await expect(first.approve(
+      room.id,
+      request.id,
+      bank.token,
+      'approve-legacy-unmortgaged-bank-sale',
+    )).resolves.toMatchObject({ status: 'EXECUTED' });
+    expect(await firstDb.roomProperty.findFirstOrThrow({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+    })).toMatchObject({ ownerPlayerId: null, mortgaged: false, lockedByRequestId: null });
+  });
+
+  it('continues to reject player trading of a mortgaged property', async () => {
+    const { room, a, b } = await physicalRoom();
+    await firstDb.roomProperty.updateMany({
+      where: { roomId: room.id, definition: { name: '甘露寺' } },
+      data: { ownerPlayerId: a.playerId, buildingLevel: 0, mortgaged: true },
+    });
+
+    await expect(first.createRequest(room.id, a.playerId, {
+      type: 'TRADE_PROPERTY',
+      propertyName: '甘露寺',
+      targetPlayerId: b.playerId,
+      amount: 300,
+    }, 'trade-mortgaged-property')).rejects.toThrow('MORTGAGED_PROPERTY');
   });
 
   it('rejects selling a property to the bank while it has buildings', async () => {
@@ -2982,14 +3291,26 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     expect(playerSnapshot.requests.map((request) => request.id)).toContain(ownRequest.id);
   });
 
-  it('keeps every pending request visible to the bank while bounding resolved history', async () => {
+  it('keeps every pending request and landing visible to the bank while bounding resolved history', async () => {
     const room = await first.createRoom({ name: '待审批快照上限', initialBalance: 5000, diceMode: 'PHYSICAL' });
     const a = await first.joinPlayer(room.code, '甲', 'zhenhuan');
-    await first.joinPlayer(room.code, '乙', 'huashifei');
+    const b = await first.joinPlayer(room.code, '乙', 'huashifei');
     const bank = await first.joinBank(room.code, '国库');
     await first.start(room.id, bank.token, 'start-room');
     const landing = await first.declareLanding(room.id, a.playerId, '甘露寺', a.token, 'newer-property-landing');
     await first.confirmLanding(room.id, landing.id, bank.token, true);
+    const pendingLanding = await first.declareLanding(room.id, b.playerId, '碎玉轩', b.token, 'oldest-pending-landing');
+    await firstDb.landingEvent.update({ where: { id: pendingLanding.id }, data: { declaredAt: new Date('2019-01-01T00:00:00.000Z') } });
+    const declaringMember = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId }, select: { memberId: true } });
+    await firstDb.landingEvent.createMany({ data: Array.from({ length: 31 }, (_, index) => ({
+      roomId: room.id,
+      playerId: a.playerId,
+      spaceType: 'OTHER' as const,
+      status: 'CONFIRMED' as const,
+      plotResolved: true,
+      declaredBy: declaringMember.memberId,
+      declaredAt: new Date(Date.UTC(2023, 0, 1) + index * 1000),
+    })) });
     const lockedRequest = await first.createRequest(room.id, a.playerId, { type: 'BUY_PROPERTY', propertyName: '甘露寺' }, 'oldest-locked-request');
     await firstDb.gameRequest.update({ where: { id: lockedRequest.id }, data: { createdAt: new Date('2020-01-01T00:00:00.000Z') } });
     await firstDb.gameRequest.createMany({ data: Array.from({ length: 101 }, (_, index) => ({
@@ -3015,6 +3336,10 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     });
 
     const snapshot = await first.snapshot(room.id);
+    const [persistedRequest, persistedLanding] = await Promise.all([
+      firstDb.gameRequest.findUniqueOrThrow({ where: { id: lockedRequest.id } }),
+      firstDb.landingEvent.findUniqueOrThrow({ where: { id: pendingLanding.id } }),
+    ]);
 
     expect(snapshot.requests.filter((request) => request.status === 'PENDING')).toHaveLength(102);
     expect(snapshot.requests.filter((request) => request.status !== 'PENDING')).toHaveLength(100);
@@ -3022,6 +3347,11 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       id: lockedRequest.id,
       propertyName: '甘露寺',
       status: 'PENDING',
+      createdAt: persistedRequest.createdAt,
+    });
+    expect(snapshot.landings.find((item) => item.id === pendingLanding.id)).toMatchObject({
+      status: 'DECLARED',
+      createdAt: persistedLanding.declaredAt,
     });
     expect(snapshot.requests.find((request) => request.id === newestResolved.id)).toMatchObject({
       status: 'REJECTED',
@@ -3167,22 +3497,21 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     });
   });
 
-  it('executes a non-current PLAYING replacement and rotates to the replacement instead of the dormant target', async () => {
+  it('executes a lobby replacement and rotates to the replacement instead of the dormant target', async () => {
     const room = await first.createRoom({ name: 'Non-current playing replacement', initialBalance: 5000, diceMode: 'ELECTRONIC' });
     const current = await first.joinPlayer(room.code, '当前玩家', 'zhenhuan');
     const target = await first.joinPlayer(room.code, '非当前目标', 'huashifei');
     await first.joinPlayer(room.code, '后续玩家', 'meizhuang');
     const bank = await first.joinBank(room.code, '申请人兼银行');
-    await first.start(room.id, bank.token, 'non-current-replacement-start');
     const bankIdentity = await state.identities.get(bank.token)!;
     const targetIdentity = await state.identities.get(target.token)!;
     const accounts = new AccountRoomService(firstDb);
 
     const requested = await accounts.requestRoleSwap(bankIdentity.auth, room.id, 'huashifei', 'non-current-replacement-request');
     await accounts.acceptRoleSwap(targetIdentity.auth, requested.id, 'non-current-replacement-accept');
-    const approved = await accounts.resolveRoleSwap(bankIdentity.auth, requested.id, 'APPROVE_BANK', 'non-current-replacement-bank');
+    await first.start(room.id, bank.token, 'non-current-replacement-start');
 
-    expect(approved.status).toBe('APPROVED');
+    expect((await firstDb.roleSwapRequest.findUniqueOrThrow({ where: { id: requested.id } })).status).toBe('APPROVED');
     const requesterMembership = await firstDb.roomMembership.findUniqueOrThrow({
       where: { roomId_accountId: { roomId: room.id, accountId: bankIdentity.actor.accountId } },
       include: { player: true },
@@ -3201,148 +3530,8 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     const next = await first.forceNext(room.id, bank.token, '推进到接替者', 'non-current-replacement-force');
     expect(next.playerId).toBe(requesterMembership.player!.id);
     expect(next.playerId).not.toBe(target.playerId);
-    const retainedProperty = await firstDb.roomProperty.findFirstOrThrow({
-      where: { roomId: room.id, ownerPlayerId: target.playerId },
-      include: { definition: true },
-    });
-    const game = new PrismaGameService(firstDb, () => 0);
-    await game.roll(bankIdentity.actor, room.id, requesterMembership.player!.id, 'retained-owner-roll');
-    const landing = await game.declareLanding(bankIdentity.actor, room.id, requesterMembership.player!.id, retainedProperty.definition.name, 'retained-owner-landing');
-    await game.confirmLanding(bankIdentity.actor, room.id, landing.id, true, 'retained-owner-confirm');
-    const balancesBeforeToll = await firstDb.player.findMany({
-      where: { id: { in: [requesterMembership.player!.id, target.playerId] } },
-      select: { id: true, balance: true, version: true },
-      orderBy: { id: 'asc' },
-    });
-    await expect(game.payToll(bankIdentity.actor, room.id, requesterMembership.player!.id, retainedProperty.definition.name, 'retained-owner-toll'))
-      .rejects.toThrow('NO_TOLL_DUE');
-    expect(await firstDb.player.findMany({
-      where: { id: { in: [requesterMembership.player!.id, target.playerId] } },
-      select: { id: true, balance: true, version: true },
-      orderBy: { id: 'asc' },
-    })).toEqual(balancesBeforeToll);
-    expect(await firstDb.idempotencyRecord.count({ where: { scope: `account:${bankIdentity.actor.accountId}:room:${room.id}:toll`, key: 'retained-owner-toll' } })).toBe(0);
-    expect(await firstDb.idempotencyRecord.count({ where: { scope: `landing:${landing.id}:toll`, key: 'settled' } })).toBe(0);
-    await expect(game.endTurn(bankIdentity.actor, room.id, requesterMembership.player!.id, 'retained-owner-end-turn'))
-      .resolves.toMatchObject({ playerId: expect.not.stringMatching(new RegExp(`^${target.playerId}$`)) });
     expect((await first.snapshot(room.id)).players.map((player) => player.id)).not.toContain(target.playerId);
-    expect((await firstDb.turn.findFirstOrThrow({ where: { roomId: room.id, status: 'ACTIVE' } })).playerId).not.toBe(target.playerId);
     expect(current.playerId).not.toBe(target.playerId);
-  });
-
-  it('rejects every gameplay target mutation for a public-replacement retained Player without mutation', async () => {
-    const room = await first.createRoom({ name: 'Retained target rejection', initialBalance: 5000, diceMode: 'PHYSICAL' });
-    const seller = await first.joinPlayer(room.code, '卖方', 'zhenhuan');
-    const target = await first.joinPlayer(room.code, '留存目标', 'huashifei');
-    const bank = await first.joinBank(room.code, '接替者兼银行');
-    await first.start(room.id, bank.token, 'retained-target-start');
-    const bankIdentity = await state.identities.get(bank.token)!;
-    const targetIdentity = await state.identities.get(target.token)!;
-    const accounts = new AccountRoomService(firstDb);
-    const sellerProperty = await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, ownerPlayerId: seller.playerId }, include: { definition: true } });
-    const targetProperty = await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, ownerPlayerId: target.playerId }, include: { definition: true } });
-    const extraSellerProperty = await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, ownerPlayerId: null }, include: { definition: true } });
-    const manualProperty = await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, ownerPlayerId: null, id: { not: extraSellerProperty.id } }, include: { definition: true } });
-    const dormantOwnerProperty = await firstDb.roomProperty.findFirstOrThrow({ where: { roomId: room.id, ownerPlayerId: null, id: { notIn: [extraSellerProperty.id, manualProperty.id] } }, include: { definition: true } });
-    await first.adjustProperty(room.id, extraSellerProperty.definition.name, { ownerPlayerId: seller.playerId }, bank.token, '交易测试准备', 'retained-target-extra-property');
-    await first.adjustProperty(room.id, dormantOwnerProperty.definition.name, { ownerPlayerId: target.playerId }, bank.token, '留存产权测试准备', 'retained-owner-extra-property');
-    await first.addSkipTurns(room.id, target.playerId, 2, 'MANUAL', bank.token, 'retained-target-pre-skip', '接替前停轮');
-    const pendingTrade = await first.createRequest(room.id, seller.playerId, {
-      type: 'TRADE_PROPERTY',
-      propertyName: sellerProperty.definition.name,
-      targetPlayerId: target.playerId,
-      amount: 100,
-    }, 'retained-target-pending-trade');
-    await first.confirmTrade(room.id, pendingTrade.id, target.playerId, 'retained-target-confirm-before-swap');
-    const dormantActorTrade = await first.createRequest(room.id, target.playerId, {
-      type: 'TRADE_PROPERTY',
-      propertyName: targetProperty.definition.name,
-      targetPlayerId: seller.playerId,
-      amount: 100,
-    }, 'retained-actor-pending-trade');
-    await first.confirmTrade(room.id, dormantActorTrade.id, seller.playerId, 'retained-actor-confirm-before-swap');
-    const targetLanding = await first.declareLanding(room.id, target.playerId, targetProperty.definition.name, target.token, 'retained-target-unconfirmed-landing');
-
-    const swap = await accounts.requestRoleSwap(bankIdentity.auth, room.id, 'huashifei', 'retained-target-swap-request');
-    await accounts.acceptRoleSwap(targetIdentity.auth, swap.id, 'retained-target-swap-accept');
-    await accounts.resolveRoleSwap(bankIdentity.auth, swap.id, 'APPROVE_BANK', 'retained-target-swap-approve');
-    const retainedMembership = await firstDb.roomMembership.findUniqueOrThrow({
-      where: { roomId_accountId: { roomId: room.id, accountId: targetIdentity.actor.accountId } },
-      include: { player: true },
-    });
-    expect(retainedMembership).toMatchObject({ characterId: null, player: { id: target.playerId, characterId: null } });
-
-    const landing = await first.declareLanding(room.id, seller.playerId, targetProperty.definition.name, seller.token, 'retained-target-landing');
-    await first.confirmLanding(room.id, landing.id, bank.token, true, 'retained-target-landing-confirm');
-    const before = {
-      player: await firstDb.player.findUniqueOrThrow({ where: { id: target.playerId } }),
-      properties: await firstDb.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
-      trade: await firstDb.gameRequest.findUniqueOrThrow({ where: { id: pendingTrade.id } }),
-      actorTrade: await firstDb.gameRequest.findUniqueOrThrow({ where: { id: dormantActorTrade.id } }),
-      targetLanding: await firstDb.landingEvent.findUniqueOrThrow({ where: { id: targetLanding.id } }),
-      skips: await firstDb.skipTurnEntry.findMany({ where: { roomId: room.id, playerId: target.playerId }, orderBy: { id: 'asc' } }),
-      transactionCount: await firstDb.gameTransaction.count({ where: { roomId: room.id } }),
-      ledgerCount: await firstDb.ledgerEntry.count({ where: { roomId: room.id } }),
-      auditCount: await firstDb.auditLog.count({ where: { roomId: room.id } }),
-      requestCount: await firstDb.gameRequest.count({ where: { roomId: room.id } }),
-      idempotencyCount: await firstDb.idempotencyRecord.count(),
-    };
-
-    const attempts = await Promise.allSettled([
-      first.transfer(room.id, { fromPlayerId: seller.playerId, recipientType: 'PLAYER', toPlayerId: target.playerId, amount: 10, isPlotFine: false }, 'retained-target-transfer'),
-      first.payToll(room.id, seller.playerId, targetProperty.definition.name, 'retained-target-toll'),
-      first.confirmLanding(room.id, targetLanding.id, bank.token, true, 'retained-target-confirm-after-swap'),
-      first.adjustBalance(room.id, target.playerId, 10, bank.token, '不应修正', 'retained-target-balance'),
-      first.adjustProperty(room.id, manualProperty.definition.name, { ownerPlayerId: target.playerId }, bank.token, '不应分配', 'retained-target-property'),
-      first.adjustProperty(room.id, targetProperty.definition.name, { buildingLevel: targetProperty.buildingLevel }, bank.token, '不应修改留存产权', 'retained-owner-omitted-property'),
-      first.adjustProperty(room.id, dormantOwnerProperty.definition.name, { ownerPlayerId: null }, bank.token, '不应清空留存产权', 'retained-owner-clear-property'),
-      first.adjustProperty(room.id, dormantOwnerProperty.definition.name, { ownerPlayerId: seller.playerId }, bank.token, '不应转移留存产权', 'retained-owner-reassign-property'),
-      first.addSkipTurns(room.id, target.playerId, 1, 'MANUAL', bank.token, 'retained-target-add-skip', '不应停轮'),
-      first.consumeSkip(room.id, target.playerId, 1, bank.token, 'retained-target-consume-skip', '不应消耗'),
-      first.plotFine(room.id, target.playerId, 10, 'retained-target-fine', bank.token),
-      first.createRequest(room.id, seller.playerId, {
-        type: 'TRADE_PROPERTY',
-        propertyName: extraSellerProperty.definition.name,
-        targetPlayerId: target.playerId,
-        amount: 10,
-      }, 'retained-target-new-trade'),
-      first.approve(room.id, pendingTrade.id, bank.token, 'retained-target-approve'),
-      first.approve(room.id, dormantActorTrade.id, bank.token, 'retained-actor-approve'),
-      first.confirmTrade(room.id, pendingTrade.id, target.playerId, 'retained-target-confirm-after-swap'),
-      first.confirmTrade(room.id, dormantActorTrade.id, seller.playerId, 'retained-actor-confirm-before-swap'),
-    ]);
-    const codes = attempts.map((result) => result.status === 'rejected' ? (result.reason as Error).message : 'FULFILLED');
-    expect(codes).toEqual([
-      'PLAYER_NOT_FOUND',
-      'NO_TOLL_DUE',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_NOT_FOUND',
-      'PLAYER_IDENTITY_MISMATCH',
-      'PLAYER_NOT_FOUND',
-    ]);
-    expect({
-      player: await firstDb.player.findUniqueOrThrow({ where: { id: target.playerId } }),
-      properties: await firstDb.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
-      trade: await firstDb.gameRequest.findUniqueOrThrow({ where: { id: pendingTrade.id } }),
-      actorTrade: await firstDb.gameRequest.findUniqueOrThrow({ where: { id: dormantActorTrade.id } }),
-      targetLanding: await firstDb.landingEvent.findUniqueOrThrow({ where: { id: targetLanding.id } }),
-      skips: await firstDb.skipTurnEntry.findMany({ where: { roomId: room.id, playerId: target.playerId }, orderBy: { id: 'asc' } }),
-      transactionCount: await firstDb.gameTransaction.count({ where: { roomId: room.id } }),
-      ledgerCount: await firstDb.ledgerEntry.count({ where: { roomId: room.id } }),
-      auditCount: await firstDb.auditLog.count({ where: { roomId: room.id } }),
-      requestCount: await firstDb.gameRequest.count({ where: { roomId: room.id } }),
-      idempotencyCount: await firstDb.idempotencyRecord.count(),
-    }).toEqual(before);
   });
 
   it('safely parses room-only socket subscriptions without bearer secrets', () => {

@@ -32,6 +32,8 @@ test('room creation submits every supported setting after scannable confirmation
   await page.getByLabel('房间密码（可选）').fill('palace-secret');
   await page.getByLabel('初始资金').fill('6800');
   await page.getByLabel('起点奖励').fill('1200');
+  await expect(page.getByLabel('赎回手续费')).toHaveValue('200');
+  await page.getByLabel('赎回手续费').fill('0');
   await page.getByRole('button', { name: '实体骰子' }).click();
   await page.getByLabel('房间可见性').selectOption('PRIVATE');
   await page.getByLabel('启用人物技能').uncheck();
@@ -40,11 +42,12 @@ test('room creation submits every supported setting after scannable confirmation
   await page.getByRole('button', { name: '检查设置' }).click();
   await expect(page.getByRole('heading', { name: '确认房间设置' })).toBeVisible();
   await expect(page.getByText('6,800 / 1,200 两')).toBeVisible();
+  await expect(page.getByText('赎回手续费 0 两')).toBeVisible();
   await page.getByRole('button', { name: '确认创建' }).click();
   await expect.poll(() => attempts).toBe(1);
   await page.getByRole('button', { name: '确认创建' }).click();
   await expect.poll(() => attempts).toBe(2);
-  expect(submitted).toEqual({ name: '翊坤宫超长夜局名称', password: 'palace-secret', initialBalance: 6800, diceMode: 'PHYSICAL', skillEnabled: false, startReward: 1200, allowMidgameJoin: true, visibility: 'PRIVATE', transferApprovalRequired: true });
+  expect(submitted).toEqual({ name: '翊坤宫超长夜局名称', password: 'palace-secret', initialBalance: 6800, diceMode: 'PHYSICAL', skillEnabled: false, startReward: 1200, redemptionFee: 0, allowMidgameJoin: true, visibility: 'PRIVATE', transferApprovalRequired: true });
   expect(keys[0]).toBeTruthy();
   expect(keys[1]).toBe(keys[0]);
 });
@@ -106,6 +109,39 @@ test('profile shows authoritative timestamps and confirms revoke-one and logout-
   await expect.poll(() => logoutOthers).toBe(1);
 });
 
+test('manual admin refresh presents completion feedback', async ({ page }) => {
+  await lobbyRoutes(page);
+  let adminReads = 0;
+  await page.route('**/api/admin/**', (route) => {
+    adminReads += 1;
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/admin/accounts')
+      return route.fulfill({ json: { items: [], nextCursor: null } });
+    if (path === '/api/admin/rooms')
+      return route.fulfill({ json: { items: [], nextCursor: null } });
+    if (path === '/api/admin/security-logs')
+      return route.fulfill({ json: { items: [], nextCursor: null } });
+    if (path === '/api/admin/dashboard')
+      return route.fulfill({ json: {
+        accounts: { total: 1, active: 1 },
+        sessions: { valid: 1 },
+        rooms: { lobby: 0, playing: 0, finished: 0 },
+        games: { settledTotal: 0, averageDurationSeconds: 0 },
+        characterSelections: [], characterWins: [], recentGames: [],
+      } });
+    return route.fulfill({ status: 404, json: { error: 'NOT_FOUND' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: '超管后台' }).click();
+  await expect.poll(() => adminReads).toBeGreaterThan(0);
+  const readsBeforeRefresh = adminReads;
+  await page.getByRole('button', { name: '刷新后台' }).click();
+
+  await expect.poll(() => adminReads).toBeGreaterThan(readsBeforeRefresh);
+  await expect(page.locator('.toast')).toContainText('后台数据已刷新');
+});
+
 test('super-admin exposes and calls complete Task 6 account, device, room, log, and dashboard routes', async ({ page }) => {
   await lobbyRoutes(page);
   const adminAccounts = [
@@ -114,13 +150,19 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   ];
   const pagedAccount = { id: 'account-paged', username: 'fuchaguiren', displayName: '富察贵人', note: null, status: 'ACTIVE', isSuperAdmin: false, canCreateRoom: false, lastLoginAt: null, createdAt: now, updatedAt: now };
   const adminRooms = [{ id: 'room-1', name: room.name, status: 'LOBBY', visibility: 'PUBLIC', creator: { id: 'account-1', displayName: '甄嬛' }, memberCount: 2, playerCount: 1, hasBank: true, hasPassword: false, createdAt: now, updatedAt: now, settlement: null }];
-  const detail = { id: 'room-1', code: 'SYX', name: room.name, status: 'LOBBY', creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration: { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, playerLimit: 5, hasPassword: false }, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [{ id: 'membership-1', accountId: 'account-active', displayNameSnapshot: '沈眉庄', status: 'ACTIVE', characterId: 'meizhuang', characterName: '沈眉庄', isBank: true, controllerActive: true, joinedAt: now, player: { id: 'player-1', balance: 5000, status: 'ACTIVE', ownedPropertyCount: 1 } }, { id: 'membership-2', accountId: 'account-disabled', displayNameSnapshot: '安陵容', status: 'ACTIVE', characterId: null, characterName: null, isBank: false, controllerActive: false, joinedAt: now, player: null }], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null };
+  const detail = { id: 'room-1', code: 'SYX', name: room.name, status: 'LOBBY', creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration: { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, redemptionFee: 200, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, playerLimit: 5, hasPassword: false }, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [{ id: 'membership-1', accountId: 'account-active', displayNameSnapshot: '沈眉庄', status: 'ACTIVE', characterId: 'meizhuang', characterName: '沈眉庄', isBank: true, controllerActive: true, joinedAt: now, player: { id: 'player-1', balance: 5000, status: 'ACTIVE', ownedPropertyCount: 1 } }, { id: 'membership-2', accountId: 'account-disabled', displayNameSnapshot: '安陵容', status: 'ACTIVE', characterId: null, characterName: null, isBank: false, controllerActive: false, joinedAt: now, player: null }], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null };
   const dashboard = { accounts: { total: 3, active: 2 }, sessions: { valid: 2 }, rooms: { lobby: 1, playing: 0, finished: 1 }, games: { settledTotal: 1, averageDurationSeconds: 3600 }, characterSelections: [{ characterId: 'zhenhuan', characterNameSnapshot: '钮祜禄·甄嬛', count: 2 }], characterWins: [{ characterNameSnapshot: '钮祜禄·甄嬛', count: 1 }], recentGames: [{ roomId: 'history-1', roomNameSnapshot: '永寿宫旧局', endedAt: now, durationSeconds: 3600, forced: false, winners: [{ displayNameSnapshot: '甄嬛', characterNameSnapshot: '钮祜禄·甄嬛' }] }] };
   const writes: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
   let roomDetailReads = 0;
   await page.route('**/api/admin/**', async (route) => {
     const url = new URL(route.request().url()); const path = url.pathname; const method = route.request().method();
-    if (method !== 'GET') { writes.push({ method, path, body: (await body(route)) ?? {} }); return route.fulfill({ json: { ok: true, account: adminAccounts[0], revokedSessions: 1 } }); }
+    if (method !== 'GET') {
+      const requestBody = (await body(route)) ?? {};
+      writes.push({ method, path, body: requestBody });
+      if (method === 'PATCH' && path === '/api/admin/accounts/account-active')
+        Object.assign(adminAccounts[0], requestBody);
+      return route.fulfill({ json: { ok: true, account: adminAccounts[0], revokedSessions: 1 } });
+    }
     if (path === '/api/admin/accounts') return route.fulfill({ json: url.searchParams.get('cursor') === 'accounts-page-2' ? { items: [pagedAccount], nextCursor: null } : { items: adminAccounts, nextCursor: 'accounts-page-2' } });
     if (path.endsWith('/sessions')) return route.fulfill({ json: { items: [{ id: 'target-session', deviceName: '目标 Mac', browser: 'Chrome', operatingSystem: 'macOS', loginIp: '10.***.***.8', lastIp: '10.***.***.9', createdAt: now, lastActiveAt: now, expiresAt: now, active: true, revokedAt: null, revokeReason: null }], nextCursor: null } });
     if (path === '/api/admin/rooms') return route.fulfill({ json: { items: adminRooms, nextCursor: null } });
@@ -146,9 +188,13 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   await page.getByRole('button', { name: '创建账号' }).click();
   await page.getByRole('button', { name: '管理' }).first().click();
   await page.getByLabel('昵称', { exact: true }).fill('惠贵人'); await page.getByRole('button', { name: '保存账号' }).click();
+  await expect(page.getByRole('status')).toContainText('已保存并生效');
   await page.getByLabel('重置后的密码').fill('AnotherPassword42'); await page.getByRole('button', { name: '重置密码' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
   await page.getByRole('button', { name: '禁用账号' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
-  await page.getByLabel('设备注销原因').fill('安全检查'); await page.getByRole('button', { name: '注销' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
+  await page.getByRole('button', { name: '注销' }).click();
+  const revokeDialog = page.getByRole('dialog', { name: '注销目标设备' });
+  await expect(revokeDialog).toContainText('原因：管理员注销设备');
+  await revokeDialog.getByRole('button', { name: '确认执行' }).click();
   await page.getByRole('button', { name: '管理' }).nth(1).click(); await page.getByRole('button', { name: '启用账号' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
   await page.getByRole('button', { name: '删除账号' }).click();
   await expect(page.getByRole('button', { name: '确认删除' })).toBeDisabled();
@@ -157,18 +203,26 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   await expect(page.getByRole('button', { name: '确认删除' })).toBeEnabled();
   await page.getByRole('button', { name: '确认删除' }).click();
 
-  await page.getByRole('tab', { name: '房间' }).click(); await page.getByRole('button', { name: '管理' }).click();
+  const roomsTab = page.getByRole('tab', { name: '房间' });
+  await roomsTab.click();
+  await expect(roomsTab).toHaveAttribute('aria-selected', 'true');
+  const roomsPanel = page.getByRole('tabpanel', { name: '房间' });
+  await roomsPanel.getByRole('button', { name: '管理' }).click();
   await page.getByLabel('房间名称').fill('碎玉轩新夜局'); await page.getByRole('button', { name: '保存房间配置' }).click();
   await page.getByLabel('新房间密码').fill('new-secret'); await page.getByRole('button', { name: '更新密码' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
   await page.getByRole('button', { name: '移除成员' }).first().click(); await page.getByRole('button', { name: '确认执行' }).click();
-  await page.getByLabel('更换银行').selectOption('membership-2'); const readsBeforeBank = roomDetailReads; await page.getByRole('button', { name: '确认更换银行' }).click(); await page.getByRole('button', { name: '确认执行' }).click(); await expect.poll(() => roomDetailReads).toBeGreaterThan(readsBeforeBank);
-  await expect(page.getByLabel('更换银行')).toHaveValue('membership-1');
+  const bankSelect = roomsPanel.getByRole('combobox', { name: '更换银行' });
+  await bankSelect.selectOption('membership-2'); const readsBeforeBank = roomDetailReads; await page.getByRole('button', { name: '确认更换银行' }).click();
+  const bankDialog = page.getByRole('dialog', { name: '更换银行' });
+  await bankDialog.getByRole('button', { name: '确认执行' }).click(); await expect.poll(() => roomDetailReads).toBeGreaterThan(readsBeforeBank);
+  await expect(bankDialog).toHaveCount(0);
+  await expect(bankSelect).toHaveValue('membership-1');
   await page.getByLabel('强制结束原因').fill('现场提前结束'); await expect(page.getByRole('button', { name: '强制结束' })).toBeEnabled(); await page.getByRole('button', { name: '强制结束' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
-  await page.getByRole('button', { name: '删除房间' }).click();
-  await expect(page.getByRole('button', { name: '确认删除' })).toBeDisabled();
-  await page.getByLabel('确认删除房间').fill(room.name);
-  await expect(page.getByRole('button', { name: '确认删除' })).toBeEnabled();
-  await page.getByRole('button', { name: '确认删除' }).click();
+  await page.getByRole('button', { name: '归档房间' }).click();
+  await expect(page.getByRole('button', { name: '确认归档' })).toBeDisabled();
+  await page.getByLabel('确认归档房间').fill(room.name);
+  await expect(page.getByRole('button', { name: '确认归档' })).toBeEnabled();
+  await page.getByRole('button', { name: '确认归档' }).click();
   await page.getByRole('tab', { name: '安全日志' }).click(); await expect(page.getByText('LOGIN_SUCCEEDED')).toBeVisible();
 
   const paths = writes.map((item) => `${item.method} ${item.path}`);
@@ -179,15 +233,21 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
     'PATCH /api/admin/rooms/room-1', 'POST /api/admin/rooms/room-1/password', 'POST /api/admin/rooms/room-1/members/membership-1/remove',
     'POST /api/admin/rooms/room-1/bank/reassign', 'POST /api/admin/rooms/room-1/finish', 'DELETE /api/admin/rooms/room-1',
   ]) expect(paths).toContain(expected);
+  expect(writes).toContainEqual({
+    method: 'POST',
+    path: '/api/admin/accounts/account-active/sessions/target-session/revoke',
+    body: { reason: '管理员注销设备' },
+  });
   expect(writes.every((write) => write.path.startsWith('/api/admin/'))).toBe(true);
 });
 
 test('管理员房间配置在回读后确认保存', async ({ page }) => {
   await lobbyRoutes(page);
   const adminRooms = [{ id: 'room-1', name: room.name, status: 'LOBBY', visibility: 'PUBLIC', creator: { id: 'account-1', displayName: '甄嬛' }, memberCount: 2, playerCount: 1, hasBank: true, hasPassword: false, createdAt: now, updatedAt: now, settlement: null }];
-  const configuration = { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, playerLimit: 5, hasPassword: false };
+  const configuration = { initialBalance: 5000, diceMode: 'ELECTRONIC', skillEnabled: true, startReward: 1000, redemptionFee: 200, allowMidgameJoin: false, visibility: 'PUBLIC', transferApprovalRequired: false, playerLimit: 5, hasPassword: false };
   const dashboard = { accounts: { total: 1, active: 1 }, sessions: { valid: 1 }, rooms: { lobby: 1, playing: 0, finished: 0 }, games: { settledTotal: 0, averageDurationSeconds: 0 }, characterSelections: [], characterWins: [], recentGames: [] };
-  const detail = () => ({ id: 'room-1', code: 'SYX', name: room.name, status: 'LOBBY', creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null });
+  let roomStatus: 'LOBBY' | 'PLAYING' = 'LOBBY';
+  const detail = () => ({ id: 'room-1', code: 'SYX', name: room.name, status: roomStatus, creator: { id: 'account-1', displayName: '甄嬛', username: 'zhenhuan' }, configuration, lifecycle: { createdAt: now, startedAt: null, updatedAt: now, expiresAt: now }, members: [], blockers: { pendingRequests: 0, pendingSwaps: 0, openDebts: 0, activeTurns: 0 }, settlement: null });
   let writes = 0;
   let submitted: Record<string, unknown> = {};
   await page.route('**/api/auth/login', (route) => route.fulfill({ json: { account } }));
@@ -212,26 +272,24 @@ test('管理员房间配置在回读后确认保存', async ({ page }) => {
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: '加入游戏组' }).click();
-  await page.getByLabel('用户名').fill(account.username);
-  await page.getByLabel('密码').fill('StrongPassword42');
-  await page.getByRole('button', { name: '登录' }).click();
   await page.getByRole('button', { name: '超管后台' }).click();
   await page.getByRole('tab', { name: '房间' }).click();
   await page.getByRole('button', { name: '管理' }).click();
-  await page.getByLabel('初始资金').fill('6800');
+  await page.getByLabel('赎回手续费').fill('0');
   await page.getByRole('button', { name: '保存房间配置' }).click();
 
   await expect(page.getByRole('button', { name: '正在保存' })).toBeDisabled();
   await expect(page.getByRole('status')).toHaveText('正在保存房间配置');
   await expect(page.getByRole('status')).toHaveText('已保存并生效');
-  await expect(page.getByLabel('初始资金')).toHaveValue('6800');
+  await expect(page.getByLabel('赎回手续费')).toHaveValue('0');
   expect(writes).toBe(1);
-  expect(submitted).toEqual({ initialBalance: 6800 });
+  expect(submitted).toEqual({ redemptionFee: 0 });
 
   await page.getByRole('button', { name: '关闭' }).click();
+  roomStatus = 'PLAYING';
   await page.getByRole('button', { name: '管理' }).click();
-  await expect(page.getByLabel('初始资金')).toHaveValue('6800');
+  await expect(page.getByLabel('赎回手续费')).toHaveValue('0');
+  await expect(page.getByLabel('赎回手续费')).toBeDisabled();
 });
 
 test('admin mutation reuses its key after a lost response', async ({ page }) => {

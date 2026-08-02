@@ -233,6 +233,48 @@ describe('database delivery contract', () => {
     );
   });
 
+  it('enforces one new electronic start reward per turn without rewriting history', async () => {
+    const migration = await readDatabaseFile(
+      'prisma/migrations/202608010018_electronic_start_reward_turn_guard/migration.sql',
+    ).catch(() => '');
+
+    expect(migration).toContain(
+      'CREATE FUNCTION reject_duplicate_start_reward_for_turn()',
+    );
+    expect(migration).toMatch(
+      /CREATE TRIGGER "GameRequest_one_start_reward_per_turn"[\s\S]*?BEFORE INSERT OR UPDATE OF "turnId", "type", "status" ON "GameRequest"[\s\S]*?reject_duplicate_start_reward_for_turn\(\)/,
+    );
+    expect(migration).toContain(`NEW."type" <> 'START_REWARD'`);
+    expect(migration).toContain(`existing."status" IN ('PENDING', 'APPROVED', 'EXECUTED', 'REVERSED')`);
+    expect(migration).not.toContain('CREATE UNIQUE INDEX');
+  });
+
+  it('replaces an already-deployed start-reward unique index with the history-safe guard', async () => {
+    const migration = await readDatabaseFile(
+      'prisma/migrations/202608020020_electronic_start_reward_history_safe_guard/migration.sql',
+    ).catch(() => '');
+
+    expect(migration).toContain(
+      'DROP INDEX IF EXISTS "GameRequest_one_electronic_start_reward_per_turn"',
+    );
+    expect(migration).toContain(
+      'CREATE OR REPLACE FUNCTION reject_duplicate_start_reward_for_turn()',
+    );
+    expect(migration).toContain(
+      'CREATE TRIGGER "GameRequest_one_start_reward_per_turn"',
+    );
+  });
+
+  it('removes the physical-delete exception from immutable room history', async () => {
+    const migration = await readDatabaseFile(
+      'prisma/migrations/202608010019_restore_room_history_immutability/migration.sql',
+    ).catch(() => '');
+
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION reject_ledger_entry_mutation()');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION reject_audit_log_mutation()');
+    expect(migration).not.toContain('physical_delete_txid');
+  });
+
   it('makes SecurityLog append-only and indexed for actor cursor queries in a forward migration', async () => {
     const schema = await readDatabaseFile('prisma/schema.prisma');
     const migration = await readDatabaseFile('prisma/migrations/202607270011_security_log_append_only/migration.sql');
@@ -291,7 +333,7 @@ describe('database delivery contract', () => {
 
   it('keeps all Master Data values available to the seed', async () => {
     const raw = JSON.parse(
-      await readFile(`${workspaceRoot}/甄嬛传大富翁_master-data.json`, 'utf8'),
+      await readFile(`${workspaceRoot}/monopoly-zhenhuan_master-data.json`, 'utf8'),
     ) as {
       properties: Array<{
         name: string;
@@ -324,5 +366,21 @@ describe('database delivery contract', () => {
       expect(seed).toContain(mapping);
     }
     expect(seed).toContain('initialProperty: { connect: { name: character.initialProperty } }');
+  });
+
+  it('adds a non-destructive closed state for completed physical landing contexts', async () => {
+    const [schema, migration] = await Promise.all([
+      readDatabaseFile('prisma/schema.prisma'),
+      readDatabaseFile(
+        'prisma/migrations/202608010017_physical_landing_lifecycle/migration.sql',
+      ),
+    ]);
+
+    expect(schema).toMatch(
+      /enum LandingEventStatus \{[\s\S]*?DECLARED[\s\S]*?CONFIRMED[\s\S]*?CLOSED[\s\S]*?INVALIDATED[\s\S]*?\}/,
+    );
+    expect(migration).toContain(
+      `ALTER TYPE "LandingEventStatus" ADD VALUE 'CLOSED' BEFORE 'INVALIDATED';`,
+    );
   });
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Prisma, PrismaClient } from '@prisma/client';
-import { roll2d6 } from '@zhenhuan/shared';
+import { calculatePropertyBankSaleAmount, roll2d6 } from '@zhenhuan/shared';
 import { z } from 'zod';
 import { RuleError, TransferRuleError } from './api-error.js';
 import type { PostCommitToastNotifier } from './realtime-toast-notifications.js';
@@ -156,11 +156,18 @@ export class PrismaGameService {
     const pendingRequests = viewer.role === 'BANK'
       ? await tx.gameRequest.findMany({ where: { roomId, status: 'PENDING' }, orderBy: { createdAt: 'desc' }, include: { property: { include: { definition: true } } } })
       : [];
+    const pendingLandings = viewer.role === 'BANK'
+      ? await tx.landingEvent.findMany({ where: { roomId, status: 'DECLARED' }, orderBy: { declaredAt: 'desc' }, include: { property: { include: { definition: true } }, player: { select: { member: { select: { accountId: true } } } } } })
+      : [];
     const reversal = viewer.role === 'BANK'
       ? await this.findReversalCandidate(tx, roomId)
       : null;
     const visibleLedger = viewer.role === 'BANK' ? room.ledgerEntries : room.ledgerEntries.filter((entry) => entry.playerId === viewer.playerId);
     const visibleRequests = viewer.role === 'BANK' ? [...pendingRequests, ...room.requests] : room.requests.filter((request) => request.actorPlayerId === viewer.playerId || request.targetPlayerId === viewer.playerId);
+    const pendingLandingIds = new Set(pendingLandings.map((landing) => landing.id));
+    const visibleLandings = viewer.role === 'BANK'
+      ? [...pendingLandings, ...room.landingEvents.filter((landing) => !pendingLandingIds.has(landing.id))]
+      : room.landingEvents;
     const tollBlockedPlayerIds = new Set(room.skipTurnEntries.map((entry) => entry.playerId));
     const tollSettlementStates = await this.tollSettlementStatuses(
       tx,
@@ -204,7 +211,7 @@ export class PrismaGameService {
           createdAt: request.createdAt,
         };
       }),
-      landings: room.landingEvents.map((landing) => ({ id: landing.id, turnId: landing.turnId ?? undefined, playerId: landing.playerId, propertyName: landing.property?.definition.name, spaceType: landing.spaceType, status: landing.status, plotResolved: landing.plotResolved, propertyActionsCancelled: landing.propertyActionsCancelled, tollSettled: tollSettlementStates.get(landing.id) === 'COMMITTED' })),
+      landings: visibleLandings.map((landing) => ({ id: landing.id, turnId: landing.turnId ?? undefined, playerId: landing.playerId, propertyName: landing.property?.definition.name, spaceType: landing.spaceType, status: landing.status, plotResolved: landing.plotResolved, propertyActionsCancelled: landing.propertyActionsCancelled, tollSettled: tollSettlementStates.get(landing.id) === 'COMMITTED', createdAt: landing.declaredAt })),
       audit: viewer.role === 'BANK' ? room.auditLogs : [],
       reversalCandidate: reversal ? {
         id: reversal.id,
@@ -409,7 +416,7 @@ export class PrismaGameService {
       const turn = room.diceMode === 'ELECTRONIC' ? await tx.turn.findFirst({ where: { roomId, playerId, status: 'ACTIVE' } }) : null;
       if (room.diceMode === 'ELECTRONIC' && (!turn || turn.diceValue === null || room.currentTurnPlayerId !== playerId)) fail('ROLL_REQUIRED');
       if (turn) await this.replaceDeclaredElectronicLanding(tx, turn.id);
-      if (room.diceMode === 'PHYSICAL') await this.invalidatePhysicalLandings(tx, roomId, playerId);
+      if (room.diceMode === 'PHYSICAL') await this.advancePhysicalLanding(tx, roomId, playerId);
       return tx.landingEvent.create({ data: { roomId, turnId: turn?.id, playerId, spaceType: 'PROPERTY', propertyId: property.id, declaredBy: member.id } });
     });
   }
@@ -417,11 +424,22 @@ export class PrismaGameService {
   async declareStartLanding(actor: GameActor, roomId: string, playerId: string, landingId: string, key: string) {
     return this.executeIdempotent(actor, roomId, 'PLAYER', playerId, 'declare-start-landing', key, { roomId, playerId, landingId }, async (tx, member) => {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
+      const player = await tx.player.findFirst({ where: { id: playerId, roomId } }); if (!player) fail('PLAYER_NOT_FOUND');
       const turn = room.diceMode === 'ELECTRONIC' ? await tx.turn.findFirst({ where: { roomId, playerId, status: 'ACTIVE' } }) : null;
       if (room.diceMode === 'ELECTRONIC' && (!turn || turn.diceValue === null || room.currentTurnPlayerId !== playerId)) fail('ROLL_REQUIRED');
-      if (turn) await this.replaceDeclaredElectronicLanding(tx, turn.id);
-      if (room.diceMode === 'PHYSICAL') await this.invalidatePhysicalLandings(tx, roomId, playerId);
-      return tx.landingEvent.create({ data: { id: landingId, roomId, turnId: turn?.id, playerId, spaceType: 'START', declaredBy: member.id } });
+      if (turn) await this.replaceElectronicStartLanding(tx, roomId, turn.id);
+      if (room.diceMode === 'PHYSICAL') await this.advancePhysicalLanding(tx, roomId, playerId);
+      const landing = await tx.landingEvent.create({ data: {
+        id: landingId, roomId, turnId: turn?.id, playerId, spaceType: 'START', status: 'CONFIRMED',
+        plotResolved: true, declaredBy: member.id, confirmedAt: new Date(),
+      } });
+      const requestHash = requestFingerprint({ roomId, playerId, type: 'START_REWARD', landingId });
+      const request = await tx.gameRequest.create({ data: {
+        roomId, type: 'START_REWARD', actorPlayerId: playerId, landingEventId: landing.id, turnId: turn?.id,
+        amount: room.startReward, payload: { playerVersion: player.version },
+        idempotencyKey: `${actor.accountId}:${key}:start-reward`, requestHash,
+      } });
+      return { ...landing, requestId: request.id, amount: request.amount ?? room.startReward, requestStatus: request.status };
     });
   }
 
@@ -446,7 +464,7 @@ export class PrismaGameService {
       const room = await tx.room.findUnique({ where: { id: roomId } }); if (!room || room.status !== 'PLAYING') fail('ROOM_NOT_PLAYING');
       const before = await tx.landingEvent.findUnique({ where: { id: landingId } }); if (!before || before.roomId !== roomId) fail('LANDING_NOT_FOUND');
       await this.cancelPendingRequests(tx, roomId, { landingEventId: landingId }, 'LANDING_PROPERTY_ACTIONS_CANCELLED');
-      const after = await tx.landingEvent.update({ where: { id: landingId }, data: { propertyActionsCancelled: true, plotResolved: true } });
+      const after = await tx.landingEvent.update({ where: { id: landingId }, data: { status: 'INVALIDATED', invalidatedAt: new Date(), propertyActionsCancelled: true, plotResolved: true } });
       await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'CANCEL_LANDING_PROPERTY_ACTIONS', entityType: 'LandingEvent', entityId: landingId, beforeJson: before as unknown as Prisma.InputJsonValue, afterJson: after as unknown as Prisma.InputJsonValue, reason } }); return after;
     }, undefined, undefined, async () => {
       await this.toastNotifier?.landingRejected(roomId, landingId, reason);
@@ -524,12 +542,21 @@ export class PrismaGameService {
         }
         if (action.type === 'MORTGAGE_PROPERTY') { if (property.ownerPlayerId !== playerId) fail('NOT_PROPERTY_OWNER'); if (property.buildingLevel > 0) fail('BUILDINGS_MUST_BE_SOLD'); if (property.mortgaged) fail('ALREADY_MORTGAGED'); computedAmount = property.definition.mortgagePrice; }
         if (action.type === 'REDEEM_PROPERTY') { if (property.ownerPlayerId !== playerId) fail('NOT_PROPERTY_OWNER'); if (!property.mortgaged) fail('NOT_MORTGAGED'); computedAmount = property.definition.mortgagePrice + room.redemptionFee; }
-        if (action.type === 'SELL_PROPERTY_TO_BANK') { if (property.ownerPlayerId !== playerId) fail('NOT_PROPERTY_OWNER'); if (property.buildingLevel > 0) fail('BUILDINGS_MUST_BE_SOLD'); if (property.mortgaged) fail('MORTGAGED_PROPERTY'); computedAmount = property.definition.purchasePrice; }
+        if (action.type === 'SELL_PROPERTY_TO_BANK') {
+          if (property.ownerPlayerId !== playerId) fail('NOT_PROPERTY_OWNER');
+          if (property.buildingLevel > 0) fail('BUILDINGS_MUST_BE_SOLD');
+          computedAmount = calculatePropertyBankSaleAmount({
+            purchasePrice: property.definition.purchasePrice,
+            mortgagePrice: property.definition.mortgagePrice,
+            mortgaged: property.mortgaged,
+            redemptionFee: room.redemptionFee,
+          });
+        }
         if (action.type === 'TRADE_PROPERTY') { if (property.ownerPlayerId !== playerId) fail('NOT_PROPERTY_OWNER'); if (property.buildingLevel > 0) fail('BUILDINGS_MUST_BE_SOLD'); if (property.mortgaged) fail('MORTGAGED_PROPERTY'); if (!action.targetPlayerId || action.targetPlayerId === playerId || !Number.isInteger(action.amount) || (action.amount ?? -1) < 0) fail('INVALID_TRADE'); }
       }
       if (['BUY_PROPERTY', 'BUILD_PROPERTY', 'REDEEM_PROPERTY'].includes(action.type) && player.balance < computedAmount) fail('INSUFFICIENT_BALANCE');
       if (action.type === 'TRADE_PROPERTY') { const buyer = tradeBuyer ?? fail('PLAYER_NOT_FOUND'); if (buyer.balance < computedAmount) fail('INSUFFICIENT_BALANCE'); }
-      const request = await tx.gameRequest.create({ data: { roomId, type: action.type, actorPlayerId: playerId, targetPlayerId: action.targetPlayerId, propertyId: property?.id, landingEventId: landing?.id, turnId: turn?.id, amount: computedAmount, quantity: action.type === 'RETURN_COMPANION_EVENT' ? 1 : action.count, note: action.type === 'PLOT_REST_EVENT' ? action.reason?.trim() : null, payload: { propertyVersion: property?.version ?? null, playerVersion: player.version, ...(action.type === 'TRADE_PROPERTY' ? { buyerConfirmed: false } : {}) }, idempotencyKey: storedKey, requestHash: expectedHash } });
+      const request = await tx.gameRequest.create({ data: { roomId, type: action.type, actorPlayerId: playerId, targetPlayerId: action.targetPlayerId, propertyId: property?.id, landingEventId: landing?.id, turnId: turn?.id, amount: computedAmount, quantity: action.type === 'RETURN_COMPANION_EVENT' ? 1 : action.count, note: action.type === 'PLOT_REST_EVENT' ? action.reason?.trim() : null, payload: { propertyVersion: property?.version ?? null, propertyMortgaged: property?.mortgaged ?? null, playerVersion: player.version, ...(action.type === 'TRADE_PROPERTY' ? { buyerConfirmed: false } : {}) }, idempotencyKey: storedKey, requestHash: expectedHash } });
       if (property) { const locked = await tx.roomProperty.updateMany({ where: { id: property.id, lockedByRequestId: null, version: property.version }, data: { lockedByRequestId: request.id } }); if (locked.count !== 1) fail('PROPERTY_LOCKED'); }
       const versionedRoom = await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } });
       const versioned = await tx.gameRequest.update({ where: { id: request.id }, data: { payload: { ...asObject(request.payload), stateVersion: versionedRoom.stateVersion } } });
@@ -605,7 +632,7 @@ export class PrismaGameService {
       if (request.type === 'BUY_PROPERTY' || request.type === 'BUILD_PROPERTY') {
         if (request.room.diceMode === 'ELECTRONIC' && activeTurn?.diceValue === null) fail('ROLL_REQUIRED');
         const landing = request.landingEvent;
-        if (!landing || landing.roomId !== roomId || landing.playerId !== request.actorPlayerId || landing.propertyId !== request.propertyId || landing.status !== 'CONFIRMED' || !landing.plotResolved || landing.propertyActionsCancelled || (request.room.diceMode === 'ELECTRONIC' ? landing.turnId !== activeTurn?.id : landing.turnId !== null)) fail('CONFIRMED_LANDING_REQUIRED');
+        if (!landing || landing.roomId !== roomId || landing.playerId !== request.actorPlayerId || landing.propertyId !== request.propertyId || (landing.status !== 'CONFIRMED' && !(request.room.diceMode === 'PHYSICAL' && landing.status === 'CLOSED')) || !landing.plotResolved || landing.propertyActionsCancelled || (request.room.diceMode === 'ELECTRONIC' ? landing.turnId !== activeTurn?.id : landing.turnId !== null)) fail('CONFIRMED_LANDING_REQUIRED');
       }
       if (request.type === 'START_REWARD' && request.room.diceMode === 'ELECTRONIC') {
         const landing = request.landingEvent;
@@ -652,8 +679,12 @@ export class PrismaGameService {
           propertyAfter = { ownerPlayerId: actorId, buildingLevel: 0, mortgaged: false, version: request.property.version + 1 }; break;
         }
         case 'SELL_PROPERTY_TO_BANK': {
-          if (!actorId || !request.property || request.property.ownerPlayerId !== actorId || request.property.buildingLevel !== 0 || request.property.mortgaged || request.property.lockedByRequestId !== request.id) fail('PROPERTY_STATE_CHANGED'); await addEffect(actorId, amount, 'SELL_PROPERTY_TO_BANK', `出售${request.property.definition.name}给银行`);
-          const changed = await tx.roomProperty.updateMany({ where: { id: request.property.id, lockedByRequestId: request.id, ownerPlayerId: actorId, buildingLevel: 0, mortgaged: false, version: request.property.version }, data: { ownerPlayerId: null, lockedByRequestId: null, version: { increment: 1 } } }); if (changed.count !== 1) fail('PROPERTY_STATE_CHANGED');
+          const storedPropertyMortgaged = asObject(request.payload).propertyMortgaged;
+          const propertyMortgaged = storedPropertyMortgaged === undefined
+            ? false
+            : storedPropertyMortgaged;
+          if (!actorId || !request.property || request.property.ownerPlayerId !== actorId || request.property.buildingLevel !== 0 || request.property.mortgaged !== propertyMortgaged || request.property.lockedByRequestId !== request.id) fail('PROPERTY_STATE_CHANGED'); await addEffect(actorId, amount, 'SELL_PROPERTY_TO_BANK', `出售${request.property.definition.name}给银行`);
+          const changed = await tx.roomProperty.updateMany({ where: { id: request.property.id, lockedByRequestId: request.id, ownerPlayerId: actorId, buildingLevel: 0, mortgaged: request.property.mortgaged, version: request.property.version }, data: { ownerPlayerId: null, mortgaged: false, lockedByRequestId: null, version: { increment: 1 } } }); if (changed.count !== 1) fail('PROPERTY_STATE_CHANGED');
           propertyAfter = { ownerPlayerId: null, buildingLevel: 0, mortgaged: false, version: request.property.version + 1 }; break;
         }
         case 'TRADE_PROPERTY': {
@@ -1138,16 +1169,74 @@ export class PrismaGameService {
     await tx.gameRequest.updateMany({ where: { id: { in: ids }, status: 'PENDING' }, data: { status: 'CANCELLED', resolvedAt: new Date(), rejectionReason: reason } });
   }
 
-  private async invalidatePhysicalLandings(tx: Prisma.TransactionClient, roomId: string, playerId: string) {
-    const active = await tx.landingEvent.findMany({ where: { roomId, playerId, turnId: null, status: { in: ['DECLARED', 'CONFIRMED'] } }, select: { id: true } });
-    if (!active.length) return;
-    for (const landing of active) await this.cancelPendingRequests(tx, roomId, { landingEventId: landing.id }, 'PHYSICAL_LANDING_REPLACED');
-    await tx.landingEvent.updateMany({ where: { id: { in: active.map((landing) => landing.id) }, status: { in: ['DECLARED', 'CONFIRMED'] } }, data: { status: 'INVALIDATED', invalidatedAt: new Date() } });
+  private async advancePhysicalLanding(tx: Prisma.TransactionClient, roomId: string, playerId: string) {
+    const active = await tx.landingEvent.findMany({
+      where: { roomId, playerId, turnId: null, status: { in: ['DECLARED', 'CONFIRMED'] } },
+      select: { id: true, status: true },
+    });
+    const declaredIds = active
+      .filter((landing) => landing.status === 'DECLARED')
+      .map((landing) => landing.id);
+    const confirmedIds = active
+      .filter((landing) => landing.status === 'CONFIRMED')
+      .map((landing) => landing.id);
+
+    for (const landingId of declaredIds) {
+      await this.cancelPendingRequests(
+        tx,
+        roomId,
+        { landingEventId: landingId },
+        'PHYSICAL_LANDING_CORRECTED',
+      );
+    }
+    if (declaredIds.length) {
+      await tx.landingEvent.updateMany({
+        where: { id: { in: declaredIds }, status: 'DECLARED' },
+        data: { status: 'INVALIDATED', invalidatedAt: new Date() },
+      });
+    }
+    if (confirmedIds.length) {
+      await tx.landingEvent.updateMany({
+        where: { id: { in: confirmedIds }, status: 'CONFIRMED' },
+        data: { status: 'CLOSED' },
+      });
+    }
   }
 
   private async replaceDeclaredElectronicLanding(tx: Prisma.TransactionClient, turnId: string) {
     const confirmed = await tx.landingEvent.findFirst({ where: { turnId, status: 'CONFIRMED' } });
     if (confirmed) fail('LANDING_ALREADY_DECLARED');
+    await tx.landingEvent.updateMany({
+      where: { turnId, status: 'DECLARED' },
+      data: { status: 'INVALIDATED', invalidatedAt: new Date() },
+    });
+  }
+
+  private async replaceElectronicStartLanding(tx: Prisma.TransactionClient, roomId: string, turnId: string) {
+    const settledReward = await tx.gameRequest.findFirst({
+      where: {
+        roomId,
+        turnId,
+        type: 'START_REWARD',
+        status: { in: ['EXECUTED', 'REVERSED'] },
+      },
+      select: { id: true },
+    });
+    if (settledReward) fail('START_REWARD_ALREADY_SETTLED');
+    const confirmed = await tx.landingEvent.findMany({
+      where: { turnId, status: 'CONFIRMED' },
+      select: { id: true, spaceType: true },
+    });
+    if (confirmed.some((landing) => landing.spaceType !== 'START')) fail('LANDING_ALREADY_DECLARED');
+    for (const landing of confirmed) {
+      await this.cancelPendingRequests(tx, roomId, { landingEventId: landing.id }, 'ELECTRONIC_START_LANDING_REPLACED');
+    }
+    if (confirmed.length) {
+      await tx.landingEvent.updateMany({
+        where: { id: { in: confirmed.map((landing) => landing.id) }, status: 'CONFIRMED' },
+        data: { status: 'INVALIDATED', invalidatedAt: new Date() },
+      });
+    }
     await tx.landingEvent.updateMany({
       where: { turnId, status: 'DECLARED' },
       data: { status: 'INVALIDATED', invalidatedAt: new Date() },

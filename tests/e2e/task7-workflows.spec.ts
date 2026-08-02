@@ -268,26 +268,239 @@ test('landing cards search, select a purchased property, and preserve the declar
 
   await openRoom(page);
   await page.getByRole('button', { name: '声明落点' }).click();
-  await expect(page.getByText('请选择棋子精确停留的地产。系统不会追踪棋盘位置。')).toBeVisible();
-  await expect(page.getByRole('button', { name: '确认落点' })).toBeVisible();
-  const unowned = page.getByRole('button', { name: /碎玉轩.*无主/ });
+  const landingDialog = page.getByRole('dialog', { name: '声明实体落点' });
+  await expect(landingDialog.getByText('请选择棋子精确停留的地产。系统不会追踪棋盘位置。')).toBeVisible();
+  await expect(landingDialog.getByRole('button', { name: '确认落点' })).toBeVisible();
+  const unowned = landingDialog.getByRole('button', { name: /碎玉轩.*无主/ });
   await expect(unowned.getByText('0 两', { exact: true })).toBeVisible();
-  const landingSearch = page.getByRole('searchbox', { name: '搜索声明落点' });
+  const landingSearch = landingDialog.getByRole('searchbox', { name: '搜索声明落点' });
   await landingSearch.fill('不存在');
-  const landingPicker = page.getByLabel('选择落点地产');
+  const landingPicker = landingDialog.getByLabel('选择落点地产');
   await expect(landingPicker.getByText('没有找到匹配的地产')).toBeVisible();
   await landingSearch.fill('景仁');
-  await expect(page.getByText('碎玉轩', { exact: true })).toHaveCount(0);
+  await expect(landingDialog.getByText('碎玉轩', { exact: true })).toHaveCount(0);
   const purchased = landingPicker.getByRole('button', { name: /景仁宫.*所有者.*皇后.*已抵押/ });
   await expect(purchased).toBeVisible();
   await expect(purchased.getByText('已抵押')).toBeVisible();
   await purchased.click();
   await expect(purchased).toHaveAttribute('aria-pressed', 'true');
-  await page.getByRole('button', { name: '确认落点' }).click();
+  await landingDialog.getByRole('button', { name: '确认落点' }).click();
   await expect.poll(() => snapshotReads).toBeGreaterThan(1);
   await expect(page.getByRole('heading', { name: '声明实体落点' })).toHaveCount(0);
   await expect(page.getByText('落点待银行确认：景仁宫')).toBeVisible();
+  const pendingStatus = page.locator('.landing-status');
+  await expect(pendingStatus).not.toHaveClass(/landing-status-confirmed/);
+  await expect(pendingStatus).toHaveCSS('background-color', 'rgb(232, 240, 242)');
   expect(await page.evaluate(() => [...Object.entries(localStorage), ...Object.entries(sessionStorage)].filter(([key, value]) => /auth|token|identity|membership|playerId|roomId|zhenhuan-landings|room-1|player-1/i.test(`${key}:${value}`)))).toEqual([]);
+});
+
+test('physical landing survives a full page reload without browser storage', async ({ page }) => {
+  const properties = [{
+    name: '碎玉轩', ownerId: null, level: 0, mortgaged: false,
+    mortgage: 800, purchasePrice: 1600, build: 1000,
+    buildingSell: 600, tolls: [300, 700, 1800, 5000, 7000, 9000],
+  }];
+  const landing = {
+    id: 'persisted-physical-landing',
+    playerId: 'player-1',
+    propertyName: '碎玉轩',
+    spaceType: 'PROPERTY',
+    status: 'DECLARED',
+    plotResolved: false,
+    propertyActionsCancelled: false,
+    tollSettled: false,
+  };
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, properties, landings: [landing] },
+  }));
+
+  await openRoom(page);
+  await expect(page.getByText('落点待银行确认：碎玉轩')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('落点待银行确认：碎玉轩')).toBeVisible();
+  expect(await page.evaluate(() => [
+    ...Object.entries(localStorage),
+    ...Object.entries(sessionStorage),
+  ].filter(([key, value]) => /landing/i.test(`${key}:${value}`)))).toEqual([]);
+});
+
+test('landing approval keeps the themed character and palace names on one baseline', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 667 });
+  const players = [
+    ...snapshot.players,
+    { id: 'player-2', name: '皇后', characterId: 'yixiu', balance: 5_000, remainingSkipTurns: 0 },
+  ];
+  const properties = [{
+    name: '景仁宫', ownerId: 'player-2', level: 0, mortgaged: false, mortgage: 1_500,
+    purchasePrice: 3_000, build: 2_000, buildingSell: 1_200, tolls: [800, 2_000, 3_900, 9_000, 11_000, 13_000],
+  }];
+  const landings = [{
+    id: 'landing-baseline', playerId: 'player-1', propertyName: '景仁宫', spaceType: 'PROPERTY',
+    status: 'DECLARED', plotResolved: false, propertyActionsCancelled: false, createdAt: now,
+  }];
+
+  await mockBase(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: true, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, players, properties, landings },
+  }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '银行端', exact: true }).click();
+  await expect(page.locator('.landing-approval-title-line')).toHaveCount(1);
+
+  const geometry = await page.locator('.landing-approval-title-line').evaluate((title) => {
+    const article = title.closest('article');
+    const actions = article?.querySelector<HTMLElement>('.request-actions');
+    if (!article || !actions) throw new Error('Missing landing approval actions');
+    const rect = (selector: string) => {
+      const element = title.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing ${selector}`);
+      const { top, left, width, height, bottom } = element.getBoundingClientRect();
+      return {
+        top,
+        left,
+        width,
+        height,
+        bottom,
+        color: getComputedStyle(element).color,
+      };
+    };
+
+    const character = rect('.landing-approval-character');
+    const arrow = rect('.landing-approval-arrow');
+    const property = rect('.landing-approval-property-name');
+    const owner = rect('.landing-approval-property-owner');
+    const actionsRect = actions.getBoundingClientRect();
+    return {
+      titleClass: title.className,
+      propertyTheme: getComputedStyle(title).getPropertyValue('--property-theme'),
+      character,
+      arrow,
+      property,
+      owner,
+      actionsLeft: actionsRect.left,
+      titleClientWidth: title.clientWidth,
+      titleScrollWidth: title.scrollWidth,
+      maxFirstRowTopDelta: Math.max(character.top, arrow.top, property.top) - Math.min(character.top, arrow.top, property.top),
+      maxFirstRowBottomDelta: Math.max(character.bottom, arrow.bottom, property.bottom) - Math.min(character.bottom, arrow.bottom, property.bottom),
+      ownerLeftDelta: Math.abs(owner.left - property.left),
+    };
+  });
+
+  expect(geometry.maxFirstRowTopDelta, JSON.stringify(geometry)).toBeLessThanOrEqual(1);
+  expect(geometry.maxFirstRowBottomDelta).toBeLessThanOrEqual(1);
+  expect(geometry.owner.top).toBeGreaterThanOrEqual(geometry.property.bottom);
+  expect(geometry.ownerLeftDelta).toBeLessThanOrEqual(1);
+  expect(geometry.owner.left + geometry.owner.width, JSON.stringify(geometry)).toBeLessThanOrEqual(geometry.actionsLeft);
+  expect(geometry.titleScrollWidth, JSON.stringify(geometry)).toBeLessThanOrEqual(geometry.titleClientWidth);
+  expect(geometry.character.color, JSON.stringify(geometry)).toBe('rgb(231, 189, 63)');
+  expect(geometry.property.color, JSON.stringify(geometry)).toBe('rgb(111, 182, 220)');
+  expect(geometry.owner.color, JSON.stringify(geometry)).toBe('rgb(111, 182, 220)');
+});
+
+test('landing approval metadata aligns with the existing bank payment format', async ({ page }) => {
+  const properties = [{
+    name: '景仁宫', ownerId: null, level: 0, mortgaged: false, mortgage: 1_500,
+    purchasePrice: 3_000, build: 2_000, buildingSell: 1_200, tolls: [800, 2_000, 3_900, 9_000, 11_000, 13_000],
+  }];
+  const landings = [{
+    id: 'landing-meta', playerId: 'player-1', propertyName: '景仁宫', spaceType: 'PROPERTY',
+    status: 'DECLARED', plotResolved: false, propertyActionsCancelled: false, createdAt: now,
+  }];
+  const requests = [{
+    id: 'payment-meta', type: 'BANK_PAYMENT', playerId: 'player-1', amount: 1,
+    propertyName: '资金审批', status: 'PENDING', createdAt: now,
+  }];
+
+  await mockBase(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: true, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, properties, landings, requests },
+  }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '银行端', exact: true }).click();
+
+  const geometry = await page.locator('.approval-list').evaluate((list) => {
+    const getMeta = (selector: string) => {
+      const meta = list.querySelector<HTMLElement>(selector);
+      const article = meta?.closest<HTMLElement>('article');
+      const icon = meta?.querySelector<HTMLElement>('.request-icon');
+      if (!meta || !article || !icon) throw new Error(`Missing ${selector}`);
+      const metaStyle = getComputedStyle(meta);
+      return {
+        iconOffset: icon.getBoundingClientRect().left - article.getBoundingClientRect().left,
+        display: metaStyle.display,
+        justifyItems: metaStyle.justifyItems,
+        alignContent: metaStyle.alignContent,
+        gap: metaStyle.rowGap,
+      };
+    };
+
+    return {
+      landing: getMeta('.landing-location-meta'),
+      payment: getMeta('.payment-approval-meta'),
+    };
+  });
+
+  expect(geometry.landing.display).toBe('grid');
+  expect(geometry.landing.justifyItems).toBe(geometry.payment.justifyItems);
+  expect(geometry.landing.alignContent).toBe(geometry.payment.alignContent);
+  expect(geometry.landing.gap).toBe(geometry.payment.gap);
+  expect(Math.abs(geometry.landing.iconOffset - geometry.payment.iconOffset), JSON.stringify(geometry)).toBeLessThanOrEqual(1);
+});
+
+test('landing approval metadata stays aligned across different player nickname lengths', async ({ page }) => {
+  const players = [
+    { id: 'player-1', name: 'Harry', characterId: 'zhenhuan', balance: 5_000, remainingSkipTurns: 0 },
+    { id: 'player-2', name: '小行老师', characterId: 'yixiu', balance: 5_000, remainingSkipTurns: 0 },
+    { id: 'player-3', name: '安陵容', characterId: 'anlingrong', balance: 5_000, remainingSkipTurns: 0 },
+  ];
+  const properties = [
+    { name: '景仁宫', ownerId: 'player-3', level: 0, mortgaged: false, mortgage: 1_500, purchasePrice: 3_000, build: 2_000, buildingSell: 1_200, tolls: [800, 2_000, 3_900, 9_000, 11_000, 13_000] },
+    { name: '延禧宫', ownerId: 'player-3', level: 0, mortgaged: false, mortgage: 1_500, purchasePrice: 3_000, build: 2_000, buildingSell: 1_200, tolls: [800, 2_000, 3_900, 9_000, 11_000, 13_000] },
+  ];
+  const landings = [
+    { id: 'landing-harry', playerId: 'player-1', propertyName: '景仁宫', spaceType: 'PROPERTY', status: 'DECLARED', plotResolved: false, propertyActionsCancelled: false, createdAt: now },
+    { id: 'landing-teacher', playerId: 'player-2', propertyName: '延禧宫', spaceType: 'PROPERTY', status: 'DECLARED', plotResolved: false, propertyActionsCancelled: false, createdAt: '2026-07-27T08:01:00.000Z' },
+  ];
+
+  await mockBase(page);
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: true, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, players, properties, landings },
+  }));
+
+  await openRoom(page);
+  await page.getByRole('button', { name: '银行端', exact: true }).click();
+  await expect(page.locator('.landing-location-meta')).toHaveCount(2);
+
+  const geometry = await page.locator('.landing-location-meta').evaluateAll((metas) => metas.map((meta) => {
+    const article = meta.closest<HTMLElement>('article');
+    const icon = meta.querySelector<HTMLElement>('.request-icon');
+    const title = article?.querySelector<HTMLElement>('.landing-approval-title-line');
+    if (!article || !icon || !title) throw new Error('Missing landing approval layout');
+    const articleRect = article.getBoundingClientRect();
+    return {
+      iconOffset: icon.getBoundingClientRect().left - articleRect.left,
+      titleOffset: title.getBoundingClientRect().left - articleRect.left,
+    };
+  }));
+
+  expect(geometry).toHaveLength(2);
+  expect(Math.abs(geometry[0]!.iconOffset - geometry[1]!.iconOffset), JSON.stringify(geometry)).toBeLessThanOrEqual(1);
+  expect(Math.abs(geometry[0]!.titleOffset - geometry[1]!.titleOffset), JSON.stringify(geometry)).toBeLessThanOrEqual(1);
 });
 
 test('property actions use only the confirmed landing and never offer another property as a target', async ({ page }) => {
@@ -316,6 +529,10 @@ test('property actions use only the confirmed landing and never offer another pr
   });
 
   await openRoom(page);
+  const confirmedStatus = page.locator('.landing-status');
+  await expect(confirmedStatus).toHaveText('上次确认落点：碎玉轩');
+  await expect(confirmedStatus).toHaveClass(/landing-status-confirmed/);
+  await expect(confirmedStatus).toHaveCSS('background-color', 'rgb(228, 242, 232)');
   await page.getByRole('button', { name: '购买 / 建造' }).click();
   const purchaseSheet = page.getByRole('dialog', { name: '购买或建造' });
   await expect(purchaseSheet.getByLabel('目标地产')).toHaveCount(0);
@@ -840,7 +1057,7 @@ test('newer snapshot versions win over delayed replies and page recovery signals
   let responseVersion = 1;
   let holdVersionTwo = false;
   let delayedVersionTwoStarted = false;
-  let releaseVersionTwo: (() => void) | null = null;
+  const releaseVersionTwo: { current: (() => void) | null } = { current: null };
   await page.route('**/api/rooms/room-1/seats', (route) => {
     seatsReads += 1;
     return route.fulfill({ json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }) });
@@ -850,7 +1067,7 @@ test('newer snapshot versions win over delayed replies and page recovery signals
     const version = responseVersion;
     if (version === 2 && holdVersionTwo) {
       delayedVersionTwoStarted = true;
-      await new Promise<void>((resolve) => { releaseVersionTwo = resolve; });
+      await new Promise<void>((resolve) => { releaseVersionTwo.current = resolve; });
     }
     return route.fulfill({ json: { ...snapshot, stateVersion: version, players: [{ ...snapshot.players[0], balance: version === 3 ? 6_400 : 5_200 }] } });
   });
@@ -873,7 +1090,7 @@ test('newer snapshot versions win over delayed replies and page recovery signals
     responseVersion = 3;
     emitSnapshotRequired(3);
     await expect(page.getByText('6,400 两')).toBeVisible();
-    releaseVersionTwo?.();
+    releaseVersionTwo.current?.();
     await page.waitForTimeout(150);
     await expect(page.getByText('6,400 两')).toBeVisible();
     expect(seatsReads).toBe(seatsAfterOpen);

@@ -20,6 +20,38 @@ describe('property explorer visual contract', () => {
     expect(stylesheet).toMatch(/\.landing-property-card\s*\{[^}]*border-left:\s*5px solid var\(--property-theme\)[^}]*border-radius:\s*6px/s);
   });
 
+  it('aligns compact landing approval titles with payment approval names', async () => {
+    const stylesheet = await readFile(stylesheetUrl, 'utf8');
+
+    expect(stylesheet).toMatch(/\.landing-approval-list \.landing-approval-character,\s*\.landing-approval-list \.landing-player-nickname\s*\{[^}]*font-size:\s*12px/s);
+    expect(stylesheet).toMatch(/\.landing-approval-list \.landing-approval-character\s*\{[^}]*line-height:\s*1\.2/s);
+    expect(stylesheet).toMatch(/\.landing-approval-title-line\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*max-content\s+max-content\s+minmax\(0,\s*1fr\)[^}]*grid-template-rows:\s*auto\s+auto[^}]*align-items:\s*baseline/s);
+    expect(stylesheet).not.toMatch(/\.landing-approval-title-line\s*\{[^}]*transform:/s);
+    expect(stylesheet).toMatch(/\.landing-approval-list \.landing-approval-title-line > :is\(\.landing-approval-character, \.landing-approval-arrow, \.landing-approval-property-name\)\s*\{[^}]*font-size:\s*12px[^}]*font-weight:\s*700[^}]*line-height:\s*1\.2[^}]*margin:\s*0/s);
+    expect(stylesheet).toMatch(/\.landing-approval-arrow\s*\{[^}]*grid-column:\s*2[^}]*grid-row:\s*1/s);
+    expect(stylesheet).toMatch(/\.landing-approval-property-name\s*\{[^}]*grid-column:\s*3[^}]*grid-row:\s*1/s);
+    expect(stylesheet).toMatch(/\.landing-approval-property-owner\s*\{[^}]*grid-column:\s*3[^}]*grid-row:\s*2[^}]*justify-self:\s*start/s);
+  });
+
+  it('keeps landing approval metadata on a stable compact column', async () => {
+    const stylesheet = await readFile(stylesheetUrl, 'utf8');
+
+    expect(stylesheet).toMatch(/\.landing-location-meta \.landing-player-nickname::before\s*\{[^}]*content:\s*"「"/s);
+    expect(stylesheet).toMatch(/\.landing-location-meta \.landing-player-nickname::after\s*\{[^}]*content:\s*"」"/s);
+    expect(stylesheet).toMatch(/\.landing-location-meta\s*\{[^}]*display:\s*grid[^}]*width:\s*40px[^}]*min-width:\s*40px[^}]*max-width:\s*40px[^}]*justify-items:\s*center[^}]*align-content:\s*center[^}]*gap:\s*4px/s);
+    expect(stylesheet).toMatch(/\.landing-approval-title-line\s*\{[^}]*align-items:\s*baseline/s);
+  });
+
+  it('moves each workbench exit control into the mobile header only', async () => {
+    const stylesheet = await readFile(stylesheetUrl, 'utf8');
+
+    expect(stylesheet).toMatch(/\.workbench-leave-mobile\s*\{[^}]*display:\s*none/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*899px\)[\s\S]*?\.app-shell header\.bank-workbench-header\s*\{[^}]*min-height:\s*128px[^}]*padding:\s*16px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*899px\)[\s\S]*?\.bank-workbench-header \.workbench-tools\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*44px\)[^}]*gap:\s*7px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*899px\)[\s\S]*?\.bank-workbench-header \.workbench-tools > :is\(\.workbench-tool-seat, \.icon\)\s*\{[^}]*width:\s*44px[^}]*min-width:\s*44px[^}]*height:\s*44px[^}]*min-height:\s*44px/s);
+    expect(stylesheet).toMatch(/@media\s*\(max-width:\s*899px\)[\s\S]*?\.app-shell nav \.workbench-leave-nav\s*\{[^}]*display:\s*none/s);
+  });
+
   it('renders the mortgage stamp, cold-palace hint, and compact detail modules', async () => {
     const stylesheet = await readFile(stylesheetUrl, 'utf8');
 

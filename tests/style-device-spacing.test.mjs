@@ -30,7 +30,7 @@ assert.match(
 
 assert.match(
   stylesheet,
-  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.app-shell\s+header\.bank-workbench-header\s*\{[^}]*min-height:\s*100px;[^}]*border-bottom-width:\s*3px;/s,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.app-shell\s+header\.bank-workbench-header\s*\{[^}]*min-height:\s*128px;[^}]*border-bottom-width:\s*3px;/s,
   'Mobile bank header must use the reference-scale title area and gold divider.',
 );
 
@@ -48,7 +48,67 @@ assert.match(
 
 assert.match(
   stylesheet,
-  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.bank-workbench-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;[^}]*gap:\s*8px;[\s\S]*?\.bank-workbench-header\s+\.workbench-tools\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*nowrap;[\s\S]*?\.bank-workbench-header\s+\.workbench-tools\s*>\s*button:not\(\.icon\)\s*\{[^}]*min-width:\s*86px;[^}]*min-height:\s*44px;[^}]*font-size:\s*18px;/s,
+  /@media\s*\(max-width:\s*600px\)\s*\{[\s\S]*?\.landing-approval-list\s+article\s*\{[^}]*grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+44px;[\s\S]*?\.landing-approval-list\s+\.request-actions\s*\{[^}]*grid-column:\s*3;[^}]*grid-row:\s*1;[^}]*width:\s*44px;[^}]*grid-template-columns:\s*1fr;[^}]*justify-self:\s*end;/s,
+  'Mobile landing approvals must keep details left and stack actions in a right-hand column.',
+);
+
+assert.match(
+  stylesheet,
+  /\.approval-action\s*\{[^}]*width:\s*44px;[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;[^}]*padding:\s*0;/s,
+  'Approval actions must use fixed-size icon controls rather than text buttons.',
+);
+
+assert.match(
+  stylesheet,
+  /\.landing-approval-list\s+\.landing-approval-character,\s*\.landing-approval-list\s+\.landing-player-nickname\s*\{[^}]*font-size:\s*12px;[^}]*font-weight:\s*700;/s,
+  'Landing characters and player nicknames must use the same compact visual weight and size.',
+);
+
+assert.match(
+  stylesheet,
+  /\.landing-location-meta\s+\.landing-player-nickname::before\s*\{[^}]*content:\s*"「";[^}]*position:\s*absolute;[^}]*right:\s*100%;/s,
+  'The left bracket must sit outside the nickname text so its first character aligns with the character name.',
+);
+
+assert.match(
+  stylesheet,
+  /\.landing-location-meta\s+\.landing-player-nickname\s*\{[^}]*overflow:\s*visible;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s,
+  'The mobile nickname bracket must not be clipped by the generic detail-text truncation rule.',
+);
+
+assert.match(
+  stylesheet,
+  /\.approval-list\s+article\s+:is\(span,\s*strong,\s*small\)\s*\{[^}]*white-space:\s*nowrap;[^}]*text-overflow:\s*clip;/s,
+  'Approval information must remain on one complete line without ellipsizing.',
+);
+
+assert.match(
+  stylesheet,
+  /\.approval-action-confirm\s*\{[^}]*border-color:\s*#1d5c3d;[^}]*background:\s*#e7f3e9;[^}]*color:\s*#1d5c3d;/s,
+  'Confirmation actions must use the green approval treatment.',
+);
+
+assert.match(
+  stylesheet,
+  /\.approval-action-reject\s*\{[^}]*border-color:\s*#8b2730;[^}]*background:\s*#f9e8e9;[^}]*color:\s*#8b2730;/s,
+  'Rejection actions must use the red rejection treatment.',
+);
+
+assert.match(
+  stylesheet,
+  /\.payment-approval-list\s+article\s*\{[^}]*grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+44px;/s,
+  'Payment approvals must use the same stable three-column layout as landing approvals.',
+);
+
+assert.match(
+  stylesheet,
+  /\.approval-action-amount\s*\{[^}]*font-size:\s*10px;[^}]*color:\s*#1d5c3d;/s,
+  'Approved monetary actions must display a compact green amount below the check icon.',
+);
+
+assert.match(
+  stylesheet,
+  /@media\s*\(max-width:\s*899px\)\s*\{[\s\S]*?\.bank-workbench-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;[^}]*gap:\s*12px;[\s\S]*?\.bank-workbench-header\s+\.workbench-tools\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(3,\s*44px\);[\s\S]*?\.bank-workbench-header\s+\.workbench-tools\s*>\s*button:not\(\.icon\):not\(\.workbench-tool-seat\)\s*\{[^}]*min-width:\s*86px;[^}]*min-height:\s*44px;[^}]*font-size:\s*18px;/s,
   'Mobile bank-header actions must remain a reference-sized non-wrapping right column.',
 );
 

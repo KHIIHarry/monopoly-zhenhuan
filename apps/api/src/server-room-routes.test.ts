@@ -73,6 +73,16 @@ async function routeHarness() {
     }),
     deleteAccount: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, revokedSessionIds: ['target-session'] })),
     deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, stateVersion: 13 })),
+    listRooms: vi.fn(async () => [
+      { id: 'lobby', mine: true, status: 'LOBBY' },
+      { id: 'playing', mine: true, status: 'PLAYING' },
+      { id: 'ended', mine: true, status: 'ENDED' },
+      { id: 'finished', mine: true, status: 'FINISHED' },
+      { id: 'closed', mine: true, status: 'CLOSED' },
+      { id: 'outsider', mine: false, status: 'LOBBY' },
+    ]),
+    requestRoleSwap: vi.fn(async (_auth: AuthenticatedSession, roomId: string) => ({ id: 'character-swap', roomId, stateVersion: 14 })),
+    requestBankSwap: vi.fn(async (_auth: AuthenticatedSession, roomId: string) => ({ id: 'bank-swap', roomId, stateVersion: 14 })),
     authorizeRoomSession: vi.fn(async () => ({ player: { id: 'player-1' } })),
     getSettlement: vi.fn(async (_auth: AuthenticatedSession, _roomId: string, access?: 'ADMIN') => ({
       ...settlement,
@@ -126,7 +136,8 @@ describe('room write route idempotency contract', () => {
   it('forwards the required Idempotency-Key to every role-swap mutation', async () => {
     const source = await readFile(new URL('./app.ts', import.meta.url), 'utf8');
     const expectedCalls = [
-      /accounts\.requestRoleSwap\(auth, id, targetCharacterId, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
+      /accounts\.requestBankSwap\(auth, id, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
+      /accounts\.requestRoleSwap\(auth, id, body\.targetCharacterId, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
       /accounts\.acceptRoleSwap\(auth, id, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
       /accounts\.resolveRoleSwap\(auth, id, 'REJECT', idempotencyKey\(request\.headers\['idempotency-key'\]\), reason\)/,
       /accounts\.resolveRoleSwap\(auth, id, 'APPROVE_BANK', idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
@@ -136,10 +147,40 @@ describe('room write route idempotency contract', () => {
     for (const expectedCall of expectedCalls) expect(source).toMatch(expectedCall);
   });
 
+  it('rejects an ambiguous role-swap request before calling either service method', async () => {
+    const { accounts, app, headers } = await routeHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/role-swap-requests',
+      headers: { ...headers, 'idempotency-key': 'ambiguous-role-swap' },
+      payload: { targetCharacterId: 'zhenhuan', targetRole: 'BANK' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'INVALID_REQUEST' });
+    expect(accounts.requestRoleSwap).not.toHaveBeenCalled();
+    expect(accounts.requestBankSwap).not.toHaveBeenCalled();
+  });
+
   it('passes authenticated actors rather than raw Cookie tokens to game-domain methods', async () => {
     const source = await readFile(new URL('./app.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/games\.[A-Za-z]+\([^;\n]*auth\.rawToken/);
     expect(source).not.toMatch(/rawToken:\s*string/);
+  });
+});
+
+describe('room list lifecycle contract', () => {
+  it('keeps terminal rooms out of active rooms and includes them in history', async () => {
+    const { app, headers } = await routeHarness();
+
+    const active = await app.inject({ method: 'GET', url: '/api/rooms/mine', headers });
+    const history = await app.inject({ method: 'GET', url: '/api/rooms/history', headers });
+
+    expect(active.statusCode).toBe(200);
+    expect(history.statusCode).toBe(200);
+    expect(active.json().map((room: { id: string }) => room.id)).toEqual(['lobby', 'playing']);
+    expect(history.json().map((room: { id: string }) => room.id)).toEqual(['ended', 'finished', 'closed']);
   });
 });
 
@@ -189,6 +230,25 @@ describe('room start route contract', () => {
     );
     expect(response.json()).toEqual({ id: 'room-1', stateVersion: 24, status: 'PLAYING' });
     expect(response.body).not.toContain('private-session-id');
+  });
+});
+
+describe('room redemption fee route contract', () => {
+  it.each([
+    ['create negative', 'POST', '/api/rooms', { name: '测试', initialBalance: 5000, diceMode: 'PHYSICAL', redemptionFee: -1 }],
+    ['create fractional', 'POST', '/api/rooms', { name: '测试', initialBalance: 5000, diceMode: 'PHYSICAL', redemptionFee: 1.5 }],
+    ['update negative', 'PATCH', '/api/admin/rooms/room-1', { redemptionFee: -1 }],
+    ['update fractional', 'PATCH', '/api/admin/rooms/room-1', { redemptionFee: 1.5 }],
+  ])('rejects %s redemption fee', async (_name, method, url, payload) => {
+    const { app, headers } = await routeHarness();
+    const response = await app.inject({
+      method: method as 'POST' | 'PATCH',
+      url,
+      headers: { ...headers, 'idempotency-key': 'invalid-fee' },
+      payload,
+    });
+
+    expect(response.statusCode).toBe(400);
   });
 });
 

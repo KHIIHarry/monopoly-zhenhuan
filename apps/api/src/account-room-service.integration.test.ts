@@ -41,7 +41,7 @@ const integration = describe.skipIf(!testDatabaseUrl);
 const workspaceRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const migrationRoot = fileURLToPath(new URL('../../../packages/database/prisma/migrations/', import.meta.url));
 const prismaCli = fileURLToPath(new URL('../../../node_modules/prisma/build/index.js', import.meta.url));
-const masterDataSource = new URL('../../../甄嬛传大富翁_master-data.json', import.meta.url);
+const masterDataSource = new URL('../../../monopoly-zhenhuan_master-data.json', import.meta.url);
 const isolatedSchemaName = `account_room_${process.pid}_${randomUUID().replaceAll('-', '')}`;
 let isolatedTestDatabaseUrl: string | undefined;
 let isolatedSchemaCreated = false;
@@ -209,6 +209,7 @@ integration('AccountRoomService PostgreSQL authentication', () => {
       diceMode: 'PHYSICAL',
       skillEnabled: true,
       startReward: 1_200,
+      redemptionFee: 200,
       allowMidgameJoin: false,
       visibility: 'PRIVATE',
       transferApprovalRequired: true,
@@ -216,13 +217,14 @@ integration('AccountRoomService PostgreSQL authentication', () => {
 
     expect(Object.keys(created).sort()).toEqual([
       'allowMidgameJoin', 'code', 'createdAt', 'diceMode',
-      'expiresAt', 'hasPassword', 'id', 'initialBalance', 'name', 'skillEnabled',
+      'expiresAt', 'hasPassword', 'id', 'initialBalance', 'name', 'redemptionFee', 'skillEnabled',
       'startReward', 'status', 'transferApprovalRequired', 'visibility',
     ]);
     expect(created).toMatchObject({
       name: 'Task 2 protected room',
       status: 'LOBBY',
       hasPassword: true,
+      redemptionFee: 200,
       initialBalance: 6_000,
       diceMode: 'PHYSICAL',
       visibility: 'PRIVATE',
@@ -457,6 +459,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     diceMode: 'ELECTRONIC' | 'PHYSICAL';
     skillEnabled: boolean;
     startReward: number;
+    redemptionFee: number;
     allowMidgameJoin: boolean;
     visibility: 'PUBLIC' | 'PRIVATE';
     transferApprovalRequired: boolean;
@@ -466,6 +469,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     diceMode: 'PHYSICAL' as const,
     skillEnabled: true,
     startReward: 1_000,
+    redemptionFee: 200,
     allowMidgameJoin: false,
     visibility: 'PUBLIC' as const,
     transferApprovalRequired: false,
@@ -626,6 +630,14 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.room.count({ where: { createdByAccountId: creator.account.id } })).toBe(1);
     expect(await db.roomProperty.count({ where: { roomId: first.id } })).toBe(26);
     expect(await db.securityLog.count({ where: { accountId: creator.account.id, action: 'ROOM_CREATED' } })).toBe(1);
+  });
+
+  it('persists a zero redemption fee during room creation', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const room = await createRoom(creator.auth, 'Zero redemption fee', randomUUID(), { redemptionFee: 0 });
+
+    expect(await db.room.findUniqueOrThrow({ where: { id: room.id } }))
+      .toMatchObject({ redemptionFee: 0 });
   });
 
   it('requires the correct room password, rate-limits failures, bypasses password checks for members, and joins once', async () => {
@@ -1102,6 +1114,20 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(JSON.stringify({ seats, listedForMember, listedForViewer })).not.toContain('sessionTokenHash');
   });
 
+  it('hides private room seats from outsiders while allowing members, creators, and admins', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const member = await createAuth();
+    const outsider = await createAuth();
+    const admin = await createAuth({ superAdmin: true });
+    const room = await createRoom(creator.auth, 'Private seats', randomUUID(), { visibility: 'PRIVATE' });
+    await service.joinRoom(member.auth, room.id, {}, 'join-private-seats');
+
+    await expect(service.seats(outsider.auth, room.id)).rejects.toMatchObject({ code: 'ROOM_NOT_FOUND' });
+    await expect(service.seats(member.auth, room.id)).resolves.toMatchObject({ room: { id: room.id } });
+    await expect(service.seats(creator.auth, room.id)).resolves.toMatchObject({ room: { id: room.id } });
+    await expect(service.seats(admin.auth, room.id)).resolves.toMatchObject({ room: { id: room.id } });
+  });
+
   it('reports authoritative room joinability and available characters', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const seated = await Promise.all(Array.from({ length: 5 }, () => createAuth()));
@@ -1445,7 +1471,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.securityLog.count({ where: { accountId: joiner.account.id, action: 'ROOM_JOINED', detailsJson: { path: ['roomId'], equals: room.id } } })).toBe(1);
   });
 
-  it('executes idempotent lobby replacement and mutual swaps without moving assets or bank capability', async () => {
+  it('moves each character initial palace and bank capability during lobby swaps', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const requester = await createAuth();
     const target = await createAuth();
@@ -1456,6 +1482,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const selectedTarget = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'replacement-target-character');
     await service.selectBank(target.auth, room.id, 'replacement-target-bank');
     const targetBefore = await db.player.findUniqueOrThrow({ where: { id: selectedTarget.player.id } });
+    const initialPalace = await db.roomProperty.findFirstOrThrow({ where: { roomId: room.id, propertyDefinitionId: targetCharacter!.initialPropertyId } });
     const propertiesBefore = await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } });
 
     const requested = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'replacement-request');
@@ -1473,7 +1500,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.ledgerEntry.count({ where: { roomId: room.id, playerId: requesterAfter.player!.id, type: 'INITIAL_BALANCE' } })).toBe(1);
 
     const propertiesAfterReplacement = await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } });
-    expect(propertiesAfterReplacement.filter((property) => property.ownerPlayerId === targetBefore.id)).toEqual(propertiesBefore.filter((property) => property.ownerPlayerId === targetBefore.id));
+    expect(propertiesAfterReplacement.find((property) => property.id === initialPalace.id)?.ownerPlayerId).toBe(requesterAfter.player!.id);
+    expect(propertiesBefore.find((property) => property.id === initialPalace.id)?.ownerPlayerId).toBe(targetBefore.id);
     const retainedPlayerId = targetAfter.player!.id;
     const retainedLedgerCount = await db.ledgerEntry.count({ where: { roomId: room.id, playerId: retainedPlayerId } });
     const retainedPropertyIds = (await db.roomProperty.findMany({ where: { roomId: room.id, ownerPlayerId: retainedPlayerId }, select: { id: true }, orderBy: { id: 'asc' } })).map((property) => property.id);
@@ -1528,7 +1556,48 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.ledgerEntry.count({ where: { roomId: room.id, playerId: requesterSeat.player.id, type: 'INITIAL_BALANCE' } })).toBe(initialLedgerCount);
   });
 
-  it('requires distinct target and bank actions in playing swaps and never grants playing-time assets', async () => {
+  it('exchanges the bank seat without moving character or property ownership', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const requester = await createAuth();
+    const target = await createAuth();
+    const [requesterCharacter, targetCharacter] = await characters(2);
+    const room = await createRoom(creator.auth, 'Bank seat swap');
+    await service.joinRoom(requester.auth, room.id, undefined, 'bank-swap-requester-join');
+    await service.joinRoom(target.auth, room.id, undefined, 'bank-swap-target-join');
+    const requesterSeat = await service.selectCharacter(requester.auth, room.id, requesterCharacter!.id, 'bank-swap-requester-character');
+    const targetSeat = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'bank-swap-target-character');
+    await service.selectBank(target.auth, room.id, 'bank-swap-target-bank');
+    const propertiesBefore = await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } });
+    const requested = await service.requestBankSwap(requester.auth, room.id, 'bank-swap-request');
+    await service.acceptRoleSwap(target.auth, requested.id, 'bank-swap-accept');
+
+    const requesterAfter = await db.roomMembership.findUniqueOrThrow({
+      where: { roomId_accountId: { roomId: room.id, accountId: requester.account.id } },
+      include: { player: true },
+    });
+    const targetAfter = await db.roomMembership.findUniqueOrThrow({
+      where: { roomId_accountId: { roomId: room.id, accountId: target.account.id } },
+      include: { player: true },
+    });
+    expect(requesterAfter).toMatchObject({ isBank: true, characterId: requesterCharacter!.id });
+    expect(targetAfter).toMatchObject({ isBank: false, characterId: targetCharacter!.id });
+    expect(requesterAfter.player?.id).toBe(requesterSeat.player.id);
+    expect(targetAfter.player?.id).toBe(targetSeat.player.id);
+    expect(await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(propertiesBefore);
+    expect(await db.auditLog.findMany({
+      where: {
+        roomId: room.id,
+        entityId: requested.id,
+        action: { in: ['ROLE_SWAP_TARGET_ACCEPTED', 'ROLE_SWAP_EXECUTED'] },
+      },
+      select: { action: true, actorMemberId: true, actorRole: true },
+    })).toEqual(expect.arrayContaining([
+      { action: 'ROLE_SWAP_TARGET_ACCEPTED', actorMemberId: targetAfter.id, actorRole: 'BANK' },
+      { action: 'ROLE_SWAP_EXECUTED', actorMemberId: targetAfter.id, actorRole: 'BANK' },
+    ]));
+  });
+
+  it('rejects role-swap requests and confirmation after the game starts without mutation', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const requester = await createAuth();
     const dualTargetBank = await createAuth();
@@ -1536,29 +1605,33 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const room = await createRoom(creator.auth, 'Playing replacement');
     await service.joinRoom(requester.auth, room.id, {}, 'playing-requester-join');
     await service.joinRoom(dualTargetBank.auth, room.id, {}, 'playing-target-join');
-    const target = await service.selectCharacter(dualTargetBank.auth, room.id, targetCharacter!.id, 'playing-target-character');
+    await service.selectCharacter(dualTargetBank.auth, room.id, targetCharacter!.id, 'playing-target-character');
     await service.selectBank(dualTargetBank.auth, room.id, 'playing-target-bank');
+    const pending = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'lobby-request');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
 
-    const requested = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'playing-request');
-    const targetAccepted = await service.acceptRoleSwap(dualTargetBank.auth, requested.id, 'playing-target-accept');
-    expect(targetAccepted.status).toBe('PENDING_BANK');
-    expect((await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: requester.account.id } } })).characterId).toBeNull();
+    const before = {
+      requests: await db.roleSwapRequest.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      memberships: await db.roomMembership.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      players: await db.player.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      properties: await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      audits: await db.auditLog.count({ where: { roomId: room.id } }),
+      idempotency: await db.idempotencyRecord.count(),
+    };
 
-    const approved = await service.resolveRoleSwap(dualTargetBank.auth, requested.id, 'APPROVE_BANK', 'playing-bank-approve');
-    expect(await service.resolveRoleSwap(dualTargetBank.auth, requested.id, 'APPROVE_BANK', 'playing-bank-approve')).toEqual(approved);
-    const requesterAfter = await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: requester.account.id } }, include: { player: true } });
-    expect(requesterAfter.player).toMatchObject({ balance: 0, characterId: targetCharacter!.id });
-    expect(await db.ledgerEntry.count({ where: { roomId: room.id, playerId: requesterAfter.player!.id } })).toBe(0);
-    expect(await db.roomProperty.count({ where: { roomId: room.id, ownerPlayerId: requesterAfter.player!.id } })).toBe(0);
-    expect(await db.player.findUniqueOrThrow({ where: { id: target.player.id } })).toMatchObject({ id: target.player.id, balance: 6_000, characterId: null });
-    const audits = await db.auditLog.findMany({ where: { roomId: room.id, entityId: requested.id }, orderBy: { createdAt: 'asc' } });
-    expect(audits.map((audit) => [audit.action, audit.actorRole])).toEqual([
-      ['ROLE_SWAP_REQUESTED', 'PLAYER'],
-      ['ROLE_SWAP_TARGET_ACCEPTED', 'PLAYER'],
-      ['ROLE_SWAP_BANK_CONFIRMED', 'BANK'],
-      ['ROLE_SWAP_EXECUTED', 'BANK'],
-    ]);
+    await expect(service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'playing-character-request'))
+      .rejects.toMatchObject({ code: 'ROLE_SWAP_LOBBY_ONLY' });
+    await expect(service.requestBankSwap(requester.auth, room.id, 'playing-bank-request'))
+      .rejects.toMatchObject({ code: 'ROLE_SWAP_LOBBY_ONLY' });
+    await expect(service.acceptRoleSwap(dualTargetBank.auth, pending.id, 'playing-target-accept'))
+      .rejects.toMatchObject({ code: 'ROLE_SWAP_LOBBY_ONLY' });
+
+    expect(await db.roleSwapRequest.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(before.requests);
+    expect(await db.roomMembership.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(before.memberships);
+    expect(await db.player.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(before.players);
+    expect(await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(before.properties);
+    expect(await db.auditLog.count({ where: { roomId: room.id } })).toBe(before.audits);
+    expect(await db.idempotencyRecord.count()).toBe(before.idempotency);
   });
 
   it('limits role-swap rejection to the target and cancellation to the requester', async () => {
@@ -1619,6 +1692,9 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
       where: { roomId: room.id, ownerPlayerId: targetPlayerBefore.id },
       orderBy: { id: 'asc' },
     });
+    const targetInitialProperty = targetPropertyBefore.find(
+      (property) => property.propertyDefinitionId === allCharacters[2]!.initialPropertyId,
+    )!;
     const targetLedgerBefore = await db.ledgerEntry.findMany({
       where: { roomId: room.id, playerId: targetPlayerBefore.id },
       orderBy: { id: 'asc' },
@@ -1658,7 +1734,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.roomProperty.findMany({
       where: { roomId: room.id, ownerPlayerId: targetPlayerBefore.id },
       orderBy: { id: 'asc' },
-    })).toEqual(targetPropertyBefore);
+    })).toEqual(targetPropertyBefore.filter((property) => property.id !== targetInitialProperty.id));
+    expect(await db.roomProperty.findUniqueOrThrow({ where: { id: targetInitialProperty.id } })).toMatchObject({
+      ownerPlayerId: requesterAfter.player!.id,
+      buildingLevel: targetInitialProperty.buildingLevel,
+      version: targetInitialProperty.version + 1,
+    });
     expect(await db.ledgerEntry.findMany({
       where: { roomId: room.id, playerId: targetPlayerBefore.id },
       orderBy: { id: 'asc' },
@@ -1719,73 +1800,6 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.player.count({ where: { memberId: membership.id } })).toBe(1);
   });
 
-  it('durably conflicts a PLAYING replacement when the target owns the active turn', async () => {
-    const creator = await createAuth({ canCreateRoom: true });
-    const requester = await createAuth();
-    const target = await createAuth();
-    const otherPlayer = await createAuth();
-    const bank = await createAuth();
-    const [targetCharacter, otherCharacter] = await characters(2);
-    const room = await createRoom(creator.auth, 'Current target conflict', randomUUID(), { diceMode: 'ELECTRONIC' });
-    for (const [member, key] of [[requester, 'requester'], [target, 'target'], [otherPlayer, 'other'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, {}, `current-conflict-${key}-join`);
-    }
-    const targetSeat = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'current-conflict-target-character');
-    await service.selectCharacter(otherPlayer.auth, room.id, otherCharacter!.id, 'current-conflict-other-character');
-    await service.selectBank(bank.auth, room.id, 'current-conflict-bank');
-    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
-    const turn = await db.turn.create({ data: { roomId: room.id, playerId: targetSeat.player.id, turnNumber: 1 } });
-    await db.room.update({ where: { id: room.id }, data: { currentTurnPlayerId: targetSeat.player.id, turnNumber: 1 } });
-    const requested = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'current-conflict-request');
-    await service.acceptRoleSwap(target.auth, requested.id, 'current-conflict-accept');
-    const targetBefore = await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: target.account.id } }, include: { player: true } });
-    const propertiesBefore = await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } });
-    const ledgerBefore = await db.ledgerEntry.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } });
-
-    const conflicted = await service.resolveRoleSwap(bank.auth, requested.id, 'APPROVE_BANK', 'current-conflict-bank-decision');
-    const replay = await service.resolveRoleSwap(bank.auth, requested.id, 'APPROVE_BANK', 'current-conflict-bank-decision');
-
-    expect(replay).toEqual(conflicted);
-    expect(conflicted).toMatchObject({ status: 'CONFLICTED', resolvedAt: expect.any(String) });
-    expect(await db.roleSwapRequest.findUniqueOrThrow({ where: { id: requested.id } })).toMatchObject({ status: 'CONFLICTED', resolvedAt: expect.any(Date) });
-    expect(await db.auditLog.count({ where: { roomId: room.id, entityId: requested.id, action: 'ROLE_SWAP_CONFLICTED' } })).toBe(1);
-    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: targetBefore.id }, include: { player: true } })).toMatchObject(targetBefore);
-    expect(await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: requester.account.id } } })).toMatchObject({ characterId: null });
-    expect(await db.player.count({ where: { member: { accountId: requester.account.id }, roomId: room.id } })).toBe(0);
-    expect(await db.roomProperty.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(propertiesBefore);
-    expect(await db.ledgerEntry.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } })).toEqual(ledgerBefore);
-    expect(await db.turn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ status: 'ACTIVE', playerId: targetSeat.player.id });
-    expect(await db.room.findUniqueOrThrow({ where: { id: room.id } })).toMatchObject({ currentTurnPlayerId: targetSeat.player.id });
-  });
-
-  it('durably conflicts a PLAYING replacement when an ACTIVE target Turn disagrees with the room pointer', async () => {
-    const creator = await createAuth({ canCreateRoom: true });
-    const requester = await createAuth();
-    const target = await createAuth();
-    const otherPlayer = await createAuth();
-    const bank = await createAuth();
-    const [targetCharacter, otherCharacter] = await characters(2);
-    const room = await createRoom(creator.auth, 'Active turn drift conflict', randomUUID(), { diceMode: 'ELECTRONIC' });
-    for (const [member, key] of [[requester, 'requester'], [target, 'target'], [otherPlayer, 'other'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, {}, `turn-drift-${key}-join`);
-    }
-    const targetSeat = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'turn-drift-target-character');
-    const otherSeat = await service.selectCharacter(otherPlayer.auth, room.id, otherCharacter!.id, 'turn-drift-other-character');
-    await service.selectBank(bank.auth, room.id, 'turn-drift-bank');
-    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
-    const turn = await db.turn.create({ data: { roomId: room.id, playerId: targetSeat.player.id, turnNumber: 1 } });
-    await db.room.update({ where: { id: room.id }, data: { currentTurnPlayerId: otherSeat.player.id, turnNumber: 1 } });
-    const requested = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'turn-drift-request');
-    await service.acceptRoleSwap(target.auth, requested.id, 'turn-drift-accept');
-
-    const conflicted = await service.resolveRoleSwap(bank.auth, requested.id, 'APPROVE_BANK', 'turn-drift-bank-decision');
-
-    expect(conflicted).toMatchObject({ status: 'CONFLICTED', rejectionReason: 'TARGET_HAS_ACTIVE_TURN' });
-    expect(await db.turn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ status: 'ACTIVE', playerId: targetSeat.player.id });
-    expect(await db.player.findUniqueOrThrow({ where: { id: targetSeat.player.id } })).toMatchObject({ characterId: targetCharacter!.id });
-    expect(await db.player.count({ where: { roomId: room.id, member: { accountId: requester.account.id } } })).toBe(0);
-  });
-
   it('terminalizes character drift once and replays the allowlisted conflict DTO', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const requester = await createAuth();
@@ -1809,7 +1823,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
     expect(replay).toEqual(conflicted);
     expect(Object.keys(conflicted).sort()).toEqual([
-      'createdAt', 'id', 'rejectionReason', 'requesterCharacterId', 'requesterMembershipId',
+      'createdAt', 'id', 'kind', 'rejectionReason', 'requesterCharacterId', 'requesterMembershipId',
       'resolvedAt', 'roomId', 'stateVersion', 'status', 'targetCharacterId', 'targetMembershipId', 'updatedAt',
     ]);
     expect(conflicted).toMatchObject({ id: requested.id, status: 'CONFLICTED', resolvedAt: expect.any(String) });
@@ -2015,8 +2029,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     }
     await service.selectCharacter(target.auth, room.id, character!.id, 'seat-swap-target-character');
     await service.selectBank(bank.auth, room.id, 'seat-swap-bank');
-    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
     const requested = await service.requestRoleSwap(requester.auth, room.id, character!.id, 'seat-swap-request');
+    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
 
     const requesterSeats = await service.seats(requester.auth, room.id);
     const targetSeats = await service.seats(target.auth, room.id);
@@ -2029,20 +2043,19 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     });
     expect(targetSeats.roleSwapRequests[0]).toMatchObject({
       id: requested.id,
-      actions: { canAccept: true, canReject: true, canCancel: false, canApproveBank: false },
+      actions: { canAccept: false, canReject: true, canCancel: false, canApproveBank: false },
     });
-    await service.acceptRoleSwap(target.auth, requested.id, 'seat-swap-accept');
 
     const bankSeats = await service.seats(bank.auth, room.id);
     const observerSeats = await service.seats(observer.auth, room.id);
     expect(bankSeats.roleSwapRequests[0]).toMatchObject({
       id: requested.id,
-      status: 'PENDING_BANK',
-      actions: { canAccept: false, canReject: false, canCancel: false, canApproveBank: true },
+      status: 'PENDING_TARGET',
+      actions: { canAccept: false, canReject: false, canCancel: false, canApproveBank: false },
     });
     expect(observerSeats.roleSwapRequests).toEqual([]);
     const allowedKeys = [
-      'actions', 'createdAt', 'id', 'rejectionReason', 'requesterCharacterId',
+      'actions', 'createdAt', 'id', 'kind', 'rejectionReason', 'requesterCharacterId',
       'requesterDisplayName', 'requesterMembershipId', 'resolvedAt', 'roomId', 'status',
       'targetCharacterId', 'targetDisplayName', 'targetMembershipId', 'updatedAt',
     ];
@@ -2101,23 +2114,22 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     }
     await service.selectCharacter(target.auth, room.id, character!.id, 'controlled-actions-target-character');
     await service.selectBank(bank.auth, room.id, 'controlled-actions-bank');
-    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
     const requested = await service.requestRoleSwap(requester.auth, room.id, character!.id, 'controlled-actions-request');
+    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
     const controllingTarget = await secondSession(target.auth);
     await service.takeControl(controllingTarget, room.id, 'controlled-actions-target-takeover');
 
     const staleTargetRequest = (await service.seats(target.auth, room.id)).roleSwapRequests.find((request) => request.id === requested.id);
     const activeTargetRequest = (await service.seats(controllingTarget, room.id)).roleSwapRequests.find((request) => request.id === requested.id);
     expect(staleTargetRequest?.actions).toMatchObject({ canAccept: false, canReject: false });
-    expect(activeTargetRequest?.actions).toMatchObject({ canAccept: true, canReject: true });
+    expect(activeTargetRequest?.actions).toMatchObject({ canAccept: false, canReject: true });
 
-    await service.acceptRoleSwap(controllingTarget, requested.id, 'controlled-actions-accept');
     const controllingBank = await secondSession(bank.auth);
     await service.takeControl(controllingBank, room.id, 'controlled-actions-bank-takeover');
     const staleBankRequest = (await service.seats(bank.auth, room.id)).roleSwapRequests.find((request) => request.id === requested.id);
     const activeBankRequest = (await service.seats(controllingBank, room.id)).roleSwapRequests.find((request) => request.id === requested.id);
     expect(staleBankRequest?.actions.canApproveBank).toBe(false);
-    expect(activeBankRequest?.actions.canApproveBank).toBe(true);
+    expect(activeBankRequest?.actions.canApproveBank).toBe(false);
 
     await db.room.update({ where: { id: room.id }, data: { status: 'FINISHED' } });
     const terminalRequest = (await service.seats(controllingBank, room.id)).roleSwapRequests.find((request) => request.id === requested.id);
@@ -2489,7 +2501,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect((await service.previewSettlement(dual.auth, dualRoom.id)).players.map((player) => player.accountId)).toEqual([dual.account.id]);
   });
 
-  it('excludes a public-replacement retained Player and negative balance without changing retained assets or history', async () => {
+  it('excludes a lobby-replacement retained Player and negative balance without changing retained assets or history', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const retained = await createAuth({ displayName: '留存资产玩家' });
     const active = await createAuth({ displayName: '有效玩家' });
@@ -2502,11 +2514,9 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const retainedSeat = await service.selectCharacter(retained.auth, room.id, retainedCharacter!.id, 'retained-settlement-character');
     await service.selectCharacter(active.auth, room.id, activeCharacter!.id, 'active-settlement-character');
     await service.selectBank(bank.auth, room.id, 'retained-settlement-bank');
-    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
-
     const requested = await service.requestRoleSwap(bank.auth, room.id, retainedCharacter!.id, 'retained-settlement-request');
     await service.acceptRoleSwap(retained.auth, requested.id, 'retained-settlement-accept');
-    await service.resolveRoleSwap(bank.auth, requested.id, 'APPROVE_BANK', 'retained-settlement-approve');
+    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
     const retainedMembership = await db.roomMembership.findUniqueOrThrow({
       where: { roomId_accountId: { roomId: room.id, accountId: retained.account.id } },
       include: { player: true },
@@ -2805,15 +2815,9 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
         new AccountRoomService(swapClients[0]!).finishRoom(swapBank.auth, swapRoom.id, { mode: 'NORMAL', confirmation: '确认结束游戏' }, 'concurrent-swap-finish'),
         new AccountRoomService(swapClients[1]!).requestRoleSwap(requester.auth, swapRoom.id, character!.id, 'concurrent-swap-request'),
       ]);
-      expect([finishOutcome.status, swapOutcome.status]).toContain('fulfilled');
-      if (finishOutcome.status === 'fulfilled') {
-        expect(rejectionCode(swapOutcome)).toBe('ROOM_FINISHED');
-        expect(await db.roleSwapRequest.count({ where: { roomId: swapRoom.id, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } } })).toBe(0);
-      } else {
-        expect(rejectionCode(finishOutcome)).toBe('SETTLEMENT_BLOCKED');
-        expect(swapOutcome.status).toBe('fulfilled');
-        expect(await db.gameSettlement.count({ where: { roomId: swapRoom.id } })).toBe(0);
-      }
+      expect(finishOutcome.status).toBe('fulfilled');
+      expect(['ROLE_SWAP_LOBBY_ONLY', 'ROOM_FINISHED']).toContain(rejectionCode(swapOutcome));
+      expect(await db.roleSwapRequest.count({ where: { roomId: swapRoom.id, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } } })).toBe(0);
     } finally {
       await Promise.all(swapClients.map((client) => client.$disconnect()));
     }

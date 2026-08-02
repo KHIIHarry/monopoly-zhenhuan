@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from 'vitest';
 import {
   ApiError,
   bankTransferApprovalFeedback,
+  hasRoomCapability,
   pendingRealtimeToastInput,
   playerTransferFeedback,
   routeRealtimeToast,
@@ -11,8 +12,18 @@ import {
 } from './app-router-client';
 
 const componentUrl = new URL('./app-router-client.tsx', import.meta.url);
+const seatsPageUrl = new URL('../rooms/[roomId]/seats/page.tsx', import.meta.url);
 
 describe('confirmation dialog', () => {
+  test('describes room removal as archival rather than permanent deletion', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('title: "归档房间"');
+    expect(component).toContain('fieldLabel: "确认归档房间"');
+    expect(component).toContain('房间将停止操作并保留不可删除的账本与审计记录');
+    expect(component).not.toContain('${selectedRoom.name} 的全部房间数据将被永久清除，且无法恢复。');
+  });
+
   test('uses a wave before the confirm-exit label', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
 
@@ -33,14 +44,207 @@ describe('confirmation dialog', () => {
   });
 });
 
-describe('bank workbench header', () => {
-  test('stacks the bank title under room information and keeps actions separate', async () => {
+describe('workbench headers', () => {
+  test('uses the same mobile header structure for bank and player workbenches', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
 
-    expect(component).toMatch(/<header\s+className=\{\s*context\.view === "BANK" \? "bank-workbench-header" : undefined\s*\}/s);
-    expect(component).toMatch(/className="workbench-room-info"[\s\S]*?className="workbench-room-meta"[\s\S]*?<strong title=\{snapshot\.name\}>\{snapshot\.name\}<\/strong>[\s\S]*?<small>\{" \\u2022 "\}\{snapshot\.code\}<\/small>[\s\S]*?<h1>银行端<\/h1>/);
+    expect(component).toMatch(/<header\s+className="bank-workbench-header">/);
+    expect(component).toMatch(/className="workbench-room-info"[\s\S]*?className="workbench-room-meta"[\s\S]*?<strong title=\{snapshot\.name\}>\{snapshot\.name\}<\/strong>[\s\S]*?<small>\{" \\u2022 "\}\{snapshot\.code\}<\/small>/);
+    expect(component).toContain('aria-label={context.view === "PLAYER" ? "玩家端" : "银行端"}');
+    expect(component).toContain('{context.view === "PLAYER" ? playerName : "银行端"}');
     expect(component).not.toContain("审批、轮次与资产管理");
-    expect(component).toMatch(/className="workbench-tools"[\s\S]*?管理席位[\s\S]*?aria-label="刷新房间快照"/);
+    expect(component).toMatch(/className="workbench-tools"[\s\S]*?className="workbench-tool-seat"[\s\S]*?aria-label="管理席位"[\s\S]*?<Users\s*\/>[\s\S]*?<RefreshButton\s+label="刷新房间快照"[\s\S]*?className="icon workbench-leave-mobile"[\s\S]*?aria-label="退出房间"[\s\S]*?<LogOut\s*\/>/);
+    expect(component).toMatch(/<Nav\s+className="workbench-leave-nav"[\s\S]*?icon=\{<LogIn\s*\/>\}[\s\S]*?label="退出"/);
+  });
+});
+
+describe('workbench selector routing', () => {
+  test('renders the selector only for memberships with both player and bank capabilities', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(
+      /screen === "WORKBENCH_SELECT" &&\s*seats\?\.membership &&\s*hasRoomCapability\(seats\.membership, "player"\) &&\s*hasRoomCapability\(seats\.membership, "bank"\)/,
+    );
+  });
+});
+
+describe('seat management return action', () => {
+  test('returns joined members to their current workbench and keeps room-list exit for unjoined members', async () => {
+    const [component, seatsPage] = await Promise.all([
+      readFile(fileURLToPath(componentUrl), 'utf8'),
+      readFile(fileURLToPath(seatsPageUrl), 'utf8'),
+    ]);
+
+    expect(component).not.toContain('useSearchParams');
+    expect(component).toContain('seatsReturnView?: "player" | "bank";');
+    expect(seatsPage).toContain("searchParams: Promise<{ returnTo?: string | string[] }>");
+    expect(seatsPage).toMatch(/requestedReturn === 'player'[\s\S]*?requestedReturn === 'bank'/);
+    expect(seatsPage).toContain('seatsReturnView={seatsReturnView}');
+    expect(component).toContain('`${roomPath("seats", workbench.roomId)}?returnTo=${workbench.view === "PLAYER" ? "player" : "bank"}`');
+    expect(component).toMatch(/const returnToWorkbench =\s*seats &&\s*seatsReturnView &&\s*hasRoomCapability\(seats\.membership, seatsReturnView\)\s*\? \(\) => go\(roomPath\(seatsReturnView, seats\.room\.id\)\)\s*:\s*undefined;/s);
+    expect(component).toContain('onReturnToRoom={returnToWorkbench}');
+    expect(component).toMatch(/onReturnToRoom \? \(\s*<button\s+className="icon subtle"\s+aria-label="返回当前房间"[\s\S]*?<ArrowLeft\s*\/>[\s\S]*?\) : \(\s*<button onClick=\{onBack\}>房间列表<\/button>/);
+  });
+
+  test('accepts return targets only when the current membership has that capability', async () => {
+    const player = { characterId: 'zhenhuan', playerId: 'player-1', isBank: false };
+    const bank = { characterId: null, playerId: null, isBank: true };
+    const dual = { ...player, isBank: true };
+
+    expect(hasRoomCapability(player, 'player')).toBe(true);
+    expect(hasRoomCapability(player, 'bank')).toBe(false);
+    expect(hasRoomCapability(bank, 'bank')).toBe(true);
+    expect(hasRoomCapability(bank, 'player')).toBe(false);
+    expect(hasRoomCapability(dual, 'player')).toBe(true);
+    expect(hasRoomCapability(dual, 'bank')).toBe(true);
+    expect(
+      hasRoomCapability(
+        { characterId: 'zhenhuan', playerId: null, isBank: false },
+        'player',
+      ),
+    ).toBe(false);
+    expect(hasRoomCapability(null, 'bank')).toBe(false);
+    expect(hasRoomCapability(dual, undefined)).toBe(false);
+  });
+});
+
+describe('manual refresh feedback', () => {
+  test('uses a local two-turn refresh control with success notices', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('function RefreshButton(');
+    expect(component).toContain('className="refresh-two-turns"');
+    expect(component).toContain('notice="房间快照已刷新"');
+    expect(component).toContain('notice="席位信息已刷新"');
+    expect(component).toContain('notice="后台数据已刷新"');
+  });
+});
+
+describe('landing confirmation status', () => {
+  test('restores the current landing from the room snapshot', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('selectCurrentLanding(snapshot.landings');
+    expect(component).toContain('? "落点待银行确认"');
+    expect(component).toContain('? "本次落点"');
+    expect(component).toContain(': "上次确认落点"');
+    expect(component).not.toContain('trustedLandings');
+    expect(component).not.toContain('setTrustedLandings');
+  });
+});
+
+describe('seat swap requests', () => {
+  test('lets members request the occupied bank seat through the role-swap endpoint', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/body: target,/);
+    expect(component).toMatch(/const canRequestRoleSwap = seats\.room\.status === "LOBBY"/);
+    expect(component).toMatch(/canRequestRoleSwap && !own[\s\S]*?className="swap-request"[\s\S]*?onClick=\{\(\) => void onSwap\(\{ targetCharacterId: character\.id \}\)\}/);
+    expect(component).toMatch(/canRequestRoleSwap && !seats\.membership\?\.isBank[\s\S]*?className="swap-request"[\s\S]*?onClick=\{\(\) => void onSwap\(\{ targetRole: "BANK" \}\)\}/);
+  });
+});
+
+describe('mobile landing approval layout', () => {
+  test('marks landing approvals for their independent action layout', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('className="approval-list landing-approval-list payment-approval-list"');
+  });
+
+  test('places the landing player nickname below the location icon', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/className="landing-location-meta"[\s\S]*?<MapPin\s*\/>[\s\S]*?className="landing-player-nickname"[\s\S]*?\{landingPlayer\?\.name \?\? "未知玩家"\}[\s\S]*?<\/div>\s*<div className="landing-approval-details"/);
+  });
+
+  test('stacks the landed property owner below its name after the landing character', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('const landedProperty = properties.find(');
+    expect(component).toContain('const landedPropertyOwner = players.find(');
+    expect(component).toMatch(
+      /className="landing-location-meta"[\s\S]*?实体落点[\s\S]*?<MapPin\s*\/>/,
+    );
+    expect(component).toContain('className={`landing-approval-title-line property-theme-${landedPropertyOwner?.characterId ?? "unowned"}`}');
+    expect(component).toContain('landing-approval-character');
+    expect(component).toContain('className="landing-approval-arrow"');
+    expect(component).toMatch(/className="landing-approval-arrow"[^>]*>\s*→\s*<\/span>/);
+    expect(component).toContain(
+      'className="landing-approval-property-name"',
+    );
+    expect(component).not.toContain('className={`landing-approval-property property-theme-');
+    expect(component).toMatch(
+      /className="landing-approval-property-name"[\s\S]*?landing\.propertyName \?\? landing\.spaceType[\s\S]*?className="landing-approval-property-owner"[\s\S]*?\[/,
+    );
+    expect(component).toContain('characterName(landedPropertyOwner.characterId)');
+    expect(component).toContain(': "无主"');
+  });
+});
+
+describe('approval action controls', () => {
+  test('uses icon-only confirmation and rejection actions throughout approval cards', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/className="approval-action approval-action-confirm"[\s\S]*?aria-label="确认已结算剧情"[\s\S]*?<Check\s*\/>/);
+    expect(component).toMatch(/className="approval-action approval-action-reject"[\s\S]*?aria-label="取消地产操作"[\s\S]*?<X\s*\/>/);
+    expect(component).toMatch(/className="approval-action approval-action-confirm"[\s\S]*?aria-label=\{requestActionLabel\("批准", request\)\}[\s\S]*?<Check\s*\/>/);
+    expect(component).toMatch(/className="approval-action approval-action-reject"[\s\S]*?aria-label=\{requestActionLabel\("拒绝", request\)\}[\s\S]*?<X\s*\/>/);
+  });
+
+  test('uses the landing-card layout and amount annotation for bank approvals', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/className="approval-list landing-approval-list payment-approval-list"[\s\S]*?className="payment-approval-meta"[\s\S]*?<Banknote\s*\/>[\s\S]*?className="payment-approval-details"/);
+    expect(component).toContain('const approvalAmount = approvalAmountDelta(request);');
+    expect(component).toMatch(/className=\{`approval-action-amount \$\{approvalAmount < 0 \? "debit" : "credit"\}`\}[\s\S]*?\{approvalAmount > 0 \? "\+" : ""\}[\s\S]*?\{formatMoney\(approvalAmount\)\}/);
+  });
+
+  test('adds the themed character name after every payment approval nickname', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/player\?\.characterId && \([\s\S]*?className=\{`payment-approval-character character-\$\{player\.characterId\}`\}[\s\S]*?（\{characterName\(player\.characterId\)\}）/);
+    expect(component).not.toContain('request.type === "PLAYER_TRANSFER" && player?.characterId');
+  });
+});
+
+describe('unified bank pending approvals', () => {
+  test('uses the same complete chronological section in summary and approval tabs', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/type BankRequest = \{[\s\S]*?createdAt\?: string;/);
+    expect(component).toMatch(/type Landing = \{[\s\S]*?createdAt\?: string;/);
+    expect(component).toContain('const pendingApprovals = mergePendingApprovals(pending, pendingLandings);');
+    expect(component.match(/<PendingApprovalSection/g)).toHaveLength(2);
+    expect(component).not.toContain('pending.slice(0, 2)');
+    expect(component).not.toContain('title="待确认落点"');
+    expect(component).not.toContain('title="待审批请求"');
+    expect(component).toContain('formatApprovalSubmittedAt(item.createdAt)');
+    expect(component).toContain('当前没有待审批事项');
+  });
+});
+
+describe('start reward submission', () => {
+  test('uses the existing declaration button for one approval and keeps the bank amount under its checkmark', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const startFlow = component.slice(
+      component.indexOf('async function declareStartLanding'),
+      component.indexOf('async function confirmTrade'),
+    );
+    const startSheet = component.slice(
+      component.indexOf('{panel === "START"'),
+      component.indexOf('{panel === "PROPERTY"'),
+    );
+    const approvalSection = component.slice(
+      component.indexOf('function PendingApprovalSection'),
+      component.indexOf('function approvalDetails'),
+    );
+
+    expect(startFlow).toContain('起点 ${formatMoney(snapshot.startReward)} 两申请已提交银行审批');
+    expect(startFlow).not.toContain('async function requestStartReward');
+    expect(startSheet).toContain('声明停留起点');
+    expect(startSheet).not.toContain('等待银行确认起点落点');
+    expect(startSheet).not.toContain('银行已确认本轮精确停留起点');
+    expect(approvalSection).toMatch(/<Check \/>[\s\S]*?\{approvalAmount > 0 \? "\+" : ""\}[\s\S]*?\{formatMoney\(approvalAmount\)\}/);
   });
 });
 
@@ -174,7 +378,7 @@ describe('authoritative transfer feedback', () => {
     expect(result).toEqual({ ok: false, committed: false, error });
   });
 
-  test('keeps the authoritative response when snapshot refresh fails after a write', async () => {
+  test('keeps a committed write successful when its snapshot refresh is superseded', async () => {
     const confirm = vi.fn();
     const value = { id: 'transfer-1', status: 'EXECUTED' };
     const body = { recipientId: 'player-2', amount: 100 };
@@ -186,8 +390,45 @@ describe('authoritative transfer feedback', () => {
       refreshGame: async () => false,
     });
 
-    expect(result).toEqual({ ok: false, committed: true, value, body });
+    expect(result).toEqual({
+      ok: true,
+      committed: true,
+      snapshotRefreshed: false,
+      value,
+      body,
+    });
     expect(confirm).toHaveBeenCalledOnce();
+  });
+
+  test('uses committed success semantics for non-transfer actions after a stale refresh', async () => {
+    const paths = [
+      '/api/rooms/room-1/bank/adjust-balance',
+      '/api/rooms/room-1/requests/bank-payment',
+      '/api/rooms/room-1/landings/start',
+      '/api/rooms/room-1/events/cold-palace',
+    ];
+
+    for (const path of paths) {
+      const body = { playerId: 'player-1', amount: 100 };
+      const result = await runGameAction({
+        owner: { roomId: 'room-1', view: 'PLAYER', generation: 1 },
+        spec: { path, body },
+        write: async () => ({
+          ok: true as const,
+          value: { path },
+          body,
+          confirm: vi.fn(),
+        }),
+        ownsRoom: () => true,
+        refreshGame: async () => false,
+      });
+
+      expect(result, path).toMatchObject({
+        ok: true,
+        committed: true,
+        snapshotRefreshed: false,
+      });
+    }
   });
 
   test('uses committed server status and uncommitted API details for player feedback', () => {

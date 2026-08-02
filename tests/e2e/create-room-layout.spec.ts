@@ -36,7 +36,7 @@ test('create-room requires a manually entered room name', async ({ page }) => {
   const name = page.getByLabel('房间名称', { exact: true });
   await expect(name).toHaveValue('');
   await expect(name).toHaveAttribute('placeholder', '例：翊坤宫夜局');
-  expect(await name.evaluate((input) => input.checkValidity())).toBe(false);
+  expect(await name.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(false);
 });
 
 test('create-room rejects a room name containing only whitespace', async ({ page }) => {
@@ -44,7 +44,7 @@ test('create-room rejects a room name containing only whitespace', async ({ page
 
   const name = page.getByLabel('房间名称', { exact: true });
   await name.fill('   ');
-  expect(await name.evaluate((input) => input.checkValidity())).toBe(false);
+  expect(await name.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(false);
 });
 
 test('create-room form uses three desktop columns and one mobile column', async ({ page }, testInfo) => {
@@ -58,8 +58,8 @@ test('create-room form uses three desktop columns and one mobile column', async 
   const columns = await page.locator('.create-form').evaluate((form) => getComputedStyle(form).gridTemplateColumns.split(' ').length);
   expect(columns).toBe(testInfo.project.name.startsWith('desktop-') ? 3 : 1);
 
-  const positions = await Promise.all(['房间名称', '房间密码（可选）', '初始资金', '起点奖励'].map(async (label) => {
-    const box = await page.getByLabel(label, { exact: true }).boundingBox();
+  const positions = await Promise.all(['房间名称', '房间密码（可选）', '初始资金', '起点奖励', '赎回手续费'].map(async (label) => {
+    const box = await page.getByLabel(label).boundingBox();
     expect(box, `${label} input box`).not.toBeNull();
     return box!;
   }));
@@ -68,9 +68,10 @@ test('create-room form uses three desktop columns and one mobile column', async 
     expect(positions[1].y).toBeCloseTo(positions[0].y, 0);
     expect(positions[2].y).toBeCloseTo(positions[0].y, 0);
     expect(positions[3].y).toBeGreaterThan(positions[0].y);
+    expect(positions[4].y).toBeCloseTo(positions[3].y, 0);
 
     const [startReward, diceMode, visibility] = await Promise.all([
-      page.getByLabel('起点奖励', { exact: true }).boundingBox(),
+      page.getByLabel('起点奖励').boundingBox(),
       page.locator('.create-form .segment').boundingBox(),
       page.getByRole('combobox', { name: '房间可见性', exact: true }).boundingBox(),
     ]);
@@ -78,12 +79,25 @@ test('create-room form uses three desktop columns and one mobile column', async 
     expect(diceMode).not.toBeNull();
     expect(visibility).not.toBeNull();
     expect(diceMode!.y).toBeCloseTo(startReward!.y, 0);
-    expect(diceMode!.y).toBeCloseTo(visibility!.y, 0);
+    expect(diceMode!.y).toBeCloseTo(positions[4].y, 0);
+    expect(visibility!.y).toBeGreaterThan(diceMode!.y);
     expect(diceMode!.height).toBeCloseTo(startReward!.height, 0);
   } else {
     expect(positions[1].y).toBeGreaterThan(positions[0].y);
     expect(positions[2].y).toBeGreaterThan(positions[1].y);
+    expect(positions[3].y).toBeGreaterThan(positions[2].y);
+    expect(positions[4].y).toBeGreaterThan(positions[3].y);
   }
+
+  const startReward = positions[3];
+  const redemptionFee = positions[4];
+  const fieldsOverlap = !(
+    startReward.x + startReward.width <= redemptionFee.x
+    || redemptionFee.x + redemptionFee.width <= startReward.x
+    || startReward.y + startReward.height <= redemptionFee.y
+    || redemptionFee.y + redemptionFee.height <= startReward.y
+  );
+  expect(fieldsOverlap).toBe(false);
 
   const toggleGroup = page.locator('.create-form-toggles');
   await expect(toggleGroup).toHaveCount(1);

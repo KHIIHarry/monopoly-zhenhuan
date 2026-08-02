@@ -12,12 +12,21 @@ import {
   useState,
 } from "react";
 import {
+  calculatePropertyBankSaleAmount,
   realtimeToastEventSchema,
   type RealtimeToastEvent,
 } from "@zhenhuan/shared";
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
 import { PlayerAssetAccordion } from "./player-asset-overview";
+import { selectCurrentLanding } from "./landing-lifecycle";
+import {
+  approvalAmountDelta,
+  formatApprovalSubmittedAt,
+  mergePendingApprovals,
+  type PendingApprovalItem,
+} from "./bank-pending-approvals";
+import { isolateDialogBackground } from "./dialog-background-isolation";
 import { createToastQueue, type ToastInput, type ToastItem } from "./toast-queue";
 import {
   bankApprovalFailureToast,
@@ -31,6 +40,7 @@ import { io } from "socket.io-client";
 import { createPortal } from "react-dom";
 import {
   AlertTriangle,
+  ArrowLeft,
   ArrowLeftRight,
   Banknote,
   BookOpen,
@@ -48,6 +58,7 @@ import {
   Landmark,
   LoaderCircle,
   LogIn,
+  LogOut,
   MapPin,
   PackageMinus,
   Play,
@@ -123,6 +134,7 @@ type BankRequest = {
   reduction?: number;
   actualAmount?: number;
   isPlotFine?: boolean;
+  createdAt?: string;
 };
 
 type AuditEntry = {
@@ -138,11 +150,12 @@ type Landing = {
   playerId: string;
   propertyName?: string;
   spaceType: string;
-  status: "DECLARED" | "CONFIRMED";
+  status: "DECLARED" | "CONFIRMED" | "CLOSED" | "INVALIDATED";
   plotResolved: boolean;
   propertyActionsCancelled: boolean;
   tollSettled?: boolean;
   turnId?: string;
+  createdAt?: string;
 };
 
 type ReversalCandidate = {
@@ -230,8 +243,13 @@ type StableWriter = <T = unknown, B extends WriteBody = WriteBody>(
   options?: StableWriteOptions,
 ) => Promise<StableWriteResult<T, B>>;
 type RoomActionResult<T, B extends WriteBody> =
-  | { ok: true; value: T; body: B; committed: true }
-  | { ok: false; value: T; body: B; committed: true }
+  | {
+      ok: true;
+      value: T;
+      body: B;
+      committed: true;
+      snapshotRefreshed: boolean;
+    }
   | { ok: false; committed: false; error?: unknown };
 type ActionRunner = <T = unknown, B extends WriteBody = WriteBody>(
   spec: StableWriteSpec<B>,
@@ -322,16 +340,15 @@ export async function runGameAction<T = unknown, B extends WriteBody = WriteBody
 }): Promise<RoomActionResult<T, B>> {
   const result = await write(spec, { owner });
   if (!result.ok) return { ...result, committed: false };
-  if (!ownsRoom(owner)) {
-    result.confirm();
-    return { ok: false, committed: true, value: result.value, body: result.body };
-  }
-  if (!(await refreshGame(owner))) {
-    result.confirm();
-    return { ok: false, committed: true, value: result.value, body: result.body };
-  }
+  const snapshotRefreshed = ownsRoom(owner) && (await refreshGame(owner));
   result.confirm();
-  return { ok: true, committed: true, value: result.value, body: result.body };
+  return {
+    ok: true,
+    committed: true,
+    snapshotRefreshed,
+    value: result.value,
+    body: result.body,
+  };
 }
 
 const pendingWriteIntents = new Map<string, PendingWriteIntent>();
@@ -350,6 +367,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   BANK_ALREADY_TAKEN: "银行席位刚刚已被其他成员选择，请刷新页面后重试。",
   ACCOUNT_CHARACTER_LIMIT_REACHED:
     "每个账号在同一房间最多选择一名人物；如需更换，请申请角色交换。",
+  ROLE_SWAP_LOBBY_ONLY: "游戏已经开始，不能再交换角色。",
   ROOM_FINISHED: "该房间已经结束",
   SETTLEMENT_BLOCKED: "仍有未完成事项，暂时不能结束游戏",
   FINISH_CONFIRMATION_REQUIRED: "请输入“确认结束游戏”",
@@ -761,7 +779,8 @@ type RoleSwapView = {
   requesterMembershipId: string;
   targetMembershipId: string;
   requesterCharacterId: string | null;
-  targetCharacterId: string;
+  targetCharacterId: string | null;
+  kind?: "CHARACTER" | "BANK";
   requesterDisplayName: string;
   targetDisplayName: string;
   status: RoleSwapStatus;
@@ -791,6 +810,19 @@ type SeatSnapshot = {
   bank: { occupiedBy: string | null };
   roleSwapRequests: RoleSwapView[];
 };
+
+export function hasRoomCapability(
+  membership: Pick<
+    RoomMembershipView,
+    "characterId" | "playerId" | "isBank"
+  > | null,
+  requestedView: "player" | "bank" | undefined,
+): boolean {
+  if (!membership || !requestedView) return false;
+  if (requestedView === "bank") return membership.isBank;
+  return membership.characterId !== null && membership.playerId !== null;
+}
+
 type PropertySettlementDetail = {
   roomPropertyId: string;
   nameSnapshot: string;
@@ -899,6 +931,7 @@ type AdminRoomDetail = {
     diceMode: "ELECTRONIC" | "PHYSICAL";
     skillEnabled: boolean;
     startReward: number;
+    redemptionFee: number;
     allowMidgameJoin: boolean;
     visibility: "PUBLIC" | "PRIVATE";
     transferApprovalRequired: boolean;
@@ -1099,9 +1132,11 @@ let lastFocusOutsideDialog: HTMLElement | null = null;
 export default function AppRouterClient({
   page,
   roomId,
+  seatsReturnView,
 }: {
   page: AppPage;
   roomId?: string;
+  seatsReturnView?: "player" | "bank";
 }) {
   const router = useRouter();
   const screen = screenForPage(page);
@@ -1168,6 +1203,13 @@ export default function AppRouterClient({
   const pendingRoomToasts = useRef(new Map<string, PendingRoomToast>());
   const { write, clear: clearPendingIntents } = useStableWrite(run);
 
+  useEffect(
+    () => () => {
+      invalidateRoomTransition();
+    },
+    [],
+  );
+
   const roomPath = (
     target:
       | "seats"
@@ -1187,14 +1229,25 @@ export default function AppRouterClient({
       : new URLSearchParams(window.location.search).get("next") || "/rooms";
 
   useEffect(() => {
+    let active = true;
+
     void call<{ account: AccountView; sessions: DeviceView[] }>("/api/auth/me")
       .then(({ account: restored, sessions }) => {
+        if (!active) return;
         setAccount(restored);
         setDevices(sessions);
         if (page === "home") go("/rooms", true);
       })
-      .catch(() => setAccount(null))
-      .finally(() => setAuthChecked(true));
+      .catch(() => {
+        if (active) setAccount(null);
+      })
+      .finally(() => {
+        if (active) setAuthChecked(true);
+      });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -1373,17 +1426,18 @@ export default function AppRouterClient({
     setError((caught as Error).message);
   }
 
-  async function runRoomTransition(
+  async function runRoomTransition<T>(
     owner: RoomOwner,
-    task: () => Promise<unknown>,
-  ) {
+    task: () => Promise<T>,
+  ): Promise<T | false> {
     activeRoomTransition.current = owner.generation;
     setBusy(true);
     setError("");
     try {
-      await task();
+      return await task();
     } catch (caught) {
       await handleFailure(caught, owner);
+      return false;
     } finally {
       if (activeRoomTransition.current === owner.generation) {
         activeRoomTransition.current = null;
@@ -1529,6 +1583,7 @@ export default function AppRouterClient({
       setError(code ? API_ERROR_MESSAGES[code] : "当前无法加入该房间");
       return;
     }
+    beginRoomTransition(room.id);
     if (!room.mine && !terminalRoom(room.status)) {
       go(roomPath("join", room.id));
       return;
@@ -1638,9 +1693,9 @@ export default function AppRouterClient({
     roomId: string,
     preferredView?: "PLAYER" | "BANK",
     intent: SeatsRouteIntent = "AUTO",
-  ) {
+  ): Promise<boolean> {
     const owner = beginRoomTransition(roomId, preferredView ?? null);
-    await runRoomTransition(owner, () =>
+    return runRoomTransition(owner, () =>
       fetchSeats(owner, preferredView, intent),
     );
   }
@@ -1718,7 +1773,9 @@ export default function AppRouterClient({
     });
   }
 
-  async function requestSwap(characterId: string) {
+  async function requestSwap(
+    target: { targetCharacterId: string } | { targetRole: "BANK" },
+  ) {
     if (!seats) return;
     const roomId = seats.room.id;
     const owner = beginRoomTransition(roomId);
@@ -1726,7 +1783,7 @@ export default function AppRouterClient({
       const result = await write(
         {
           path: `/api/rooms/${roomId}/role-swap-requests`,
-          body: { targetCharacterId: characterId },
+          body: target,
         },
         { owner },
       );
@@ -1937,7 +1994,9 @@ export default function AppRouterClient({
 
   async function manageSeats() {
     if (!workbench) return;
-    go(roomPath("seats", workbench.roomId));
+    go(
+      `${roomPath("seats", workbench.roomId)}?returnTo=${workbench.view === "PLAYER" ? "player" : "bank"}`,
+    );
   }
 
   useEffect(() => {
@@ -2264,7 +2323,12 @@ export default function AppRouterClient({
         </section>
       </main>
     );
-  if (screen === "WORKBENCH_SELECT" && seats?.membership)
+  if (
+    screen === "WORKBENCH_SELECT" &&
+    seats?.membership &&
+    hasRoomCapability(seats.membership, "player") &&
+    hasRoomCapability(seats.membership, "bank")
+  )
     return (
       <WorkbenchSelector
         membership={seats.membership}
@@ -2274,16 +2338,25 @@ export default function AppRouterClient({
         onBack={leaveRoom}
       />
     );
+  const returnToWorkbench =
+    seats &&
+    seatsReturnView &&
+    hasRoomCapability(seats.membership, seatsReturnView)
+      ? () => go(roomPath(seatsReturnView, seats.room.id))
+      : undefined;
   if (screen === "SEATS" && seats)
     return (
       <SeatsView
         seats={seats}
         busy={busy}
         error={error}
+        toast={currentToast}
+        showNotice={showNotice}
         onChoose={chooseSeat}
         onSwap={requestSwap}
         onSwapAction={roleSwapAction}
         onRefresh={() => loadSeats(seats.room.id, undefined, "MANAGE")}
+        onReturnToRoom={returnToWorkbench}
         onBack={leaveRoom}
       />
     );
@@ -2310,6 +2383,8 @@ export default function AppRouterClient({
         data={adminData}
         busy={busy}
         error={error}
+        toast={currentToast}
+        showNotice={showNotice}
         onBack={() => go("/rooms")}
         onReload={loadAdmin}
         runAction={run}
@@ -2361,7 +2436,12 @@ export default function AppRouterClient({
         </section>
       </main>
     );
-  if (screen === "GAME" && workbench && snapshot)
+  if (
+    (screen === "GAME" ||
+      (screen === "FINISH" && settlementPreview === null)) &&
+    workbench &&
+    snapshot
+  )
     return (
       <Workbench
         context={workbench}
@@ -2640,6 +2720,7 @@ function CreateRoom({
     diceMode: "ELECTRONIC",
     skillEnabled: true,
     startReward: "1000",
+    redemptionFee: "200",
     allowMidgameJoin: false,
     visibility: "PUBLIC",
     transferApprovalRequired: false,
@@ -2653,6 +2734,7 @@ function CreateRoom({
     password: value.password || undefined,
     initialBalance: Number(value.initialBalance),
     startReward: Number(value.startReward),
+    redemptionFee: Number(value.redemptionFee),
   };
   const toggle = (
     key: "skillEnabled" | "allowMidgameJoin" | "transferApprovalRequired",
@@ -2691,6 +2773,10 @@ function CreateRoom({
                 {formatMoney(Number(value.initialBalance))} /{" "}
                 {formatMoney(Number(value.startReward))} 两
               </dd>
+            </div>
+            <div>
+              <dt>赎回手续费</dt>
+              <dd>赎回手续费 {formatMoney(Number(value.redemptionFee))} 两</dd>
             </div>
             <div>
               <dt>骰子</dt>
@@ -2793,6 +2879,18 @@ function CreateRoom({
             />
             <small className="field-lock-note">开局后锁定</small>
           </label>
+          <label>
+            赎回手续费
+            <input
+              required
+              type="number"
+              min="0"
+              step="1"
+              value={value.redemptionFee}
+              onChange={(event) => update("redemptionFee", event.target.value)}
+            />
+            <small className="field-lock-note">开局后锁定</small>
+          </label>
         </div>
         <fieldset>
           <legend>骰子模式</legend>
@@ -2845,23 +2943,29 @@ function SeatsView({
   seats,
   busy,
   error,
+  toast,
+  showNotice,
   onChoose,
   onSwap,
   onSwapAction,
   onRefresh,
+  onReturnToRoom,
   onBack,
 }: {
   seats: SeatSnapshot;
   busy: boolean;
   error: string;
+  toast: ToastItem | null;
+  showNotice: (message: string) => void;
   onChoose: (kind: "BANK" | "PLAYER", characterId?: string) => void;
-  onSwap: (characterId: string) => void;
+  onSwap: (target: { targetCharacterId: string } | { targetRole: "BANK" }) => void;
   onSwapAction: (
     request: RoleSwapView,
     action: "accept" | "reject" | "approve-bank" | "cancel",
     reason?: string,
   ) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<boolean>;
+  onReturnToRoom?: () => void;
   onBack: () => void;
 }) {
   const [rejecting, setRejecting] = useState<RoleSwapView | null>(null);
@@ -2877,6 +2981,8 @@ function SeatsView({
   };
   const nameOf = (id: string | null) =>
     id ? (seats.characters.find((item) => item.id === id)?.name ?? id) : "空席";
+  const canRequestRoleSwap = seats.room.status === "LOBBY";
+  const returnAction = onReturnToRoom ?? onBack;
   const groups = seats.roleSwapRequests.reduce<
     Record<"MINE" | "INBOX" | "BANK", RoleSwapView[]>
   >(
@@ -2905,8 +3011,9 @@ function SeatsView({
           {request.requesterDisplayName} → {request.targetDisplayName}
         </strong>
         <span>
-          {nameOf(request.requesterCharacterId)} /{" "}
-          {nameOf(request.targetCharacterId)}
+          {request.kind === "BANK"
+            ? "银行席位"
+            : `${nameOf(request.requesterCharacterId)} / ${nameOf(request.targetCharacterId)}`}
         </span>
         <small>
           {new Date(request.createdAt).toLocaleString("zh-CN")} ·{" "}
@@ -2966,27 +3073,46 @@ function SeatsView({
   return (
     <main className="v2-page seats-page">
       <header className="v2-header">
-        <button onClick={onBack}>房间列表</button>
+        {onReturnToRoom ? (
+          <button
+            className="icon subtle"
+            aria-label="返回当前房间"
+            title="返回当前房间"
+            onClick={onReturnToRoom}
+          >
+            <ArrowLeft />
+          </button>
+        ) : (
+          <button onClick={onBack}>房间列表</button>
+        )}
         <div>
           <small>席位与能力</small>
           <h1>选择席位</h1>
           <p>{seats.room.name}</p>
         </div>
-        <button
-          className="icon"
-          aria-label="刷新页面"
-          title="刷新页面"
-          onClick={() => void onRefresh()}
-        >
-          <RefreshCw />
-        </button>
+        <RefreshButton
+          label="刷新页面"
+          refresh={onRefresh}
+          notice="席位信息已刷新"
+          showNotice={showNotice}
+          disabled={busy}
+        />
       </header>
+      <ToastNotice toast={toast} />
       {error && (
         <div className="error banner" role="alert">
           <p>{error}</p>
           <div>
-            <button onClick={() => void onRefresh()}>刷新页面</button>
-            <button onClick={onBack}>返回房间列表</button>
+            <RefreshButton
+              label="刷新页面"
+              refresh={onRefresh}
+              notice="席位信息已刷新"
+              showNotice={showNotice}
+              disabled={busy}
+            />
+            <button onClick={returnAction}>
+              {onReturnToRoom ? "返回当前房间" : "返回房间列表"}
+            </button>
           </div>
         </div>
       )}
@@ -3021,10 +3147,11 @@ function SeatsView({
               {character.occupiedBy ? (
                 <>
                   <span>当前玩家：{character.occupiedBy}</span>
-                  {!own && (
+                  {canRequestRoleSwap && !own && (
                     <button
+                      className="swap-request"
                       disabled={busy}
-                      onClick={() => void onSwap(character.id)}
+                      onClick={() => void onSwap({ targetCharacterId: character.id })}
                     >
                       申请交换
                     </button>
@@ -3041,7 +3168,9 @@ function SeatsView({
               ) : (
                 <span>
                   {seats.membership?.characterId
-                    ? "已有人物，仅可申请交换"
+                    ? canRequestRoleSwap
+                      ? "已有人物，仅可申请交换"
+                      : "已有人物"
                     : "当前不可选择"}
                 </span>
               )}
@@ -3056,7 +3185,18 @@ function SeatsView({
           <h2>银行</h2>
           <p>管理审批、轮次与结算</p>
           {seats.bank.occupiedBy ? (
-            <span>当前银行：{seats.bank.occupiedBy}</span>
+            <>
+              <span>当前银行：{seats.bank.occupiedBy}</span>
+              {canRequestRoleSwap && !seats.membership?.isBank && (
+                <button
+                  className="swap-request"
+                  disabled={busy}
+                  onClick={() => void onSwap({ targetRole: "BANK" })}
+                >
+                  申请交换
+                </button>
+              )}
+            </>
           ) : (
             <button
               className="primary"
@@ -3214,6 +3354,8 @@ function AdminView({
   data,
   busy,
   error,
+  toast,
+  showNotice,
   onBack,
   onReload,
   runAction,
@@ -3225,6 +3367,8 @@ function AdminView({
   data: AdminData;
   busy: boolean;
   error: string;
+  toast: ToastItem | null;
+  showNotice: (message: string) => void;
   onBack: () => void;
   onReload: () => Promise<RunResult<AdminData>>;
   runAction: TaskRunner;
@@ -3264,6 +3408,7 @@ function AdminView({
   const [confirm, setConfirm] = useState<{
     title: string;
     copy: string;
+    confirmLabel?: string;
     expectedValues?: string[];
     confirmationHint?: string;
     fieldLabel?: string;
@@ -3289,6 +3434,7 @@ function AdminView({
     diceMode: "ELECTRONIC",
     initialBalance: "0",
     startReward: "0",
+    redemptionFee: "0",
     skillEnabled: true,
     allowMidgameJoin: false,
     transferApprovalRequired: false,
@@ -3418,6 +3564,7 @@ function AdminView({
       diceMode: detail.configuration.diceMode,
       initialBalance: String(detail.configuration.initialBalance),
       startReward: String(detail.configuration.startReward),
+      redemptionFee: String(detail.configuration.redemptionFee),
       skillEnabled: detail.configuration.skillEnabled,
       allowMidgameJoin: detail.configuration.allowMidgameJoin,
       transferApprovalRequired: detail.configuration.transferApprovalRequired,
@@ -3436,6 +3583,7 @@ function AdminView({
       "diceMode",
       "initialBalance",
       "startReward",
+      "redemptionFee",
       "skillEnabled",
     ]);
     const draft = {
@@ -3444,6 +3592,7 @@ function AdminView({
       diceMode: roomDraft.diceMode,
       initialBalance: Number(roomDraft.initialBalance),
       startReward: Number(roomDraft.startReward),
+      redemptionFee: Number(roomDraft.redemptionFee),
       skillEnabled: roomDraft.skillEnabled,
       allowMidgameJoin: roomDraft.allowMidgameJoin,
       transferApprovalRequired: roomDraft.transferApprovalRequired,
@@ -3510,6 +3659,7 @@ function AdminView({
           diceMode: roomDraft.diceMode,
           initialBalance: Number(roomDraft.initialBalance),
           startReward: Number(roomDraft.startReward),
+          redemptionFee: Number(roomDraft.redemptionFee),
           skillEnabled: roomDraft.skillEnabled,
           allowMidgameJoin: roomDraft.allowMidgameJoin,
           transferApprovalRequired: roomDraft.transferApprovalRequired,
@@ -3526,6 +3676,7 @@ function AdminView({
                 "diceMode",
                 "initialBalance",
                 "startReward",
+                "redemptionFee",
                 "skillEnabled",
               ].includes(key)),
         );
@@ -3603,15 +3754,15 @@ function AdminView({
           <small>账号、设备、房间与审计</small>
           <h1>超级管理员</h1>
         </div>
-        <button
-          className="icon"
-          aria-label="刷新后台"
-          title="刷新后台"
-          onClick={() => void onReload()}
-        >
-          <RefreshCw />
-        </button>
+        <RefreshButton
+          label="刷新后台"
+          refresh={async () => (await onReload()).ok}
+          notice="后台数据已刷新"
+          showNotice={showNotice}
+          disabled={busy}
+        />
       </header>
+      <ToastNotice toast={toast} />
       <div className="admin-tabs" role="tablist" aria-label="后台视图">
         {tabs.map((item) => (
           <button
@@ -4198,6 +4349,22 @@ function AdminView({
                           }
                         />
                       </label>
+                      <label>
+                        赎回手续费
+                        <input
+                          disabled={selectedRoom.status !== "LOBBY"}
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={roomDraft.redemptionFee}
+                          onChange={(event) =>
+                            setRoomDraft({
+                              ...roomDraft,
+                              redemptionFee: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
                     </div>
                     {(
                       [
@@ -4427,11 +4594,12 @@ function AdminView({
                       onClick={() => {
                         setConfirmName("");
                         setConfirm({
-                          title: "删除房间",
-                          fieldLabel: "确认删除房间",
+                          title: "归档房间",
+                          fieldLabel: "确认归档房间",
+                          confirmLabel: "确认归档",
                           expectedValues: [selectedRoom.name],
-                          confirmationHint: `请输入房间名称：${selectedRoom.name}`,
-                          copy: `${selectedRoom.name} 的全部房间数据将被永久清除，且无法恢复。`,
+                          confirmationHint: `请输入要归档的房间名称：${selectedRoom.name}`,
+                          copy: `${selectedRoom.name} 房间将停止操作并保留不可删除的账本与审计记录。`,
                           run: async () => {
                             const deleted = await mutateAndReload(
                               `/api/admin/rooms/${selectedRoom.id}`,
@@ -4447,7 +4615,7 @@ function AdminView({
                         });
                       }}
                     >
-                      删除房间
+                      归档房间
                     </button>
                     <h3>房间审计日志</h3>
                     {roomLogs.map((log) => (
@@ -4491,7 +4659,10 @@ function AdminView({
       {confirm && (
         <ConfirmDialog
           title={confirm.title}
-          confirmLabel={confirm.expectedValues ? "确认删除" : "确认执行"}
+          confirmLabel={
+            confirm.confirmLabel ??
+            (confirm.expectedValues ? "确认删除" : "确认执行")
+          }
           busy={busy}
           disabled={Boolean(
             confirm.expectedValues &&
@@ -4764,6 +4935,68 @@ function Settlement({
   );
 }
 
+function ToastNotice({ toast }: { toast: ToastItem | null }) {
+  if (!toast) return null;
+  return (
+    <div
+      key={toast.id}
+      className={`toast toast-${toast.tone.toLowerCase()}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {toast.tone === "REJECTED" ? <CircleX aria-hidden="true" /> : <Check aria-hidden="true" />}
+      <span>{toast.message}</span>
+    </div>
+  );
+}
+
+const REFRESH_FEEDBACK_MS = 800;
+
+function RefreshButton({
+  label,
+  refresh,
+  notice,
+  showNotice,
+  disabled = false,
+}: {
+  label: string;
+  refresh: () => Promise<boolean>;
+  notice: string;
+  showNotice: (message: string) => void;
+  disabled?: boolean;
+}) {
+  const [refreshing, setRefreshing] = useState(false);
+
+  async function handleRefresh() {
+    if (disabled || refreshing) return;
+    const startedAt = performance.now();
+    let refreshed: boolean;
+    setRefreshing(true);
+    try {
+      refreshed = await refresh();
+    } finally {
+      const remaining = REFRESH_FEEDBACK_MS - (performance.now() - startedAt);
+      if (remaining > 0)
+        await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
+      setRefreshing(false);
+    }
+    if (refreshed) showNotice(notice);
+  }
+
+  return (
+    <button
+      className="icon"
+      aria-label={label}
+      title={label}
+      disabled={disabled || refreshing}
+      onClick={() => void handleRefresh()}
+    >
+      {refreshing ? <RefreshCw className="refresh-two-turns" /> : <RefreshCw />}
+    </button>
+  );
+}
+
 function Workbench({
   context,
   snapshot,
@@ -4807,36 +5040,40 @@ function Workbench({
   return (
     <main className="app-shell" aria-busy={busy}>
       <div className="workbench-scroll">
-        <header
-          className={
-            context.view === "BANK" ? "bank-workbench-header" : undefined
-          }
-        >
-          {context.view === "PLAYER" ? (
-            <div className="workbench-header-title">
-              <h1 aria-label="玩家端">{playerName}</h1>
+        <header className="bank-workbench-header">
+          <div className="workbench-room-info">
+            <div className="workbench-room-meta">
+              <strong title={snapshot.name}>{snapshot.name}</strong>
+              <small>{" \u2022 "}{snapshot.code}</small>
             </div>
-          ) : (
-            <>
-              <div className="workbench-room-info">
-                <div className="workbench-room-meta">
-                  <strong title={snapshot.name}>{snapshot.name}</strong>
-                  <small>{" \u2022 "}{snapshot.code}</small>
-                </div>
-                <h1>银行端</h1>
-              </div>
-            </>
-          )}
+            <h1 aria-label={context.view === "PLAYER" ? "玩家端" : "银行端"}>
+              {context.view === "PLAYER" ? playerName : "银行端"}
+            </h1>
+          </div>
           <div className="workbench-tools">
-            <button onClick={manageSeats}>管理席位</button>
             <button
-              className="icon"
-              aria-label="刷新房间快照"
-              title="刷新房间快照"
-              disabled={busy}
-              onClick={() => void refresh()}
+              className="workbench-tool-seat"
+              aria-label="管理席位"
+              title="管理席位"
+              onClick={manageSeats}
             >
-              {busy ? <LoaderCircle className="spin" /> : <RefreshCw />}
+              <Users />
+              <span>管理席位</span>
+            </button>
+            <RefreshButton
+              label="刷新房间快照"
+              refresh={refresh}
+              notice="房间快照已刷新"
+              showNotice={showNotice}
+              disabled={busy}
+            />
+            <button
+              className="icon workbench-leave-mobile"
+              aria-label="退出房间"
+              title="退出房间"
+              onClick={() => setLeaveOpen(true)}
+            >
+              <LogOut />
             </button>
           </div>
         </header>
@@ -4867,18 +5104,7 @@ function Workbench({
             {error}
           </p>
         )}
-        {toast && (
-          <div
-            key={toast.id}
-            className={`toast toast-${toast.tone.toLowerCase()}`}
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {toast.tone === "REJECTED" ? <CircleX aria-hidden="true" /> : <Check aria-hidden="true" />}
-            <span>{toast.message}</span>
-          </div>
-        )}
+        <ToastNotice toast={toast} />
 
         {context.view === "PLAYER" ? (
           <PlayerView
@@ -4979,7 +5205,12 @@ function Workbench({
             />
           </>
         )}
-        <Nav icon={<LogIn />} label="退出" onClick={() => setLeaveOpen(true)} />
+        <Nav
+          className="workbench-leave-nav"
+          icon={<LogIn />}
+          label="退出"
+          onClick={() => setLeaveOpen(true)}
+        />
       </nav>
       {leaveOpen && (
         <ConfirmDialog
@@ -5050,13 +5281,9 @@ function PlayerView({
   >(null);
   const [tradeConfirmTarget, setTradeConfirmTarget] =
     useState<BankRequest | null>(null);
+  const [saleConfirmProperty, setSaleConfirmProperty] =
+    useState<Property | null>(null);
   const [landing, setLanding] = useState(snapshot.properties[0]?.name ?? "");
-  const [trustedLandings, setTrustedLandings] = useState<{
-    turnKey: string;
-    propertyId?: string;
-    propertyName?: string;
-    startId?: string;
-  }>({ turnKey: "" });
   const [propertyMode, setPropertyMode] = useState<"BUY" | "BUILD">("BUY");
   const [assetMode, setAssetMode] = useState<
     | "SELL_BUILDING"
@@ -5092,9 +5319,9 @@ function PlayerView({
   const assetProperties = snapshot.properties.filter((property) => {
     if (property.ownerId !== playerId) return false;
     if (assetMode === "SELL_BUILDING") return property.level > 0;
+    if (assetMode === "SELL_PROPERTY_TO_BANK") return property.level === 0;
     if (
       assetMode === "MORTGAGE_PROPERTY" ||
-      assetMode === "SELL_PROPERTY_TO_BANK" ||
       assetMode === "TRADE_PROPERTY"
     )
       return property.level === 0 && !property.mortgaged;
@@ -5136,7 +5363,12 @@ function PlayerView({
         if (assetMode === "SELL_PROPERTY_TO_BANK")
           return {
             label: "卖回收入",
-            amount: selectedAssetProperty.purchasePrice,
+            amount: calculatePropertyBankSaleAmount({
+              purchasePrice: selectedAssetProperty.purchasePrice,
+              mortgagePrice: selectedAssetProperty.mortgage ?? 0,
+              mortgaged: selectedAssetProperty.mortgaged,
+              redemptionFee: snapshot.redemptionFee,
+            }),
           };
         if (assetMode === "TRADE_PROPERTY")
           return { label: "交易金额", amount: Number(operationAmount) || 0 };
@@ -5150,19 +5382,11 @@ function PlayerView({
       Number.isInteger(Number(operationAmount)) &&
       Number(operationAmount) >= 0,
     );
-  const turnKey =
-    snapshot.turn?.id ??
-    (snapshot.diceMode === "PHYSICAL" ? "PHYSICAL" : "NO_ACTIVE_TURN");
-  const currentLanding = snapshot.landings?.find(
-    (item) =>
-      item.playerId === playerId &&
-      item.spaceType === "PROPERTY" &&
-      !item.propertyActionsCancelled &&
-      (item.turnId
-        ? item.turnId === snapshot.turn?.id
-        : item.id === trustedLandings.propertyId &&
-          trustedLandings.turnKey === turnKey),
-  );
+  const currentLanding = selectCurrentLanding(snapshot.landings, {
+    playerId,
+    spaceType: "PROPERTY",
+    activeTurnId: snapshot.turn?.id,
+  });
   const landingConfirmed =
     currentLanding?.status === "CONFIRMED" && currentLanding.plotResolved;
   const mustSkipCurrentTurn =
@@ -5211,16 +5435,14 @@ function PlayerView({
                   ? "当前无需支付过路费。"
                   : null;
   const canPayToll = tollDisabledReason === null;
-  const startLanding = snapshot.landings?.find(
-    (item) =>
-      item.playerId === playerId &&
-      item.spaceType === "START" &&
-      (item.turnId
-        ? item.turnId === snapshot.turn?.id
-        : item.id === trustedLandings.startId &&
-          trustedLandings.turnKey === turnKey),
+  const landingNeedsAttention = currentLanding?.status === "CONFIRMED" && (
+    !currentLanding.plotResolved || tollDisabledReason === null
   );
-  const startLandingConfirmed = startLanding?.status === "CONFIRMED";
+  const landingStatusLabel = currentLanding?.status === "DECLARED"
+    ? "落点待银行确认"
+    : landingNeedsAttention
+      ? "本次落点"
+      : "上次确认落点";
   const pendingTradeConfirmations = snapshot.requests.filter(
     (request) =>
       request.type === "TRADE_PROPERTY" &&
@@ -5241,40 +5463,6 @@ function PlayerView({
     playerSkipConsumeCount === "ALL"
       ? (me?.remainingSkipTurns ?? 0)
       : Number(playerSkipConsumeCount);
-
-  useEffect(() => {
-    setTrustedLandings((current) =>
-      current.turnKey === turnKey ? current : { turnKey },
-    );
-  }, [turnKey]);
-
-  function trustLanding(change: {
-    propertyId?: string;
-    propertyName?: string;
-    startId?: string;
-  }) {
-    const next = {
-      ...(trustedLandings.turnKey === turnKey ? trustedLandings : { turnKey }),
-      ...change,
-      turnKey,
-    };
-    setTrustedLandings(next);
-  }
-
-  function clearTrustedStart() {
-    const next = { ...trustedLandings, turnKey, startId: undefined };
-    setTrustedLandings(next);
-  }
-
-  function clearTrustedProperty() {
-    const next = {
-      ...trustedLandings,
-      turnKey,
-      propertyId: undefined,
-      propertyName: undefined,
-    };
-    setTrustedLandings(next);
-  }
 
   useEffect(() => {
     if (!assetProperties.some((property) => property.name === assetProperty))
@@ -5334,7 +5522,6 @@ function PlayerView({
       body: { playerId, propertyName: landing },
     });
     if (result.ok) {
-      trustLanding({ propertyId: result.value.id, propertyName: landing });
       setPanel(null);
       showNotice(`已声明落点：${landing}，等待银行确认`);
     }
@@ -5350,21 +5537,6 @@ function PlayerView({
       createBody: () => ({ playerId, landingId: requestKey() }),
     });
     if (result.ok) {
-      trustLanding({ startId: result.body.landingId });
-      setPanel(null);
-      showNotice("已声明精确停留起点，等待银行确认");
-    }
-  }
-
-  async function requestStartReward() {
-    if (!startLanding?.id) return;
-    const ok = await idempotentAction(`/api/rooms/${snapshot.id}/requests`, {
-      playerId,
-      type: "START_REWARD",
-      landingId: startLanding.id,
-    });
-    if (ok) {
-      clearTrustedStart();
       setPanel(null);
       showNotice(
         `起点 ${formatMoney(snapshot.startReward)} 两申请已提交银行审批`,
@@ -5392,7 +5564,6 @@ function PlayerView({
       { playerId },
     );
     if (ok) {
-      clearTrustedProperty();
       setPanel(null);
       showNotice("操作已提交");
     }
@@ -5409,16 +5580,13 @@ function PlayerView({
     }
   }
 
-  async function submitAssetAction() {
-    const selected = assetProperties.find(
-      (property) => property.name === assetProperty,
-    );
+  async function submitConfirmedAssetAction(selected = selectedAssetProperty) {
     if (!selected || (assetMode === "SELL_BUILDING" && !validSellBuildingCount))
       return;
     const ok = await idempotentAction(`/api/rooms/${snapshot.id}/requests`, {
       playerId,
       type: assetMode,
-      propertyName: assetProperty,
+      propertyName: selected.name,
       targetPlayerId:
         assetMode === "TRADE_PROPERTY" ? targetPlayerId : undefined,
       amount:
@@ -5426,9 +5594,22 @@ function PlayerView({
       count: assetMode === "SELL_BUILDING" ? sellBuildingCount : undefined,
     });
     if (ok) {
+      setSaleConfirmProperty(null);
       setPanel(null);
       showNotice("资产操作已提交银行审批");
     }
+  }
+
+  function submitAssetAction() {
+    if (!selectedAssetProperty) return;
+    if (
+      assetMode === "SELL_PROPERTY_TO_BANK" &&
+      selectedAssetProperty.mortgaged
+    ) {
+      setSaleConfirmProperty(selectedAssetProperty);
+      return;
+    }
+    void submitConfirmedAssetAction(selectedAssetProperty);
   }
 
   async function payLandingToll() {
@@ -5629,10 +5810,13 @@ function PlayerView({
                       </small>
                     </div>
                     <button
+                      className="approval-action approval-action-confirm"
+                      aria-label="确认交易"
+                      title="确认交易"
                       disabled={busy}
                       onClick={() => setTradeConfirmTarget(request)}
                     >
-                      确认交易
+                      <Check />
                     </button>
                   </article>
                 ))}
@@ -5668,14 +5852,12 @@ function PlayerView({
               </button>
             )}
           </section>
-          {(currentLanding?.propertyName ??
-            (trustedLandings.turnKey === turnKey
-              ? trustedLandings.propertyName
-              : undefined)) && (
-            <p className="landing-status">
+          {currentLanding?.propertyName && (
+            <p
+              className={`landing-status${landingConfirmed ? " landing-status-confirmed" : ""}`}
+            >
               <MapPin />
-              {landingConfirmed ? "落点已确认" : "落点待银行确认"}：
-              {currentLanding?.propertyName ?? trustedLandings.propertyName}
+              {landingStatusLabel}：{currentLanding.propertyName}
             </p>
           )}
           <div className="quick-grid">
@@ -5832,43 +6014,22 @@ function PlayerView({
 
       {panel === "START" && (
         <ActionSheet title="精确停留起点" onClose={() => setPanel(null)}>
-          {!startLanding ? (
-            <>
-              <p className="sheet-copy">
-                仅棋子精确停留起点可领取 {formatMoney(snapshot.startReward)}{" "}
-                两；经过起点或初始摆放不能申请。
-              </p>
-              <button
-                className="primary"
-                disabled={
-                  busy ||
-                  (snapshot.diceMode === "ELECTRONIC" &&
-                    snapshot.turn?.total === undefined)
-                }
-                onClick={() => void declareStartLanding()}
-              >
-                {busy ? <LoaderCircle className="spin" /> : <MapPin />}
-                声明停留起点
-              </button>
-            </>
-          ) : startLandingConfirmed ? (
-            <>
-              <p className="landing-status no-margin">
-                <Check />
-                银行已确认本轮精确停留起点
-              </p>
-              <button
-                className="primary"
-                disabled={busy}
-                onClick={() => void requestStartReward()}
-              >
-                {busy ? <LoaderCircle className="spin" /> : <Banknote />}申请{" "}
-                {formatMoney(snapshot.startReward)} 两
-              </button>
-            </>
-          ) : (
-            <div className="empty no-margin">等待银行确认起点落点</div>
-          )}
+          <p className="sheet-copy">
+            仅棋子精确停留起点可领取 {formatMoney(snapshot.startReward)}{" "}
+            两；经过起点或初始摆放不能申请。
+          </p>
+          <button
+            className="primary"
+            disabled={
+              busy ||
+              (snapshot.diceMode === "ELECTRONIC" &&
+                snapshot.turn?.total === undefined)
+            }
+            onClick={() => void declareStartLanding()}
+          >
+            {busy ? <LoaderCircle className="spin" /> : <MapPin />}
+            声明停留起点
+          </button>
         </ActionSheet>
       )}
 
@@ -5954,6 +6115,20 @@ function PlayerView({
           </p>
           <p>地产：{tradeConfirmTarget.propertyName ?? "未命名地产"}</p>
           <p>成交价：{formatMoney(tradeConfirmTarget.amount)} 两</p>
+        </ConfirmDialog>
+      )}
+
+      {saleConfirmProperty && (
+        <ConfirmDialog
+          title="确认出售抵押地产"
+          confirmLabel="确认继续"
+          busy={busy}
+          onCancel={() => setSaleConfirmProperty(null)}
+          onConfirm={() => void submitConfirmedAssetAction(saleConfirmProperty)}
+        >
+          <p>
+            该地产处于抵押状态，按照游戏规则，直接出售将扣除 {formatMoney(snapshot.redemptionFee)} 两赎回费用，是否继续？
+          </p>
         </ConfirmDialog>
       )}
 
@@ -6087,7 +6262,7 @@ function PlayerView({
                   !validTradeAmount ||
                   (assetMode === "TRADE_PROPERTY" && !targetPlayerId)
                 }
-                onClick={() => void submitAssetAction()}
+                onClick={submitAssetAction}
               >
                 {busy ? <LoaderCircle className="spin" /> : <Landmark />}
                 确认提交
@@ -6392,6 +6567,7 @@ function BankView({
     (landing) =>
       landing.status === "DECLARED" && !landing.propertyActionsCancelled,
   );
+  const pendingApprovals = mergePendingApprovals(pending, pendingLandings);
   const current = snapshot.players.find(
     (player) => player.id === snapshot.currentPlayerId,
   );
@@ -6862,96 +7038,42 @@ function BankView({
             players={snapshot.players}
             properties={snapshot.properties}
           />
-          <SectionTitle title="待审批" action={`${pending.length} 项`} />
-          {pending.length ? (
-            <ApprovalList
-              requests={pending.slice(0, 2)}
-              players={snapshot.players}
-              busy={busy}
-              approve={setApproveTarget}
-              reject={(request) => {
-                setRejectReason("");
-                setRejectTarget(request);
-              }}
-            />
-          ) : (
-            <div className="empty">当前没有待审批请求</div>
-          )}
+          <PendingApprovalSection
+            items={pendingApprovals}
+            players={snapshot.players}
+            properties={snapshot.properties}
+            busy={busy}
+            approve={setApproveTarget}
+            reject={(request) => {
+              setRejectReason("");
+              setRejectTarget(request);
+            }}
+            confirmLanding={confirmLanding}
+            cancelLanding={(landing) => {
+              setCancelLandingReason("");
+              setCancelLandingTarget(landing);
+            }}
+          />
         </>
       )}
 
       {tab === "APPROVAL" && (
-        <>
-          <SectionTitle
-            title="待确认落点"
-            action={`${pendingLandings.length} 项`}
-          />
-          {pendingLandings.length ? (
-            <div className="approval-list">
-              {pendingLandings.map((landing) => (
-                <article key={landing.id}>
-                  <div className="request-icon">
-                    <MapPin />
-                  </div>
-                  <div>
-                    <span>实体落点</span>
-                    <strong>
-                      {
-                        snapshot.players.find(
-                          (player) => player.id === landing.playerId,
-                        )?.name
-                      }
-                    </strong>
-                    <small>{landing.propertyName ?? landing.spaceType}</small>
-                  </div>
-                  {landing.spaceType === "PROPERTY" ? (
-                    <div className="request-actions">
-                      <button
-                        disabled={busy}
-                        onClick={() => void confirmLanding(landing)}
-                      >
-                        确认已结算剧情
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => {
-                          setCancelLandingReason("");
-                          setCancelLandingTarget(landing);
-                        }}
-                      >
-                        取消地产操作
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      disabled={busy}
-                      onClick={() => void confirmLanding(landing)}
-                    >
-                      确认已结算剧情
-                    </button>
-                  )}
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="empty">没有待确认落点</div>
-          )}
-          <SectionTitle title="待审批请求" action={`${pending.length} 项`} />
-          {pending.length ? (
-            <ApprovalList
-              requests={pending}
-              players={snapshot.players}
-              busy={busy}
-              approve={setApproveTarget}
-              reject={(request) => {
-                setRejectReason("");
-                setRejectTarget(request);
-              }}
-            />
-          ) : (
-            <div className="empty page-empty">所有请求均已处理</div>
-          )}
-        </>
+        <PendingApprovalSection
+          items={pendingApprovals}
+          players={snapshot.players}
+          properties={snapshot.properties}
+          busy={busy}
+          approve={setApproveTarget}
+          reject={(request) => {
+            setRejectReason("");
+            setRejectTarget(request);
+          }}
+          confirmLanding={confirmLanding}
+          cancelLanding={(landing) => {
+            setCancelLandingReason("");
+            setCancelLandingTarget(landing);
+          }}
+        />
       )}
 
       {tab === "PROPERTY" && (
@@ -7672,53 +7794,200 @@ function BankView({
   );
 }
 
-function ApprovalList({
-  requests,
+function PendingApprovalSection({
+  items,
   players,
+  properties,
   busy,
   approve,
   reject,
+  confirmLanding,
+  cancelLanding,
 }: {
-  requests: BankRequest[];
+  items: PendingApprovalItem<BankRequest, Landing>[];
   players: Player[];
+  properties: Property[];
   busy: boolean;
   approve: (request: BankRequest) => void;
   reject: (request: BankRequest) => void;
+  confirmLanding: (landing: Landing) => void | Promise<void>;
+  cancelLanding: (landing: Landing) => void;
 }) {
   return (
-    <div className="approval-list">
-      {requests.map((request) => {
-        const player = players.find((item) => item.id === request.playerId);
-        const details = approvalDetails(request, players);
-        return (
-          <article key={request.id}>
-            <div className="request-icon">
-              <Banknote />
-            </div>
-            <div>
-              <span>{requestLabel(request.type)}</span>
-              <strong>{player?.name ?? "未知玩家"}</strong>
-              {details.map((detail) => (
-                <small key={detail}>{detail}</small>
-              ))}
-              <small>请求编号 {request.id.slice(0, 8)}</small>
-            </div>
-            <div className="request-actions">
-              {request.type === "TRADE_PROPERTY" && !request.buyerConfirmed ? (
-                <button disabled>等待买家确认</button>
-              ) : (
-                <button disabled={busy} onClick={() => approve(request)}>
-                  {requestActionLabel("批准", request)}
-                </button>
-              )}
-              <button disabled={busy} onClick={() => reject(request)}>
-                {requestActionLabel("拒绝", request)}
-              </button>
-            </div>
-          </article>
-        );
-      })}
-    </div>
+    <>
+      <SectionTitle title="待审批" action={`${items.length} 项`} />
+      {items.length ? (
+        <div className="approval-list landing-approval-list payment-approval-list">
+          {items.map((item) => {
+            if (item.kind === "REQUEST") {
+              const request = item.request;
+              const player = players.find(
+                (candidate) => candidate.id === request.playerId,
+              );
+              const details = approvalDetails(request, players);
+              const approvalAmount = approvalAmountDelta(request);
+              return (
+                <article key={item.id}>
+                  <div className="payment-approval-meta">
+                    <span>{requestLabel(request.type)}</span>
+                    <div className="request-icon">
+                      <Banknote />
+                    </div>
+                    <small>{request.propertyName ?? "资金审批"}</small>
+                  </div>
+                  <div className="payment-approval-details">
+                    <strong className="payment-approval-player">
+                      {player?.name ?? "未知玩家"}
+                      {player?.characterId && (
+                        <span
+                          className={`payment-approval-character character-${player.characterId}`}
+                        >
+                          （{characterName(player.characterId)}）
+                        </span>
+                      )}
+                    </strong>
+                    {details.map((detail) => (
+                      <small key={detail}>{detail}</small>
+                    ))}
+                    <small className="approval-submitted-at">
+                      {formatApprovalSubmittedAt(item.createdAt)}
+                    </small>
+                    <small>请求编号 {request.id.slice(0, 8)}</small>
+                  </div>
+                  <div className="request-actions">
+                    {request.type === "TRADE_PROPERTY" &&
+                    !request.buyerConfirmed ? (
+                      <button
+                        className="approval-action approval-action-waiting"
+                        aria-label="等待买家确认"
+                        title="等待买家确认"
+                        disabled
+                      >
+                        <LoaderCircle />
+                      </button>
+                    ) : (
+                      <button
+                        className="approval-action approval-action-confirm"
+                        aria-label={requestActionLabel("批准", request)}
+                        title={requestActionLabel("批准", request)}
+                        disabled={busy}
+                        onClick={() => approve(request)}
+                      >
+                        <Check />
+                        {approvalAmount !== 0 && (
+                          <small
+                            className={`approval-action-amount ${approvalAmount < 0 ? "debit" : "credit"}`}
+                          >
+                            {approvalAmount > 0 ? "+" : ""}
+                            {formatMoney(approvalAmount)}
+                          </small>
+                        )}
+                      </button>
+                    )}
+                    <button
+                      className="approval-action approval-action-reject"
+                      aria-label={requestActionLabel("拒绝", request)}
+                      title={requestActionLabel("拒绝", request)}
+                      disabled={busy}
+                      onClick={() => reject(request)}
+                    >
+                      <X />
+                    </button>
+                  </div>
+                </article>
+              );
+            }
+
+            const landing = item.landing;
+            const landingPlayer = players.find(
+              (player) => player.id === landing.playerId,
+            );
+            const landedProperty = properties.find(
+              (property) => property.name === landing.propertyName,
+            );
+            const landedPropertyOwner = players.find(
+              (player) => player.id === landedProperty?.ownerId,
+            );
+            return (
+              <article key={item.id}>
+                <div className="landing-location-meta">
+                  <span>实体落点</span>
+                  <div className="request-icon">
+                    <MapPin />
+                  </div>
+                  <span className="landing-player-nickname">
+                    {landingPlayer?.name ?? "未知玩家"}
+                  </span>
+                </div>
+                <div className="landing-approval-details">
+                  <div
+                    className={`landing-approval-title-line property-theme-${landedPropertyOwner?.characterId ?? "unowned"}`}
+                  >
+                    <strong
+                      className={`landing-approval-character character-${landingPlayer?.characterId ?? "unknown"}`}
+                    >
+                      {landingPlayer?.characterId
+                        ? characterName(landingPlayer.characterId)
+                        : "未选人物"}
+                    </strong>
+                    <span className="landing-approval-arrow" aria-hidden="true">
+                      →
+                    </span>
+                    <span className="landing-approval-property-name">
+                      {landing.propertyName ?? landing.spaceType}
+                    </span>
+                    <span className="landing-approval-property-owner">
+                      [
+                      {landedPropertyOwner?.characterId
+                        ? characterName(landedPropertyOwner.characterId)
+                        : "无主"}
+                      ]
+                    </span>
+                  </div>
+                  <small className="approval-submitted-at">
+                    {formatApprovalSubmittedAt(item.createdAt)}
+                  </small>
+                </div>
+                {landing.spaceType === "PROPERTY" ? (
+                  <div className="request-actions">
+                    <button
+                      className="approval-action approval-action-confirm"
+                      aria-label="确认已结算剧情"
+                      title="确认已结算剧情"
+                      disabled={busy}
+                      onClick={() => void confirmLanding(landing)}
+                    >
+                      <Check />
+                    </button>
+                    <button
+                      className="approval-action approval-action-reject"
+                      aria-label="取消地产操作"
+                      title="取消地产操作"
+                      disabled={busy}
+                      onClick={() => cancelLanding(landing)}
+                    >
+                      <X />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="approval-action approval-action-confirm"
+                    aria-label="确认已结算剧情"
+                    title="确认已结算剧情"
+                    disabled={busy}
+                    onClick={() => void confirmLanding(landing)}
+                  >
+                    <Check />
+                  </button>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty">当前没有待审批事项</div>
+      )}
+    </>
   );
 }
 
@@ -7902,11 +8171,18 @@ function PropertyCost({
   );
 }
 
-function useDialogFocus(onClose: () => void) {
+function useBodyPortalHost() {
+  const [portalHost, setPortalHost] = useState<HTMLElement | null>(null);
+  useEffect(() => setPortalHost(document.body), []);
+  return portalHost;
+}
+
+function useDialogFocus(onClose: () => void, enabled: boolean) {
   const ref = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   useEffect(() => {
+    if (!enabled) return;
     const dialog = ref.current;
     if (!dialog) return;
     const active =
@@ -7921,10 +8197,7 @@ function useDialogFocus(onClose: () => void) {
           (item) => item !== backdrop,
         ) as HTMLElement[])
       : [];
-    siblings.forEach((item) => {
-      item.inert = true;
-      item.setAttribute("aria-hidden", "true");
-    });
+    const restoreBackground = isolateDialogBackground(siblings);
     const focusable = () => [
       ...dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
@@ -7965,13 +8238,10 @@ function useDialogFocus(onClose: () => void) {
     return () => {
       window.cancelAnimationFrame(focusFrame);
       dialog.removeEventListener("keydown", onKeyDown);
-      siblings.forEach((item) => {
-        item.inert = false;
-        item.removeAttribute("aria-hidden");
-      });
+      restoreBackground();
       previous?.focus();
     };
-  }, []);
+  }, [enabled]);
   return ref;
 }
 
@@ -7988,40 +8258,44 @@ function ActionSheet({
 }) {
   const titleId = useId();
   const descriptionId = useId();
-  const dialogRef = useDialogFocus(onClose);
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onClose();
-      }}
-    >
-      <section
-        ref={dialogRef}
-        tabIndex={-1}
-        className={`action-sheet${className ? ` ${className}` : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descriptionId}
-      >
-        <div className="modal-heading">
-          <h2 id={titleId}>{title}</h2>
-          <button
-            className="icon subtle close-icon"
-            aria-label="关闭"
-            title="关闭"
-            onClick={onClose}
+  const portalHost = useBodyPortalHost();
+  const dialogRef = useDialogFocus(onClose, Boolean(portalHost));
+  return portalHost
+    ? createPortal(
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) onClose();
+          }}
+        >
+          <section
+            ref={dialogRef}
+            tabIndex={-1}
+            className={`action-sheet${className ? ` ${className}` : ""}`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
           >
-            <X />
-          </button>
-        </div>
-        <div className="action-sheet-content" id={descriptionId}>
-          {children}
-        </div>
-      </section>
-    </div>
-  );
+            <div className="modal-heading">
+              <h2 id={titleId}>{title}</h2>
+              <button
+                className="icon subtle close-icon"
+                aria-label="关闭"
+                title="关闭"
+                onClick={onClose}
+              >
+                <X />
+              </button>
+            </div>
+            <div className="action-sheet-content" id={descriptionId}>
+              {children}
+            </div>
+          </section>
+        </div>,
+        portalHost,
+      )
+    : null;
 }
 
 function ConfirmDialog({
@@ -8043,47 +8317,51 @@ function ConfirmDialog({
 }) {
   const titleId = useId();
   const descriptionId = useId();
-  const dialogRef = useDialogFocus(onCancel);
-  return (
-    <div className="modal-backdrop centered">
-      <section
-        ref={dialogRef}
-        tabIndex={-1}
-        className="confirm-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descriptionId}
-      >
-        <div className="warning-mark">
-          <AlertTriangle />
-        </div>
-        <h2 id={titleId}>{title}</h2>
-        <div className="confirm-copy" id={descriptionId}>
-          {children}
-        </div>
-        <div className="dialog-actions">
-          <button disabled={busy} onClick={onCancel}>
-            取消
-          </button>
-          <button
-            className="danger-button"
-            disabled={busy || disabled}
-            onClick={onConfirm}
+  const portalHost = useBodyPortalHost();
+  const dialogRef = useDialogFocus(onCancel, Boolean(portalHost));
+  return portalHost
+    ? createPortal(
+        <div className="modal-backdrop centered">
+          <section
+            ref={dialogRef}
+            tabIndex={-1}
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
           >
-            {busy ? (
-              <LoaderCircle className="spin" />
-            ) : confirmLabel === "确认退出" ? (
-              <span aria-hidden="true">👋</span>
-            ) : (
-              <RotateCcw />
-            )}
-            {confirmLabel}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
+            <div className="warning-mark">
+              <AlertTriangle />
+            </div>
+            <h2 id={titleId}>{title}</h2>
+            <div className="confirm-copy" id={descriptionId}>
+              {children}
+            </div>
+            <div className="dialog-actions">
+              <button disabled={busy} onClick={onCancel}>
+                取消
+              </button>
+              <button
+                className="danger-button"
+                disabled={busy || disabled}
+                onClick={onConfirm}
+              >
+                {busy ? (
+                  <LoaderCircle className="spin" />
+                ) : confirmLabel === "确认退出" ? (
+                  <span aria-hidden="true">👋</span>
+                ) : (
+                  <RotateCcw />
+                )}
+                {confirmLabel}
+              </button>
+            </div>
+          </section>
+        </div>,
+        portalHost,
+      )
+    : null;
 }
 
 function SectionTitle({ title, action }: { title: string; action: string }) {
@@ -8125,17 +8403,19 @@ function Nav({
   label,
   active,
   badge,
+  className,
   onClick,
 }: {
   icon: ReactNode;
   label: string;
   active?: boolean;
   badge?: number;
+  className?: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={active ? "active" : ""}
+      className={[active ? "active" : "", className].filter(Boolean).join(" ")}
       aria-current={active ? "page" : undefined}
       onClick={onClick}
     >

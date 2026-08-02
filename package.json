@@ -13,8 +13,8 @@
     "build:production": "node scripts/require-production-web-env.mjs && npm run build",
     "build:packages": "npm run build -w @zhenhuan/shared && npm run build -w @zhenhuan/database",
     "lint": "eslint . --max-warnings=0",
-    "typecheck": "tsc -b --pretty false",
-    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false && tsc -p tests/e2e/tsconfig.json --noEmit --pretty false",
+    "test": "vitest run && node --test tests/style-device-spacing.test.mjs",
     "test:integration": "node scripts/require-test-database.mjs && vitest run apps/api/src/prisma-game-service.integration.test.ts",
     "test:e2e": "PLAYWRIGHT_EXTERNAL_STACK=1 playwright test",
     "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
@@ -37,5 +37,11 @@
   },
   "dependencies": {
     "@prisma/client": "6.19.3"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.25",
+      "sharp": "0.35.3"
+    }
   }
 }

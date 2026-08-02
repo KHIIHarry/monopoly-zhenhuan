@@ -35,6 +35,11 @@ enum RoleSwapStatus {
   CONFLICTED
 }
 
+enum RoleSwapKind {
+  CHARACTER
+  BANK
+}
+
 enum RuleProfile {
   STANDARD
   CUSTOM
@@ -124,6 +129,7 @@ enum LandingSpaceType {
 enum LandingEventStatus {
   DECLARED
   CONFIRMED
+  CLOSED
   INVALIDATED
 }
 
@@ -577,7 +583,8 @@ model RoleSwapRequest {
   requesterMembershipId String
   targetMembershipId    String
   requesterCharacterId  String?
-  targetCharacterId     String
+  targetCharacterId     String?
+  kind                  RoleSwapKind    @default(CHARACTER)
   status                RoleSwapStatus  @default(PENDING_TARGET)
   bankApprovedById      String?
   rejectionReason       String?

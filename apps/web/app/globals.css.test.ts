@@ -19,6 +19,14 @@ describe('profile device controls', () => {
   });
 });
 
+describe('lobby account header', () => {
+  test('keeps the account tools vertically centered in the palace-red banner', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.v2-header\.lobby-hero\s*\{[^}]*align-items:\s*center;/s);
+  });
+});
+
 describe('reference landing page', () => {
   test('defines responsive palace-page styles without legacy image assets', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
@@ -52,6 +60,58 @@ describe('character seat titles', () => {
 
     expect(stylesheet).toMatch(/\.seat-card h2\s*\{(?![^}]*padding-right)[^}]*\}/s);
     expect(stylesheet).toMatch(/\.seat-card\.occupied h2\s*\{[^}]*padding-right:\s*58px;/s);
+  });
+});
+
+describe('seat swap action', () => {
+  test('uses the blue seat-selection hover treatment for exchange requests', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.seat-card \.swap-request\s*\{[^}]*border:\s*1px solid #174a7c;[^}]*background:\s*#e7f3ff;[^}]*color:\s*#174a7c;/s);
+    expect(stylesheet).toMatch(/\.seat-card \.swap-request:hover:not\(:disabled\)\s*\{[^}]*background:\s*#d7eaff;/s);
+  });
+
+  test('keeps both decision buttons touchable on narrow screens', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const mediaStart = stylesheet.indexOf('@media (max-width: 560px)');
+    const mediaEnd = stylesheet.indexOf('@media ', mediaStart + 1);
+    const narrowStyles = stylesheet.slice(mediaStart, mediaEnd);
+
+    expect(mediaStart).toBeGreaterThanOrEqual(0);
+    expect(narrowStyles).toMatch(
+      /\.swap-list \.request-actions\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*grid-template-columns:\s*1fr 1fr;/,
+    );
+  });
+});
+
+describe('approval submission time', () => {
+  test('allows the seconds-precision timestamp to wrap inside narrow cards', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(
+      /\.approval-submitted-at\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s,
+    );
+  });
+});
+
+describe('long approval names', () => {
+  test('wraps payment details and landing nicknames inside their grid columns', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(
+      /\.payment-approval-details\s*>\s*:is\(strong, small\)\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s,
+    );
+    expect(stylesheet).toMatch(
+      /\.landing-location-meta \.landing-player-nickname\s*\{[^}]*width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;[^}]*text-align:\s*center;/s,
+    );
+  });
+});
+
+describe('landing confirmation status', () => {
+  test('uses a green presentation only after the landing has been confirmed', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.landing-status-confirmed\s*\{[^}]*color:\s*#174d34;[^}]*background:\s*#e4f2e8;/s);
   });
 });
 
@@ -97,6 +157,19 @@ describe('H5 scroll ownership', () => {
     );
     expect(stylesheet).toMatch(
       /\.app-shell\s*\{[^}]*height:\s*100%;[^}]*overflow:\s*hidden;/s,
+    );
+  });
+});
+
+describe('manual refresh feedback', () => {
+  test('animates the refresh icon through exactly two rotations', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(
+      /\.refresh-two-turns\s*\{[^}]*animation:\s*refresh-two-turns\s+800ms\s+linear\s+both;/s,
+    );
+    expect(stylesheet).toMatch(
+      /@keyframes\s+refresh-two-turns\s*\{\s*to\s*\{[^}]*transform:\s*rotate\(720deg\);/s,
     );
   });
 });

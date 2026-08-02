@@ -2,6 +2,13 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 describe('PrismaGameService V2 production boundary', () => {
+  it('exposes request and landing submission times in room snapshots', async () => {
+    const source = await readFile(new URL('./prisma-game-service.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('createdAt: request.createdAt');
+    expect(source).toContain('createdAt: landing.declaredAt');
+  });
+
   it('contains no legacy room admission, reconnect, bearer-token, or removed membership fields', async () => {
     const source = await readFile(new URL('./prisma-game-service.ts', import.meta.url), 'utf8');
 

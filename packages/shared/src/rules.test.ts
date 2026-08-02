@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import masterData from '../../../甄嬛传大富翁_master-data.json';
+import masterData from '../../../monopoly-zhenhuan_master-data.json';
 import { applySkill, calculatePropertyBankSaleAmount, calculateToll, loadMasterData, realtimeToastEventSchema, roll2d6, transferFailureReason } from './index.js';
 
 describe('master data', () => {
