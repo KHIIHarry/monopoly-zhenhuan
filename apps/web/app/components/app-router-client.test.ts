@@ -227,3 +227,22 @@ describe('room completion regressions', () => {
     expect(companionApproval).not.toContain('自动奖励 500 两');
   });
 });
+
+describe('shared player asset overview', () => {
+  test('adds the player overview tab and shares one accordion across both views', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain(
+      'import { PlayerAssetAccordion } from "./player-asset-overview";',
+    );
+    expect(component).toMatch(
+      /useState<\s*"HOME" \| "OVERVIEW" \| "PROPERTY" \| "LEDGER"\s*>/,
+    );
+    expect(component).toContain('active={playerTab === "OVERVIEW"}');
+    expect(component).toContain('label="概览"');
+    expect(component).toContain('onClick={() => setPlayerTab("OVERVIEW")}');
+    expect(component).toContain('tab === "OVERVIEW"');
+    expect(component.match(/<PlayerAssetAccordion/g)).toHaveLength(2);
+    expect(component).not.toContain('function PlayerList(');
+  });
+});
