@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { RuleError } from './api-error.js';
 import { accountSummary, hashPassword, maskIp, passwordSchema, sessionDurationMs, sessionSummary, verifyPassword } from './auth-domain.js';
 import type { PostCommitToastNotifier } from './realtime-toast-notifications.js';
+import { roomJoinability } from './room-admission.js';
 import { buildPropertySettlementDetail, isPristineSettlementTurn, rankSettlementPlayers, type RankedSettlementPlayer, type SettlementCandidate } from './settlement.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -540,10 +541,8 @@ export class AccountRoomService {
     };
   }
 
-  private admissionError(room: { status: string; allowMidgameJoin: boolean }) {
-    if (room.status === 'ENDED' || room.status === 'FINISHED' || room.status === 'CLOSED') return 'ROOM_FINISHED';
-    if (room.status === 'PLAYING' && !room.allowMidgameJoin) return 'MIDGAME_JOIN_DISABLED';
-    return null;
+  private admissionError(room: { status: string; allowMidgameJoin: boolean; playerLimit: number }) {
+    return roomJoinability(room, 0).joinBlockedReason;
   }
 
   private requireSeatAcquisitionAllowed(
@@ -867,22 +866,63 @@ export class AccountRoomService {
   }
 
   async listRooms(auth: AuthenticatedSession) {
-    const rooms = await this.db.room.findMany({ where: { OR: [{ visibility: 'PUBLIC' }, { members: { some: { accountId: auth.account.id } } }] }, include: { createdByAccount: { select: { displayName: true } }, members: { where: { status: 'ACTIVE' }, select: { accountId: true, characterId: true, isBank: true, character: { select: { name: true } } } }, settlement: { select: { endedAt: true } } }, orderBy: { updatedAt: 'desc' } });
+    const [rooms, enabledCharacters] = await Promise.all([
+      this.db.room.findMany({
+        where: {
+          OR: [
+            { visibility: 'PUBLIC' },
+            { members: { some: { accountId: auth.account.id } } },
+          ],
+        },
+        include: {
+          createdByAccount: { select: { displayName: true } },
+          members: {
+            where: { status: 'ACTIVE' },
+            select: {
+              accountId: true,
+              characterId: true,
+              isBank: true,
+              character: { select: { name: true } },
+              player: { select: { status: true, characterId: true } },
+            },
+          },
+          settlement: { select: { endedAt: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      this.db.character.findMany({
+        where: { enabled: true },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    ]);
     return rooms.map((room) => {
       const mine = room.members.find((member) => member.accountId === auth.account.id);
+      const playableMembers = room.members.filter((member) =>
+        member.characterId !== null
+        && member.player?.status === 'ACTIVE'
+        && member.player.characterId === member.characterId,
+      );
+      const occupied = new Set(playableMembers.map((member) => member.characterId));
+      const admission = roomJoinability(room, playableMembers.length);
       return {
         id: room.id,
         name: room.name,
         status: room.status,
         creator: room.createdByAccount.displayName,
         memberCount: new Set(room.members.map((member) => member.accountId)).size,
-        playerCount: room.members.filter((member) => member.characterId !== null).length,
+        playerCount: playableMembers.length,
         playerLimit: room.playerLimit,
         hasPassword: room.passwordHash !== null,
         mine: Boolean(mine),
         characterId: mine?.characterId ?? null,
         myCharacter: mine?.character?.name ?? null,
         isBank: mine?.isBank ?? false,
+        canJoin: !mine && admission.canJoin,
+        joinBlockedReason: mine ? null : admission.joinBlockedReason,
+        availableCharacters: enabledCharacters.filter((character) =>
+          !occupied.has(character.id),
+        ),
         createdAt: room.createdAt,
         startedAt: room.startedAt,
         endedAt: room.settlement?.endedAt ?? null,

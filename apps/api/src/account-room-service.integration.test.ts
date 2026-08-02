@@ -974,6 +974,69 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(JSON.stringify({ seats, listedForMember, listedForViewer })).not.toContain('sessionTokenHash');
   });
 
+  it('reports authoritative room joinability and available characters', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const seated = await Promise.all(Array.from({ length: 5 }, () => createAuth()));
+    const bank = await createAuth();
+    const member = await createAuth();
+    const viewer = await createAuth();
+    const playerCharacters = await characters(5);
+    const room = await createRoom(creator.auth, 'Authoritative room admission', randomUUID());
+
+    for (const [index, player] of seated.entries()) {
+      await service.joinRoom(player.auth, room.id, undefined, `admission-player-${index}`);
+      await service.selectCharacter(player.auth, room.id, playerCharacters[index]!.id, `admission-character-${index}`);
+    }
+    await service.joinRoom(bank.auth, room.id, undefined, 'admission-bank');
+    await service.selectBank(bank.auth, room.id, 'admission-bank-select');
+    const joinedMember = await service.joinRoom(member.auth, room.id, undefined, 'admission-member');
+
+    const lobbySummary = (await service.listRooms(viewer.auth)).find((item) => item.id === room.id)!;
+    expect(lobbySummary).toMatchObject({
+      memberCount: 7,
+      playerCount: 5,
+      mine: false,
+      canJoin: true,
+      joinBlockedReason: null,
+      availableCharacters: [],
+    });
+    const activeMemberSummary = (await service.listRooms(member.auth)).find((item) => item.id === room.id)!;
+    expect(activeMemberSummary).toMatchObject({ mine: true });
+
+    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING', allowMidgameJoin: false } });
+    const disabledPlayingSummary = (await service.listRooms(viewer.auth)).find((item) => item.id === room.id)!;
+    expect(disabledPlayingSummary).toMatchObject({
+      canJoin: false,
+      joinBlockedReason: 'MIDGAME_JOIN_DISABLED',
+    });
+
+    await db.room.update({ where: { id: room.id }, data: { allowMidgameJoin: true } });
+    const fullPlayingSummary = (await service.listRooms(viewer.auth)).find((item) => item.id === room.id)!;
+    expect(fullPlayingSummary).toMatchObject({
+      canJoin: false,
+      joinBlockedReason: 'PLAYER_LIMIT',
+    });
+
+    const releasedCharacter = playerCharacters[0]!;
+    const releasedMembership = await db.roomMembership.findUniqueOrThrow({
+      where: { roomId_accountId: { roomId: room.id, accountId: seated[0]!.account.id } },
+      include: { player: true },
+    });
+    await db.player.update({ where: { id: releasedMembership.player!.id }, data: { status: 'LEFT' } });
+    const openPlayingSummary = (await service.listRooms(viewer.auth)).find((item) => item.id === room.id)!;
+    expect(openPlayingSummary).toMatchObject({
+      canJoin: true,
+      joinBlockedReason: null,
+      availableCharacters: [{ id: releasedCharacter.id, name: releasedCharacter.name }],
+    });
+
+    await db.roomMembership.update({ where: { id: joinedMember.id }, data: { status: 'LEFT', leftAt: new Date() } });
+    await db.room.update({ where: { id: room.id }, data: { visibility: 'PRIVATE' } });
+    const leftMemberSummary = (await service.listRooms(member.auth)).find((item) => item.id === room.id)!;
+    expect(leftMemberSummary).toMatchObject({ mine: false });
+    expect((await service.listRooms(viewer.auth)).find((item) => item.id === room.id)).toBeUndefined();
+  });
+
   it('persists replay for join, character, bank, and control without duplicate rows, assets, or audits', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const member = await createAuth();
