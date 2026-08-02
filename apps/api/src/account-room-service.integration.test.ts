@@ -618,17 +618,17 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const room = await createRoom(creator.auth, 'Task 3 password room', 'password-room', { password: 'correct-password' });
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      await expect(service.joinRoom(joiner.auth, room.id, 'wrong-password', `wrong-${attempt}`))
+      await expect(service.joinRoom(joiner.auth, room.id, { password: 'wrong-password' }, `wrong-${attempt}`))
         .rejects.toMatchObject({ code: 'ROOM_PASSWORD_INVALID' });
     }
-    await expect(service.joinRoom(joiner.auth, room.id, 'correct-password', 'rate-limited'))
+    await expect(service.joinRoom(joiner.auth, room.id, { password: 'correct-password' }, 'rate-limited'))
       .rejects.toMatchObject({ code: 'RATE_LIMITED' });
     expect(await db.securityLog.count({ where: { accountId: joiner.account.id, action: 'ROOM_PASSWORD_FAILED' } })).toBe(5);
 
     const admitted = await createAuth({ displayName: '甄嬛' });
-    const joined = await service.joinRoom(admitted.auth, room.id, 'correct-password', 'join-once');
-    const replay = await service.joinRoom(admitted.auth, room.id, 'correct-password', 'join-once');
-    const bypass = await service.joinRoom(admitted.auth, room.id, undefined, 'joined-bypass');
+    const joined = await service.joinRoom(admitted.auth, room.id, { password: 'correct-password' }, 'join-once');
+    const replay = await service.joinRoom(admitted.auth, room.id, { password: 'correct-password' }, 'join-once');
+    const bypass = await service.joinRoom(admitted.auth, room.id, {}, 'joined-bypass');
 
     expect(replay).toEqual(joined);
     expect(bypass.id).toBe(joined.id);
@@ -645,6 +645,118 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.securityLog.count({ where: { accountId: admitted.account.id, action: 'ROOM_JOINED' } })).toBe(1);
   });
 
+  it('keeps lobby admission unlimited and joins playing rooms atomically', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const [occupiedCharacter, secondCharacter, thirdCharacter, fourthCharacter, fifthCharacter] = await characters(5);
+    const lobby = await createRoom(creator.auth, 'Unlimited lobby');
+    const lobbyJoiners = await Promise.all(Array.from({ length: 6 }, () => createAuth()));
+    for (const [index, joiner] of lobbyJoiners.entries()) {
+      await service.joinRoom(joiner.auth, lobby.id, {}, `unlimited-lobby-${index}`);
+    }
+    const sixth = await service.joinRoom(lobbyJoiners[5]!.auth, lobby.id, {}, 'unlimited-lobby-sixth');
+    expect(sixth).toMatchObject({ status: 'ACTIVE', characterId: null, isBank: false });
+
+    const disabledJoiner = await createAuth();
+    const disabledRoom = await createRoom(creator.auth, 'Disabled playing join');
+    await db.room.update({ where: { id: disabledRoom.id }, data: { status: 'PLAYING' } });
+    await expect(service.joinRoom(
+      disabledJoiner.auth,
+      disabledRoom.id,
+      { characterId: occupiedCharacter!.id },
+      'disabled-playing-join',
+    )).rejects.toMatchObject({ code: 'MIDGAME_JOIN_DISABLED' });
+
+    const fullJoiner = await createAuth();
+    const fullRoom = await createRoom(creator.auth, 'Full playing join', randomUUID(), { allowMidgameJoin: true });
+    for (const [index, character] of [occupiedCharacter, secondCharacter, thirdCharacter, fourthCharacter, fifthCharacter].entries()) {
+      const occupant = await createAuth();
+      await service.joinRoom(occupant.auth, fullRoom.id, {}, `full-occupant-${index}-join`);
+      await service.selectCharacter(occupant.auth, fullRoom.id, character!.id, `full-occupant-${index}-character`);
+    }
+    await db.room.update({ where: { id: fullRoom.id }, data: { status: 'PLAYING' } });
+    await expect(service.joinRoom(
+      fullJoiner.auth,
+      fullRoom.id,
+      { characterId: occupiedCharacter!.id },
+      'full-playing-join',
+    )).rejects.toMatchObject({ code: 'PLAYER_LIMIT' });
+
+    const missingCharacter = await createAuth();
+    const openRoom = await createRoom(creator.auth, 'Open playing join', randomUUID(), { allowMidgameJoin: true });
+    await db.room.update({ where: { id: openRoom.id }, data: { status: 'PLAYING' } });
+    await expect(service.joinRoom(
+      missingCharacter.auth,
+      openRoom.id,
+      {},
+      'missing-character-playing-join',
+    )).rejects.toMatchObject({ code: 'CHARACTER_REQUIRED' });
+
+    const midgameJoiner = await createAuth();
+    const joined = await service.joinRoom(
+      midgameJoiner.auth,
+      openRoom.id,
+      { characterId: occupiedCharacter!.id },
+      'open-playing-join',
+    );
+    expect(joined).toMatchObject({ status: 'ACTIVE', characterId: occupiedCharacter!.id, player: { characterId: occupiedCharacter!.id, balance: 0 } });
+    const membership = await db.roomMembership.findUniqueOrThrow({
+      where: { roomId_accountId: { roomId: openRoom.id, accountId: midgameJoiner.account.id } },
+      include: { player: true },
+    });
+    expect(membership.player).toMatchObject({ status: 'ACTIVE', characterId: occupiedCharacter!.id, balance: 0 });
+    expect(await db.ledgerEntry.count({ where: { roomId: openRoom.id, playerId: membership.player!.id, type: 'INITIAL_BALANCE' } })).toBe(0);
+    expect(await db.roomProperty.count({ where: { roomId: openRoom.id, ownerPlayerId: membership.player!.id } })).toBe(0);
+
+    const returningJoiner = await createAuth();
+    const returningRoom = await createRoom(creator.auth, 'Returning playing join', randomUUID(), { allowMidgameJoin: true });
+    await service.joinRoom(returningJoiner.auth, returningRoom.id, {}, 'returning-lobby-join');
+    const original = await service.selectCharacter(returningJoiner.auth, returningRoom.id, secondCharacter!.id, 'returning-lobby-character');
+    await db.roomMembership.update({ where: { id: original.id }, data: { status: 'LEFT', leftAt: new Date() } });
+    await db.player.update({ where: { id: original.player.id }, data: { status: 'LEFT' } });
+    await db.room.update({ where: { id: returningRoom.id }, data: { status: 'PLAYING' } });
+    const rejoined = await service.joinRoom(
+      returningJoiner.auth,
+      returningRoom.id,
+      { characterId: secondCharacter!.id },
+      'returning-playing-join',
+    );
+    expect(rejoined).toMatchObject({ id: original.id, player: { id: original.player.id } });
+    expect(await db.ledgerEntry.count({ where: { roomId: returningRoom.id, playerId: original.player.id, type: 'INITIAL_BALANCE' } })).toBe(1);
+  });
+
+  it('serializes the last midgame seat', async () => {
+    const creator = await createAuth({ canCreateRoom: true });
+    const firstJoiner = await createAuth();
+    const secondJoiner = await createAuth();
+    const [firstCharacter, secondCharacter, thirdCharacter, fourthCharacter, freeCharacter] = await characters(5);
+    const room = await createRoom(creator.auth, 'Last midgame seat', randomUUID(), { allowMidgameJoin: true });
+    for (const [index, character] of [firstCharacter, secondCharacter, thirdCharacter, fourthCharacter].entries()) {
+      const occupant = await createAuth();
+      await service.joinRoom(occupant.auth, room.id, {}, `last-seat-occupant-${index}-join`);
+      await service.selectCharacter(occupant.auth, room.id, character!.id, `last-seat-occupant-${index}-character`);
+    }
+    await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
+    const clients = [0, 1].map(() => new PrismaClient({ datasources: { db: { url: isolatedTestDatabaseUrl! } } }));
+    const [firstService, secondService] = clients.map((client) => new AccountRoomService(client));
+    try {
+      const outcomes = await Promise.allSettled([
+        firstService!.joinRoom(firstJoiner.auth, room.id, { characterId: freeCharacter!.id }, 'last-seat-a'),
+        secondService!.joinRoom(secondJoiner.auth, room.id, { characterId: freeCharacter!.id }, 'last-seat-b'),
+      ]);
+      expect(outcomes.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.filter((result) => result.status === 'rejected')).toHaveLength(1);
+      expect(await db.roomMembership.count({
+        where: { roomId: room.id, status: 'ACTIVE', characterId: null, isBank: false },
+      })).toBe(0);
+      const losingJoiner = outcomes[0]?.status === 'rejected' ? firstJoiner : secondJoiner;
+      expect(await service.listRooms(losingJoiner.auth)).toContainEqual(
+        expect.objectContaining({ id: room.id, mine: false }),
+      );
+    } finally {
+      await Promise.all(clients.map((client) => client.$disconnect()));
+    }
+  });
+
   it('keeps character and bank as independent capabilities in both acquisition orders', async () => {
     const creator = await createAuth({ canCreateRoom: true });
     const first = await createAuth();
@@ -653,11 +765,11 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const characterFirstRoom = await createRoom(creator.auth, 'Character then bank');
     const bankFirstRoom = await createRoom(creator.auth, 'Bank then character');
 
-    await service.joinRoom(first.auth, characterFirstRoom.id, undefined, 'join-character-first');
+    await service.joinRoom(first.auth, characterFirstRoom.id, {}, 'join-character-first');
     await service.selectCharacter(first.auth, characterFirstRoom.id, firstCharacter!.id, 'character-first');
     await service.selectBank(first.auth, characterFirstRoom.id, 'bank-second');
 
-    await service.joinRoom(second.auth, bankFirstRoom.id, undefined, 'join-bank-first');
+    await service.joinRoom(second.auth, bankFirstRoom.id, {}, 'join-bank-first');
     await service.selectBank(second.auth, bankFirstRoom.id, 'bank-first');
     await service.selectCharacter(second.auth, bankFirstRoom.id, secondCharacter!.id, 'character-second');
 
@@ -686,7 +798,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const bankRoom = await createRoom(creator.auth, 'Bank only');
     const zeroRoom = await createRoom(creator.auth, 'Zero cash palace', randomUUID(), { initialBalance: 0 });
 
-    await service.joinRoom(bankOnly.auth, bankRoom.id, undefined, 'join-bank-only');
+    await service.joinRoom(bankOnly.auth, bankRoom.id, {}, 'join-bank-only');
     await service.selectBank(bankOnly.auth, bankRoom.id, 'select-bank-only');
     const bankMembership = await db.roomMembership.findUniqueOrThrow({
       where: { roomId_accountId: { roomId: bankRoom.id, accountId: bankOnly.account.id } },
@@ -696,7 +808,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(await db.ledgerEntry.count({ where: { roomId: bankRoom.id } })).toBe(0);
     expect(await db.roomProperty.count({ where: { roomId: bankRoom.id, ownerPlayerId: { not: null } } })).toBe(0);
 
-    await service.joinRoom(zeroCash.auth, zeroRoom.id, undefined, 'join-zero');
+    await service.joinRoom(zeroCash.auth, zeroRoom.id, {}, 'join-zero');
     await service.selectCharacter(zeroCash.auth, zeroRoom.id, character!.id, 'select-zero');
     const player = await db.player.findFirstOrThrow({ where: { roomId: zeroRoom.id, member: { accountId: zeroCash.account.id } } });
     expect(player.balance).toBe(0);
@@ -715,7 +827,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const member = await createToastAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Initial balance callback');
-    await notifiedService.joinRoom(member.auth, room.id, undefined, 'join-initial-callback');
+    await notifiedService.joinRoom(member.auth, room.id, {}, 'join-initial-callback');
 
     await notifiedService.selectCharacter(member.auth, room.id, character!.id, 'select-initial-callback');
     await notifiedService.selectCharacter(member.auth, room.id, character!.id, 'select-initial-callback');
@@ -735,8 +847,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createToastAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Role swap initial balance callback');
-    await notifiedService.joinRoom(requester.auth, room.id, undefined, 'notify-swap-requester-join');
-    await notifiedService.joinRoom(target.auth, room.id, undefined, 'notify-swap-target-join');
+    await notifiedService.joinRoom(requester.auth, room.id, {}, 'notify-swap-requester-join');
+    await notifiedService.joinRoom(target.auth, room.id, {}, 'notify-swap-target-join');
     await notifiedService.selectCharacter(target.auth, room.id, character!.id, 'notify-swap-target-character');
     committed.length = 0;
     const request = await notifiedService.requestRoleSwap(requester.auth, room.id, character!.id, 'notify-swap-request');
@@ -754,7 +866,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const member = await createAuth();
     const [firstCharacter, secondCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Character limit');
-    await service.joinRoom(member.auth, room.id, undefined, 'join-limit');
+    await service.joinRoom(member.auth, room.id, {}, 'join-limit');
 
     const selected = await service.selectCharacter(member.auth, room.id, firstCharacter!.id, 'select-same');
     const replay = await service.selectCharacter(member.auth, room.id, firstCharacter!.id, 'select-same');
@@ -785,7 +897,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
       [first.auth, bankRoom.id, 'join-bank-first'],
       [second.auth, bankRoom.id, 'join-bank-second'],
       [oneAccount.auth, accountRoom.id, 'join-one-account'],
-    ] as const) await service.joinRoom(auth, roomId, undefined, key);
+    ] as const) await service.joinRoom(auth, roomId, {}, key);
 
     const clients = [0, 1].map(() => new PrismaClient({ datasources: { db: { url: isolatedTestDatabaseUrl! } } }));
     const services = clients.map((client) => new AccountRoomService(client));
@@ -830,7 +942,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const otherDevice = await secondSession(member.auth);
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Shared control');
-    await service.joinRoom(member.auth, room.id, undefined, 'join-control');
+    await service.joinRoom(member.auth, room.id, {}, 'join-control');
 
     await expect(service.selectCharacter(otherDevice, room.id, character!.id, 'select-other-device'))
       .rejects.toMatchObject({ code: 'ROOM_CONTROL_LOST' });
@@ -869,7 +981,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const member = await createAuth();
     const otherDevice = await secondSession(member.auth);
     const room = await createRoom(creator.auth, `Control retry ${durableAlreadyCurrent}`);
-    await service.joinRoom(member.auth, room.id, undefined, `control-retry-join-${durableAlreadyCurrent}`);
+    await service.joinRoom(member.auth, room.id, {}, `control-retry-join-${durableAlreadyCurrent}`);
 
     let transactionAttempts = 0;
     const rollback = new Error('roll back injected control attempt');
@@ -942,7 +1054,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const viewer = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Snapshot room', randomUUID(), { password: 'hidden-password', skillEnabled: false });
-    await service.joinRoom(member.auth, room.id, 'hidden-password', 'snapshot-join');
+    await service.joinRoom(member.auth, room.id, { password: 'hidden-password' }, 'snapshot-join');
     await service.selectCharacter(member.auth, room.id, character!.id, 'snapshot-character');
     await service.selectBank(member.auth, room.id, 'snapshot-bank');
 
@@ -984,12 +1096,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const room = await createRoom(creator.auth, 'Authoritative room admission', randomUUID());
 
     for (const [index, player] of seated.entries()) {
-      await service.joinRoom(player.auth, room.id, undefined, `admission-player-${index}`);
+      await service.joinRoom(player.auth, room.id, {}, `admission-player-${index}`);
       await service.selectCharacter(player.auth, room.id, playerCharacters[index]!.id, `admission-character-${index}`);
     }
-    await service.joinRoom(bank.auth, room.id, undefined, 'admission-bank');
+    await service.joinRoom(bank.auth, room.id, {}, 'admission-bank');
     await service.selectBank(bank.auth, room.id, 'admission-bank-select');
-    const joinedMember = await service.joinRoom(member.auth, room.id, undefined, 'admission-member');
+    const joinedMember = await service.joinRoom(member.auth, room.id, {}, 'admission-member');
 
     const lobbySummary = (await service.listRooms(viewer.auth)).find((item) => item.id === room.id)!;
     expect(lobbySummary).toMatchObject({
@@ -1045,8 +1157,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const room = await createRoom(creator.auth, 'Critical replay');
 
     const publicResponses = [
-      await service.joinRoom(member.auth, room.id, undefined, 'critical-join'),
-      await service.joinRoom(member.auth, room.id, undefined, 'critical-join'),
+      await service.joinRoom(member.auth, room.id, {}, 'critical-join'),
+      await service.joinRoom(member.auth, room.id, {}, 'critical-join'),
       await service.selectCharacter(member.auth, room.id, character!.id, 'critical-character'),
       await service.selectCharacter(member.auth, room.id, character!.id, 'critical-character'),
       await service.selectBank(member.auth, room.id, 'critical-bank'),
@@ -1055,7 +1167,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
       await service.takeControl(otherDevice, room.id, 'critical-control'),
     ];
 
-    await expect(service.joinRoom(member.auth, room.id, 'different-payload', 'critical-join'))
+    await expect(service.joinRoom(member.auth, room.id, { password: 'different-payload' }, 'critical-join'))
       .rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
     expect(await db.roomMembership.count({ where: { roomId: room.id, accountId: member.account.id } })).toBe(1);
     expect(await db.player.count({ where: { roomId: room.id } })).toBe(1);
@@ -1079,12 +1191,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
       const joining = await createAuth();
       const room = await createRoom(creator.auth, `Join ${status}`);
       await db.room.update({ where: { id: room.id }, data: { status } });
-      await expect(service.joinRoom(joining.auth, room.id, undefined, `join-${status}`))
+      await expect(service.joinRoom(joining.auth, room.id, {}, `join-${status}`))
         .rejects.toMatchObject({ code: 'ROOM_FINISHED' });
 
       const seated = await createAuth();
       const seatRoom = await createRoom(creator.auth, `Seat ${status}`);
-      await service.joinRoom(seated.auth, seatRoom.id, undefined, `seat-member-${status}`);
+      await service.joinRoom(seated.auth, seatRoom.id, {}, `seat-member-${status}`);
       await db.room.update({ where: { id: seatRoom.id }, data: { status } });
       await expect(service.selectCharacter(seated.auth, seatRoom.id, character!.id, `seat-character-${status}`))
         .rejects.toMatchObject({ code: 'ROOM_FINISHED' });
@@ -1097,12 +1209,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const blockedJoiner = await createAuth();
     const blockedRoom = await createRoom(creator.auth, 'Blocked midgame join');
     await db.room.update({ where: { id: blockedRoom.id }, data: { status: 'PLAYING' } });
-    await expect(service.joinRoom(blockedJoiner.auth, blockedRoom.id, undefined, 'blocked-midgame-join'))
+    await expect(service.joinRoom(blockedJoiner.auth, blockedRoom.id, {}, 'blocked-midgame-join'))
       .rejects.toMatchObject({ code: 'MIDGAME_JOIN_DISABLED' });
 
     const blockedSeat = await createAuth();
     const blockedSeatRoom = await createRoom(creator.auth, 'Blocked midgame seat');
-    await service.joinRoom(blockedSeat.auth, blockedSeatRoom.id, undefined, 'blocked-seat-member');
+    await service.joinRoom(blockedSeat.auth, blockedSeatRoom.id, {}, 'blocked-seat-member');
     await db.room.update({ where: { id: blockedSeatRoom.id }, data: { status: 'PLAYING' } });
     await expect(service.selectCharacter(blockedSeat.auth, blockedSeatRoom.id, character!.id, 'blocked-midgame-character'))
       .rejects.toMatchObject({ code: 'MIDGAME_JOIN_DISABLED' });
@@ -1112,8 +1224,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const allowed = await createAuth();
     const allowedRoom = await createRoom(creator.auth, 'Allowed midgame admission', randomUUID(), { allowMidgameJoin: true });
     await db.room.update({ where: { id: allowedRoom.id }, data: { status: 'PLAYING' } });
-    await expect(service.joinRoom(allowed.auth, allowedRoom.id, undefined, 'allowed-midgame-join')).resolves.toMatchObject({ status: 'ACTIVE' });
-    await expect(service.selectCharacter(allowed.auth, allowedRoom.id, character!.id, 'allowed-midgame-character')).resolves.toMatchObject({ characterId: character!.id });
+    await expect(service.joinRoom(allowed.auth, allowedRoom.id, { characterId: character!.id }, 'allowed-midgame-join'))
+      .resolves.toMatchObject({ status: 'ACTIVE', characterId: character!.id, player: { characterId: character!.id, balance: 0 } });
     await expect(service.selectBank(allowed.auth, allowedRoom.id, 'allowed-midgame-bank')).resolves.toMatchObject({ isBank: true });
   });
 
@@ -1123,12 +1235,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const room = await createRoom(creator.auth, 'Failed join replay', randomUUID(), { password: 'correct-password' });
     const key = 'failed-join-replay';
 
-    await expect(service.joinRoom(joiner.auth, room.id, 'small-wrong-password', key))
+    await expect(service.joinRoom(joiner.auth, room.id, { password: 'small-wrong-password' }, key))
       .rejects.toMatchObject({ code: 'ROOM_PASSWORD_INVALID' });
-    await expect(service.joinRoom(joiner.auth, room.id, 'small-wrong-password', key))
+    await expect(service.joinRoom(joiner.auth, room.id, { password: 'small-wrong-password' }, key))
       .rejects.toMatchObject({ code: 'ROOM_PASSWORD_INVALID' });
     expect(await db.securityLog.count({ where: { accountId: joiner.account.id, action: 'ROOM_PASSWORD_FAILED' } })).toBe(1);
-    await expect(service.joinRoom(joiner.auth, room.id, 'different-wrong-password', key))
+    await expect(service.joinRoom(joiner.auth, room.id, { password: 'different-wrong-password' }, key))
       .rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
 
     const record = await db.idempotencyRecord.findUniqueOrThrow({
@@ -1152,12 +1264,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
     try {
       const attempts = await Promise.allSettled(clients.map((client, index) =>
-        new AccountRoomService(client).joinRoom(joiner.auth, protectedRoom.id, `wrong-${index}`, `concurrent-wrong-${index}`),
+        new AccountRoomService(client).joinRoom(joiner.auth, protectedRoom.id, { password: `wrong-${index}` }, `concurrent-wrong-${index}`),
       ));
       expect(attempts.map(rejectionCode).filter((code) => code === 'ROOM_PASSWORD_INVALID')).toHaveLength(5);
       expect(attempts.map(rejectionCode).filter((code) => code === 'RATE_LIMITED')).toHaveLength(1);
       expect(await db.securityLog.count({ where: { accountId: joiner.account.id, action: 'ROOM_PASSWORD_FAILED' } })).toBe(5);
-      await expect(service.joinRoom(joiner.auth, otherRoom.id, 'other-correct-password', 'other-room-join'))
+      await expect(service.joinRoom(joiner.auth, otherRoom.id, { password: 'other-correct-password' }, 'other-room-join'))
         .resolves.toMatchObject({ status: 'ACTIVE' });
     } finally {
       await Promise.all(clients.map((client) => client.$disconnect()));
@@ -1170,10 +1282,10 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const newcomer = await createAuth();
     const [retainedCharacter, newCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Retained Player slots');
-    await service.joinRoom(retained.auth, room.id, undefined, 'join-retained');
+    await service.joinRoom(retained.auth, room.id, {}, 'join-retained');
     const first = await service.selectCharacter(retained.auth, room.id, retainedCharacter!.id, 'select-retained');
     await db.player.update({ where: { id: first.player.id }, data: { status: 'LEFT' } });
-    await service.joinRoom(newcomer.auth, room.id, undefined, 'join-new-slot');
+    await service.joinRoom(newcomer.auth, room.id, {}, 'join-new-slot');
 
     const selected = await service.selectCharacter(newcomer.auth, room.id, newCharacter!.id, 'select-new-slot');
 
@@ -1186,14 +1298,14 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const member = await createAuth({ displayName: '流转成员' });
     const joiningDevice = await secondSession(member.auth);
     const room = await createRoom(creator.auth, 'Restore LEFT member', randomUUID(), { password: 'restore-password' });
-    const joined = await service.joinRoom(member.auth, room.id, 'restore-password', 'initial-left-join');
+    const joined = await service.joinRoom(member.auth, room.id, { password: 'restore-password' }, 'initial-left-join');
     await db.roomMembership.update({ where: { id: joined.id }, data: { status: 'LEFT', leftAt: new Date() } });
 
-    await expect(service.joinRoom(joiningDevice, room.id, 'wrong-restore-password', 'left-wrong-password'))
+    await expect(service.joinRoom(joiningDevice, room.id, { password: 'wrong-restore-password' }, 'left-wrong-password'))
       .rejects.toMatchObject({ code: 'ROOM_PASSWORD_INVALID' });
     expect(await db.roomMembership.findUniqueOrThrow({ where: { id: joined.id } })).toMatchObject({ status: 'LEFT' });
 
-    await expect(service.joinRoom(joiningDevice, room.id, 'restore-password', 'left-valid-password'))
+    await expect(service.joinRoom(joiningDevice, room.id, { password: 'restore-password' }, 'left-valid-password'))
       .resolves.toMatchObject({ id: joined.id, status: 'ACTIVE', characterId: null, isBank: false });
     expect(await db.roomMembership.count({ where: { roomId: room.id, accountId: member.account.id } })).toBe(1);
     expect(await db.roomMembership.findUniqueOrThrow({ where: { id: joined.id } })).toMatchObject({
@@ -1209,12 +1321,12 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const member = await createAuth({ displayName: '重新入席成员' });
     const [firstCharacter, nextCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Removed player reselects');
-    const joined = await service.joinRoom(member.auth, room.id, undefined, 'removed-player-first-join');
+    const joined = await service.joinRoom(member.auth, room.id, {}, 'removed-player-first-join');
     const selected = await service.selectCharacter(member.auth, room.id, firstCharacter!.id, 'removed-player-first-character');
     const initialLedgerCount = await db.ledgerEntry.count({ where: { roomId: room.id, playerId: selected.player.id, type: 'INITIAL_BALANCE' } });
 
     await service.removeAdminRoomMember(admin.auth, room.id, joined.id, 'remove-seated-member');
-    await expect(service.joinRoom(member.auth, room.id, undefined, 'removed-player-rejoin'))
+    await expect(service.joinRoom(member.auth, room.id, {}, 'removed-player-rejoin'))
       .resolves.toMatchObject({ id: joined.id, status: 'ACTIVE', characterId: null, isBank: false });
     expect(await db.player.findUniqueOrThrow({ where: { id: selected.player.id } })).toMatchObject({ status: 'LEFT', characterId: null });
 
@@ -1235,7 +1347,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
     try {
       const responses = await Promise.all(clients.map((client) =>
-        new AccountRoomService(client).joinRoom(joiner.auth, room.id, 'matching-password', 'matching-concurrent-key'),
+        new AccountRoomService(client).joinRoom(joiner.auth, room.id, { password: 'matching-password' }, 'matching-concurrent-key'),
       ));
 
       expect(responses[1]).toEqual(responses[0]);
@@ -1256,8 +1368,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
     try {
       const outcomes = await Promise.allSettled([
-        new AccountRoomService(clients[0]!).joinRoom(joiner.auth, room.id, 'correct-race-password', 'conflicting-concurrent-key'),
-        new AccountRoomService(clients[1]!).joinRoom(joiner.auth, room.id, 'wrong-race-password', 'conflicting-concurrent-key'),
+        new AccountRoomService(clients[0]!).joinRoom(joiner.auth, room.id, { password: 'correct-race-password' }, 'conflicting-concurrent-key'),
+        new AccountRoomService(clients[1]!).joinRoom(joiner.auth, room.id, { password: 'wrong-race-password' }, 'conflicting-concurrent-key'),
       ]);
       const codes = outcomes.map(rejectionCode).filter((code): code is string => Boolean(code));
       expect(codes).toContain('IDEMPOTENCY_KEY_REUSED');
@@ -1281,7 +1393,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const room = await createRoom(creator.auth, 'P2002 persisted join winner', randomUUID(), { password: 'winner-password' });
     const key = 'p2002-winner-key';
     const scope = `account:${joiner.account.id}:room:${room.id}:join`;
-    const winner = await service.joinRoom(joiner.auth, room.id, 'winner-password', key);
+    const winner = await service.joinRoom(joiner.auth, room.id, { password: 'winner-password' }, key);
 
     function boundaryClient() {
       let injectConflict = true;
@@ -1308,9 +1420,9 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
       }) as PrismaClient;
     }
 
-    await expect(new AccountRoomService(boundaryClient()).joinRoom(joiner.auth, room.id, 'winner-password', key))
+    await expect(new AccountRoomService(boundaryClient()).joinRoom(joiner.auth, room.id, { password: 'winner-password' }, key))
       .resolves.toEqual(winner);
-    await expect(new AccountRoomService(boundaryClient()).joinRoom(joiner.auth, room.id, 'changed-password', key))
+    await expect(new AccountRoomService(boundaryClient()).joinRoom(joiner.auth, room.id, { password: 'changed-password' }, key))
       .rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
     expect(await db.idempotencyRecord.count({ where: { scope, key } })).toBe(1);
     expect(await db.roomMembership.count({ where: { roomId: room.id, accountId: joiner.account.id } })).toBe(1);
@@ -1323,8 +1435,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const [targetCharacter, freeCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Lobby replacement');
-    await service.joinRoom(requester.auth, room.id, undefined, 'replacement-requester-join');
-    await service.joinRoom(target.auth, room.id, undefined, 'replacement-target-join');
+    await service.joinRoom(requester.auth, room.id, {}, 'replacement-requester-join');
+    await service.joinRoom(target.auth, room.id, {}, 'replacement-target-join');
     const selectedTarget = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'replacement-target-character');
     await service.selectBank(target.auth, room.id, 'replacement-target-bank');
     const targetBefore = await db.player.findUniqueOrThrow({ where: { id: selectedTarget.player.id } });
@@ -1357,8 +1469,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const mutualRoom = await createRoom(creator.auth, 'Lobby mutual swap');
     const mutualA = await createAuth();
     const mutualB = await createAuth();
-    await service.joinRoom(mutualA.auth, mutualRoom.id, undefined, 'mutual-a-join');
-    await service.joinRoom(mutualB.auth, mutualRoom.id, undefined, 'mutual-b-join');
+    await service.joinRoom(mutualA.auth, mutualRoom.id, {}, 'mutual-a-join');
+    await service.joinRoom(mutualB.auth, mutualRoom.id, {}, 'mutual-b-join');
     const playerA = await service.selectCharacter(mutualA.auth, mutualRoom.id, targetCharacter!.id, 'mutual-a-character');
     const playerB = await service.selectCharacter(mutualB.auth, mutualRoom.id, freeCharacter!.id, 'mutual-b-character');
     await service.selectBank(mutualA.auth, mutualRoom.id, 'mutual-a-bank');
@@ -1383,14 +1495,14 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth({ displayName: '在席目标成员' });
     const [requesterCharacter, targetCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Removed player role swap');
-    const requesterMembership = await service.joinRoom(requester.auth, room.id, undefined, 'removed-swap-requester-join');
-    await service.joinRoom(target.auth, room.id, undefined, 'removed-swap-target-join');
+    const requesterMembership = await service.joinRoom(requester.auth, room.id, {}, 'removed-swap-requester-join');
+    await service.joinRoom(target.auth, room.id, {}, 'removed-swap-target-join');
     const requesterSeat = await service.selectCharacter(requester.auth, room.id, requesterCharacter!.id, 'removed-swap-requester-character');
     await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'removed-swap-target-character');
     const initialLedgerCount = await db.ledgerEntry.count({ where: { roomId: room.id, playerId: requesterSeat.player.id, type: 'INITIAL_BALANCE' } });
 
     await service.removeAdminRoomMember(admin.auth, room.id, requesterMembership.id, 'remove-swap-requester');
-    await service.joinRoom(requester.auth, room.id, undefined, 'removed-swap-requester-rejoin');
+    await service.joinRoom(requester.auth, room.id, {}, 'removed-swap-requester-rejoin');
     const requested = await service.requestRoleSwap(requester.auth, room.id, targetCharacter!.id, 'removed-swap-request');
     await service.acceptRoleSwap(target.auth, requested.id, 'removed-swap-accept');
 
@@ -1406,8 +1518,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const dualTargetBank = await createAuth();
     const [targetCharacter] = await characters(1);
     const room = await createRoom(creator.auth, 'Playing replacement');
-    await service.joinRoom(requester.auth, room.id, undefined, 'playing-requester-join');
-    await service.joinRoom(dualTargetBank.auth, room.id, undefined, 'playing-target-join');
+    await service.joinRoom(requester.auth, room.id, {}, 'playing-requester-join');
+    await service.joinRoom(dualTargetBank.auth, room.id, {}, 'playing-target-join');
     const target = await service.selectCharacter(dualTargetBank.auth, room.id, targetCharacter!.id, 'playing-target-character');
     await service.selectBank(dualTargetBank.auth, room.id, 'playing-target-bank');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
@@ -1441,7 +1553,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Swap decisions');
     for (const [member, key] of [[requester, 'requester'], [target, 'target'], [outsider, 'outsider']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `${key}-join`);
     }
     await service.selectCharacter(target.auth, room.id, character!.id, 'decision-target-character');
 
@@ -1466,9 +1578,9 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const holders = await Promise.all(Array.from({ length: 5 }, (_, index) => createAuth({ displayName: `满席玩家${index + 1}` })));
     const allCharacters = await characters(5);
     const room = await createRoom(creator.auth, 'Full capacity replacement');
-    await service.joinRoom(requester.auth, room.id, undefined, 'full-requester-join');
+    await service.joinRoom(requester.auth, room.id, {}, 'full-requester-join');
     for (const [index, holder] of holders.entries()) {
-      await service.joinRoom(holder.auth, room.id, undefined, `full-holder-${index}-join`);
+      await service.joinRoom(holder.auth, room.id, {}, `full-holder-${index}-join`);
       await service.selectCharacter(holder.auth, room.id, allCharacters[index]!.id, `full-holder-${index}-character`);
     }
 
@@ -1553,7 +1665,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [takenCharacter, retainedCharacter, newcomerCharacter] = await characters(3);
     const room = await createRoom(creator.auth, 'Retained playing selection');
     for (const [member, key] of [[requester, 'requester'], [retained, 'retained'], [newcomer, 'newcomer']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `retained-playing-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `retained-playing-${key}-join`);
     }
     const retainedInitial = await service.selectCharacter(retained.auth, room.id, takenCharacter!.id, 'retained-playing-initial-character');
     const replacement = await service.requestRoleSwap(requester.auth, room.id, takenCharacter!.id, 'retained-playing-request');
@@ -1580,7 +1692,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const newcomer = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Enabled midgame selection', randomUUID(), { allowMidgameJoin: true });
-    const membership = await service.joinRoom(newcomer.auth, room.id, undefined, 'enabled-midgame-join');
+    const membership = await service.joinRoom(newcomer.auth, room.id, {}, 'enabled-midgame-join');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
 
     const selected = await service.selectCharacter(newcomer.auth, room.id, character!.id, 'enabled-midgame-character');
@@ -1600,7 +1712,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [targetCharacter, otherCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Current target conflict', randomUUID(), { diceMode: 'ELECTRONIC' });
     for (const [member, key] of [[requester, 'requester'], [target, 'target'], [otherPlayer, 'other'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `current-conflict-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `current-conflict-${key}-join`);
     }
     const targetSeat = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'current-conflict-target-character');
     await service.selectCharacter(otherPlayer.auth, room.id, otherCharacter!.id, 'current-conflict-other-character');
@@ -1639,7 +1751,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [targetCharacter, otherCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Active turn drift conflict', randomUUID(), { diceMode: 'ELECTRONIC' });
     for (const [member, key] of [[requester, 'requester'], [target, 'target'], [otherPlayer, 'other'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `turn-drift-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `turn-drift-${key}-join`);
     }
     const targetSeat = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'turn-drift-target-character');
     const otherSeat = await service.selectCharacter(otherPlayer.auth, room.id, otherCharacter!.id, 'turn-drift-other-character');
@@ -1664,8 +1776,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const [requestedCharacter, driftCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Character drift conflict');
-    await service.joinRoom(requester.auth, room.id, undefined, 'drift-requester-join');
-    await service.joinRoom(target.auth, room.id, undefined, 'drift-target-join');
+    await service.joinRoom(requester.auth, room.id, {}, 'drift-requester-join');
+    await service.joinRoom(target.auth, room.id, {}, 'drift-target-join');
     const targetSeat = await service.selectCharacter(target.auth, room.id, requestedCharacter!.id, 'drift-target-character');
     const requested = await service.requestRoleSwap(requester.auth, room.id, requestedCharacter!.id, 'drift-request');
     const targetMembership = await db.roomMembership.findUniqueOrThrow({ where: { roomId_accountId: { roomId: room.id, accountId: target.account.id } } });
@@ -1701,7 +1813,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Transaction-only swap lookup');
     for (const [member, key] of [[requester, 'requester'], [target, 'target'], [outsider, 'outsider']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `transaction-lookup-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `transaction-lookup-${key}-join`);
     }
     await service.selectCharacter(target.auth, room.id, character!.id, 'transaction-lookup-target-character');
     const requested = await service.requestRoleSwap(requester.auth, room.id, character!.id, 'transaction-lookup-request');
@@ -1742,8 +1854,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const [character] = await characters(1);
     const foreignRoom = await createRoom(creator.auth, 'Foreign request privacy');
-    await service.joinRoom(requester.auth, foreignRoom.id, undefined, 'foreign-requester-join');
-    await service.joinRoom(target.auth, foreignRoom.id, undefined, 'foreign-target-join');
+    await service.joinRoom(requester.auth, foreignRoom.id, {}, 'foreign-requester-join');
+    await service.joinRoom(target.auth, foreignRoom.id, {}, 'foreign-target-join');
     await service.selectCharacter(target.auth, foreignRoom.id, character!.id, 'foreign-target-character');
     const foreignRequest = await service.requestRoleSwap(requester.auth, foreignRoom.id, character!.id, 'foreign-request');
 
@@ -1762,7 +1874,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [characterA, characterB] = await characters(2);
     const room = await createRoom(creator.auth, 'Swap idempotency matrix');
     for (const [member, key] of [[requesterA, 'requester-a'], [requesterB, 'requester-b'], [targetA, 'target-a'], [targetB, 'target-b']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `idempotency-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `idempotency-${key}-join`);
     }
     await service.selectCharacter(targetA.auth, room.id, characterA!.id, 'idempotency-target-a-character');
     await service.selectCharacter(targetB.auth, room.id, characterB!.id, 'idempotency-target-b-character');
@@ -1799,8 +1911,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const staleRequester = await createAuth();
     const staleTarget = await createAuth();
     const staleRoom = await createRoom(creator.auth, 'Stale swap replay');
-    await service.joinRoom(staleRequester.auth, staleRoom.id, undefined, 'stale-swap-requester-join');
-    await service.joinRoom(staleTarget.auth, staleRoom.id, undefined, 'stale-swap-target-join');
+    await service.joinRoom(staleRequester.auth, staleRoom.id, {}, 'stale-swap-requester-join');
+    await service.joinRoom(staleTarget.auth, staleRoom.id, {}, 'stale-swap-target-join');
     await service.selectCharacter(staleTarget.auth, staleRoom.id, character!.id, 'stale-swap-target-character');
     const staleRequest = await service.requestRoleSwap(staleRequester.auth, staleRoom.id, character!.id, 'stale-swap-request');
     const accepted = await service.acceptRoleSwap(staleTarget.auth, staleRequest.id, 'stale-swap-accept');
@@ -1813,8 +1925,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const revokedRequester = await createAuth();
     const revokedTarget = await createAuth();
     const revokedRoom = await createRoom(creator.auth, 'Revoked swap decision');
-    await service.joinRoom(revokedRequester.auth, revokedRoom.id, undefined, 'revoked-swap-requester-join');
-    await service.joinRoom(revokedTarget.auth, revokedRoom.id, undefined, 'revoked-swap-target-join');
+    await service.joinRoom(revokedRequester.auth, revokedRoom.id, {}, 'revoked-swap-requester-join');
+    await service.joinRoom(revokedTarget.auth, revokedRoom.id, {}, 'revoked-swap-target-join');
     await service.selectCharacter(revokedTarget.auth, revokedRoom.id, character!.id, 'revoked-swap-target-character');
     const revokedRequest = await service.requestRoleSwap(revokedRequester.auth, revokedRoom.id, character!.id, 'revoked-swap-request');
     await db.accountSession.update({ where: { id: revokedTarget.auth.session.id }, data: { revokedAt: new Date() } });
@@ -1825,8 +1937,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const terminalRequester = await createAuth();
     const terminalTarget = await createAuth();
     const terminalRoom = await createRoom(creator.auth, 'Terminal swap decision');
-    await service.joinRoom(terminalRequester.auth, terminalRoom.id, undefined, 'terminal-swap-requester-join');
-    await service.joinRoom(terminalTarget.auth, terminalRoom.id, undefined, 'terminal-swap-target-join');
+    await service.joinRoom(terminalRequester.auth, terminalRoom.id, {}, 'terminal-swap-requester-join');
+    await service.joinRoom(terminalTarget.auth, terminalRoom.id, {}, 'terminal-swap-target-join');
     await service.selectCharacter(terminalTarget.auth, terminalRoom.id, character!.id, 'terminal-swap-target-character');
     const terminalRequest = await service.requestRoleSwap(terminalRequester.auth, terminalRoom.id, character!.id, 'terminal-swap-request');
     await db.room.update({ where: { id: terminalRoom.id }, data: { status: 'FINISHED' } });
@@ -1841,8 +1953,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Swap P2002 recovery');
-    await service.joinRoom(requester.auth, room.id, undefined, 'p2002-requester-join');
-    await service.joinRoom(target.auth, room.id, undefined, 'p2002-target-join');
+    await service.joinRoom(requester.auth, room.id, {}, 'p2002-requester-join');
+    await service.joinRoom(target.auth, room.id, {}, 'p2002-target-join');
     await service.selectCharacter(target.auth, room.id, character!.id, 'p2002-target-character');
     let injectConflict = true;
     const boundaryClient = new Proxy(db, {
@@ -1883,7 +1995,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Authoritative swap seats');
     for (const [member, key] of [[requester, 'requester'], [target, 'target'], [bank, 'bank'], [observer, 'observer']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `seat-swap-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `seat-swap-${key}-join`);
     }
     await service.selectCharacter(target.auth, room.id, character!.id, 'seat-swap-target-character');
     await service.selectBank(bank.auth, room.id, 'seat-swap-bank');
@@ -1931,8 +2043,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Actionable swap history');
-    await service.joinRoom(requester.auth, room.id, undefined, 'history-requester-join');
-    await service.joinRoom(target.auth, room.id, undefined, 'history-target-join');
+    await service.joinRoom(requester.auth, room.id, {}, 'history-requester-join');
+    await service.joinRoom(target.auth, room.id, {}, 'history-target-join');
     await service.selectCharacter(target.auth, room.id, character!.id, 'history-target-character');
     const pending = await service.requestRoleSwap(requester.auth, room.id, character!.id, 'history-pending-request');
     const requesterMembership = await db.roomMembership.findUniqueOrThrow({
@@ -1969,7 +2081,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Controlled swap actions');
     for (const [member, key] of [[requester, 'requester'], [target, 'target'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `controlled-actions-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `controlled-actions-${key}-join`);
     }
     await service.selectCharacter(target.auth, room.id, character!.id, 'controlled-actions-target-character');
     await service.selectBank(bank.auth, room.id, 'controlled-actions-bank');
@@ -2004,7 +2116,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [playableCharacter, mismatchedCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Playable settlement eligibility');
     for (const [member, key] of [[playable, 'playable'], [mismatched, 'mismatched'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `settlement-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `settlement-${key}-join`);
     }
     const playableSeat = await service.selectCharacter(playable.auth, room.id, playableCharacter!.id, 'settlement-playable-character');
     const mismatchedSeat = await service.selectCharacter(mismatched.auth, room.id, mismatchedCharacter!.id, 'settlement-mismatched-character');
@@ -2034,8 +2146,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Cross-room settlement binding');
     const otherRoom = await createRoom(creator.auth, 'Cross-room settlement target');
-    await service.joinRoom(player.auth, room.id, undefined, 'cross-room-player-join');
-    await service.joinRoom(bank.auth, room.id, undefined, 'cross-room-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'cross-room-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'cross-room-bank-join');
     const seat = await service.selectCharacter(player.auth, room.id, character!.id, 'cross-room-character');
     await service.selectBank(bank.auth, room.id, 'cross-room-bank');
     await db.roomProperty.updateMany({ where: { roomId: room.id, ownerPlayerId: seat.player.id }, data: { ownerPlayerId: null } });
@@ -2058,8 +2170,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const bank = await createAuth({ displayName: '结算银行' });
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Transactional normal settlement');
-    await service.joinRoom(player.auth, room.id, undefined, 'normal-player-join');
-    await service.joinRoom(bank.auth, room.id, undefined, 'normal-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'normal-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'normal-bank-join');
     const seat = await service.selectCharacter(player.auth, room.id, character!.id, 'normal-player-character');
     await service.selectBank(bank.auth, room.id, 'normal-bank');
     const owned = await db.roomProperty.findFirstOrThrow({ where: { roomId: room.id, ownerPlayerId: seat.player.id }, include: { definition: true } });
@@ -2128,8 +2240,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const bank = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Settlement P2002 winner');
-    await service.joinRoom(player.auth, room.id, undefined, 'settlement-p2002-player-join');
-    await service.joinRoom(bank.auth, room.id, undefined, 'settlement-p2002-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'settlement-p2002-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'settlement-p2002-bank-join');
     await service.selectCharacter(player.auth, room.id, character!.id, 'settlement-p2002-character');
     const bankMembership = await service.selectBank(bank.auth, room.id, 'settlement-p2002-bank');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
@@ -2188,8 +2300,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const noWinnerBank = await createAuth();
     const noWinnerPlayer = await createAuth();
     const noWinnerRoom = await createRoom(creator.auth, 'Settlement P2002 without winner');
-    await service.joinRoom(noWinnerBank.auth, noWinnerRoom.id, undefined, 'no-winner-bank-join');
-    await service.joinRoom(noWinnerPlayer.auth, noWinnerRoom.id, undefined, 'no-winner-player-join');
+    await service.joinRoom(noWinnerBank.auth, noWinnerRoom.id, {}, 'no-winner-bank-join');
+    await service.joinRoom(noWinnerPlayer.auth, noWinnerRoom.id, {}, 'no-winner-player-join');
     await service.selectBank(noWinnerBank.auth, noWinnerRoom.id, 'no-winner-bank');
     await service.selectCharacter(noWinnerPlayer.auth, noWinnerRoom.id, character!.id, 'no-winner-character');
     await db.room.update({ where: { id: noWinnerRoom.id }, data: { status: 'PLAYING' } });
@@ -2205,8 +2317,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const bank = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Concurrent matching settlement finish');
-    await service.joinRoom(player.auth, room.id, undefined, 'concurrent-finish-player-join');
-    await service.joinRoom(bank.auth, room.id, undefined, 'concurrent-finish-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'concurrent-finish-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'concurrent-finish-bank-join');
     await service.selectCharacter(player.auth, room.id, character!.id, 'concurrent-finish-character');
     await service.selectBank(bank.auth, room.id, 'concurrent-finish-bank');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
@@ -2235,8 +2347,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const [character, targetCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Forced settlement matrix');
-    await service.joinRoom(player.auth, room.id, undefined, 'forced-player-join');
-    await service.joinRoom(target.auth, room.id, undefined, 'forced-target-join');
+    await service.joinRoom(player.auth, room.id, {}, 'forced-player-join');
+    await service.joinRoom(target.auth, room.id, {}, 'forced-target-join');
     const playerSeat = await service.selectCharacter(player.auth, room.id, character!.id, 'forced-player-character');
     const targetSeat = await service.selectCharacter(target.auth, room.id, targetCharacter!.id, 'forced-target-character');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING', currentTurnPlayerId: playerSeat.player.id, turnNumber: 1 } });
@@ -2295,7 +2407,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [firstCharacter, secondCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Pristine electronic finish', randomUUID(), { diceMode: 'ELECTRONIC' });
     for (const [member, key] of [[firstPlayer, 'first'], [secondPlayer, 'second'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `pristine-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `pristine-${key}-join`);
     }
     const firstSeat = await service.selectCharacter(firstPlayer.auth, room.id, firstCharacter!.id, 'pristine-first-character');
     await service.selectCharacter(secondPlayer.auth, room.id, secondCharacter!.id, 'pristine-second-character');
@@ -2331,7 +2443,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [firstCharacter, secondCharacter, thirdCharacter] = await characters(3);
     const room = await createRoom(creator.auth, 'Settlement participant ranking');
     for (const [member, key] of [[firstPlayer, 'first'], [secondPlayer, 'second'], [thirdPlayer, 'third'], [bankOnly, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `ranking-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `ranking-${key}-join`);
     }
     const firstSeat = await service.selectCharacter(firstPlayer.auth, room.id, firstCharacter!.id, 'ranking-first-character');
     const secondSeat = await service.selectCharacter(secondPlayer.auth, room.id, secondCharacter!.id, 'ranking-second-character');
@@ -2354,7 +2466,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const dualCreator = await createAuth({ canCreateRoom: true });
     const dual = await createAuth({ displayName: '人物兼银行' });
     const dualRoom = await createRoom(dualCreator.auth, 'Dual participant settlement');
-    await service.joinRoom(dual.auth, dualRoom.id, undefined, 'dual-settlement-join');
+    await service.joinRoom(dual.auth, dualRoom.id, {}, 'dual-settlement-join');
     await service.selectCharacter(dual.auth, dualRoom.id, firstCharacter!.id, 'dual-settlement-character');
     await service.selectBank(dual.auth, dualRoom.id, 'dual-settlement-bank');
     await db.room.update({ where: { id: dualRoom.id }, data: { status: 'PLAYING' } });
@@ -2369,7 +2481,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [retainedCharacter, activeCharacter] = await characters(2);
     const room = await createRoom(creator.auth, 'Retained replacement settlement');
     for (const [member, key] of [[retained, 'retained'], [active, 'active'], [bank, 'bank']] as const) {
-      await service.joinRoom(member.auth, room.id, undefined, `retained-settlement-${key}-join`);
+      await service.joinRoom(member.auth, room.id, {}, `retained-settlement-${key}-join`);
     }
     const retainedSeat = await service.selectCharacter(retained.auth, room.id, retainedCharacter!.id, 'retained-settlement-character');
     await service.selectCharacter(active.auth, room.id, activeCharacter!.id, 'active-settlement-character');
@@ -2430,8 +2542,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const [character] = await characters(1);
 
     const lobby = await createRoom(creator.auth, 'Settlement lifecycle lobby');
-    await service.joinRoom(bank.auth, lobby.id, undefined, 'lifecycle-lobby-bank-join');
-    await service.joinRoom(player.auth, lobby.id, undefined, 'lifecycle-lobby-player-join');
+    await service.joinRoom(bank.auth, lobby.id, {}, 'lifecycle-lobby-bank-join');
+    await service.joinRoom(player.auth, lobby.id, {}, 'lifecycle-lobby-player-join');
     await service.selectBank(bank.auth, lobby.id, 'lifecycle-lobby-bank');
     await service.selectCharacter(player.auth, lobby.id, character!.id, 'lifecycle-lobby-character');
     await expect(service.previewSettlement(bank.auth, lobby.id)).rejects.toMatchObject({ code: 'ROOM_NOT_PLAYING' });
@@ -2449,8 +2561,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const endedBank = await createAuth();
     const endedPlayer = await createAuth();
     const ended = await createRoom(creator.auth, 'Settlement lifecycle ended');
-    await service.joinRoom(endedBank.auth, ended.id, undefined, 'lifecycle-ended-bank-join');
-    await service.joinRoom(endedPlayer.auth, ended.id, undefined, 'lifecycle-ended-player-join');
+    await service.joinRoom(endedBank.auth, ended.id, {}, 'lifecycle-ended-bank-join');
+    await service.joinRoom(endedPlayer.auth, ended.id, {}, 'lifecycle-ended-player-join');
     await service.selectBank(endedBank.auth, ended.id, 'lifecycle-ended-bank');
     await service.selectCharacter(endedPlayer.auth, ended.id, character!.id, 'lifecycle-ended-character');
     await db.room.update({ where: { id: ended.id }, data: { status: 'ENDED' } });
@@ -2464,7 +2576,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
 
     const corruptBank = await createAuth();
     const corrupt = await createRoom(creator.auth, 'Settlement lifecycle corrupt');
-    await service.joinRoom(corruptBank.auth, corrupt.id, undefined, 'lifecycle-corrupt-bank-join');
+    await service.joinRoom(corruptBank.auth, corrupt.id, {}, 'lifecycle-corrupt-bank-join');
     await service.selectBank(corruptBank.auth, corrupt.id, 'lifecycle-corrupt-bank');
     await db.room.update({ where: { id: corrupt.id }, data: { status: 'FINISHED' } });
     await expect(service.previewSettlement(corruptBank.auth, corrupt.id)).rejects.toMatchObject({ code: 'SETTLEMENT_INCONSISTENT' });
@@ -2486,8 +2598,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const admin = await createAuth({ superAdmin: true });
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Settlement fresh authorization');
-    await service.joinRoom(bank.auth, room.id, undefined, 'fresh-auth-bank-join');
-    await service.joinRoom(player.auth, room.id, undefined, 'fresh-auth-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'fresh-auth-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'fresh-auth-player-join');
     await service.selectBank(bank.auth, room.id, 'fresh-auth-bank');
     await service.selectCharacter(player.auth, room.id, character!.id, 'fresh-auth-character');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
@@ -2512,8 +2624,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const admin = await createAuth({ superAdmin: true });
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Settlement read authorization');
-    await service.joinRoom(bank.auth, room.id, undefined, 'read-bank-join');
-    await service.joinRoom(player.auth, room.id, undefined, 'read-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'read-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'read-player-join');
     await service.selectBank(bank.auth, room.id, 'read-bank');
     const playerSeat = await service.selectCharacter(player.auth, room.id, character!.id, 'read-character');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
@@ -2538,7 +2650,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const creator = await createAuth({ canCreateRoom: true });
     const reader = await createAuth();
     const validRoom = await createRoom(creator.auth, 'Legacy settlement JSON projection');
-    await service.joinRoom(reader.auth, validRoom.id, undefined, 'legacy-json-reader-join');
+    await service.joinRoom(reader.auth, validRoom.id, {}, 'legacy-json-reader-join');
     const valid = await db.gameSettlement.create({ data: {
       roomId: validRoom.id,
       endedByAccountId: creator.account.id,
@@ -2595,7 +2707,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     expect(JSON.stringify(projected)).not.toContain('internalSecret');
 
     const malformedRoom = await createRoom(creator.auth, 'Malformed legacy settlement JSON');
-    await service.joinRoom(reader.auth, malformedRoom.id, undefined, 'malformed-json-reader-join');
+    await service.joinRoom(reader.auth, malformedRoom.id, {}, 'malformed-json-reader-join');
     await db.gameSettlement.create({ data: {
       roomId: malformedRoom.id,
       endedByAccountId: creator.account.id,
@@ -2617,8 +2729,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const bank = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Settlement asset drift');
-    await service.joinRoom(player.auth, room.id, undefined, 'asset-drift-player-join');
-    await service.joinRoom(bank.auth, room.id, undefined, 'asset-drift-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'asset-drift-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'asset-drift-bank-join');
     const seat = await service.selectCharacter(player.auth, room.id, character!.id, 'asset-drift-character');
     await service.selectBank(bank.auth, room.id, 'asset-drift-bank');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });
@@ -2637,8 +2749,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const bank = await createAuth();
     const [character] = await characters(1);
     const gameRoom = await createRoom(creator.auth, 'Finish versus game write');
-    await service.joinRoom(player.auth, gameRoom.id, undefined, 'finish-game-player-join');
-    await service.joinRoom(bank.auth, gameRoom.id, undefined, 'finish-game-bank-join');
+    await service.joinRoom(player.auth, gameRoom.id, {}, 'finish-game-player-join');
+    await service.joinRoom(bank.auth, gameRoom.id, {}, 'finish-game-bank-join');
     const seat = await service.selectCharacter(player.auth, gameRoom.id, character!.id, 'finish-game-character');
     await service.selectBank(bank.auth, gameRoom.id, 'finish-game-bank');
     await db.room.update({ where: { id: gameRoom.id }, data: { status: 'PLAYING' } });
@@ -2665,9 +2777,9 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const target = await createAuth();
     const swapBank = await createAuth();
     const swapRoom = await createRoom(creator.auth, 'Finish versus role swap');
-    await service.joinRoom(requester.auth, swapRoom.id, undefined, 'finish-swap-requester-join');
-    await service.joinRoom(target.auth, swapRoom.id, undefined, 'finish-swap-target-join');
-    await service.joinRoom(swapBank.auth, swapRoom.id, undefined, 'finish-swap-bank-join');
+    await service.joinRoom(requester.auth, swapRoom.id, {}, 'finish-swap-requester-join');
+    await service.joinRoom(target.auth, swapRoom.id, {}, 'finish-swap-target-join');
+    await service.joinRoom(swapBank.auth, swapRoom.id, {}, 'finish-swap-bank-join');
     await service.selectCharacter(target.auth, swapRoom.id, character!.id, 'finish-swap-character');
     await service.selectBank(swapBank.auth, swapRoom.id, 'finish-swap-bank');
     await db.room.update({ where: { id: swapRoom.id }, data: { status: 'PLAYING' } });
@@ -2700,7 +2812,7 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
       const bank = await createAuth();
       const room = await createRoom(creator.auth, `Terminal swaps ${status}`);
       for (const [member, key] of [[requester, 'requester'], [target, 'target'], [bank, 'bank']] as const) {
-        await service.joinRoom(member.auth, room.id, undefined, `terminal-${status}-${key}-join`);
+        await service.joinRoom(member.auth, room.id, {}, `terminal-${status}-${key}-join`);
       }
       const targetSeat = await service.selectCharacter(target.auth, room.id, character!.id, `terminal-${status}-character`);
       const bankSeat = await service.selectBank(bank.auth, room.id, `terminal-${status}-bank`);
@@ -2738,8 +2850,8 @@ integration('AccountRoomService PostgreSQL room lobby V2.1', () => {
     const player = await createAuth();
     const [character] = await characters(1);
     const room = await createRoom(creator.auth, 'Immutable settlement rows');
-    await service.joinRoom(bank.auth, room.id, undefined, 'immutable-bank-join');
-    await service.joinRoom(player.auth, room.id, undefined, 'immutable-player-join');
+    await service.joinRoom(bank.auth, room.id, {}, 'immutable-bank-join');
+    await service.joinRoom(player.auth, room.id, {}, 'immutable-player-join');
     await service.selectBank(bank.auth, room.id, 'immutable-bank');
     await service.selectCharacter(player.auth, room.id, character!.id, 'immutable-character');
     await db.room.update({ where: { id: room.id }, data: { status: 'PLAYING' } });

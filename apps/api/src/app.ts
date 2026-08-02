@@ -384,8 +384,8 @@ app.post('/api/rooms', async (request) => {
 });
 app.post('/api/rooms/:id/join', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
-  const { password } = z.object({ password: z.string().max(100).optional() }).parse(request.body ?? {});
-  const result = await accounts.joinRoom(auth, id, password, idempotencyKey(request.headers['idempotency-key']));
+  const body = z.object({ password: z.string().max(100).optional(), characterId: z.string().optional() }).strict().parse(request.body ?? {});
+  const result = await accounts.joinRoom(auth, id, body, idempotencyKey(request.headers['idempotency-key']));
   notifyVersion(id, result);
   return result;
 });

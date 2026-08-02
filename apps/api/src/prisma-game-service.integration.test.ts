@@ -242,7 +242,7 @@ class V2GameFixtureFacade {
     }
     const created = (async (): Promise<FixtureIdentity> => {
       const member = await this.createAuth(name);
-      await this.accounts.joinRoom(member.auth, room.id, undefined, `join:${joinKey}`);
+      await this.accounts.joinRoom(member.auth, room.id, {}, `join:${joinKey}`);
       const selected = await this.accounts.selectCharacter(member.auth, room.id, characterId, `character:${joinKey}`);
       const playerId = selected.player.id;
       const actor = { accountId: member.account.id, sessionId: member.auth.session.id };
@@ -265,7 +265,7 @@ class V2GameFixtureFacade {
     }
     const created = (async (): Promise<FixtureIdentity> => {
       const member = await this.createAuth(name);
-      await this.accounts.joinRoom(member.auth, room.id, undefined, `join:${joinKey}`);
+      await this.accounts.joinRoom(member.auth, room.id, {}, `join:${joinKey}`);
       await this.accounts.selectBank(member.auth, room.id, `bank:${joinKey}`);
       const actor = { accountId: member.account.id, sessionId: member.auth.session.id };
       this.state.banks.set(fixtureKey, actor);
