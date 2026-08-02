@@ -1625,3 +1625,81 @@ nav span { font-size: 10px; white-space: nowrap; }
 
 .field-lock-note { color: var(--ink-soft); font-size: 12px; }
 .admin-detail :is(input, select):disabled { color: var(--ink-soft); background: var(--paper-muted); cursor: not-allowed; }
+
+@media (max-width: 899px) {
+  :root { --mobile-function-bottom-space: calc(66px + env(safe-area-inset-bottom)); }
+
+  .modal-backdrop .action-sheet { padding-bottom: calc(20px + var(--mobile-function-bottom-space)); }
+  .modal-backdrop .landing-action-sheet {
+    width: 100%;
+    max-width: none;
+    padding: 12px 16px var(--mobile-function-bottom-space);
+  }
+  .modal-backdrop .landing-action-sheet .landing-confirm {
+    width: calc(100% - 12px);
+    margin: 0 6px;
+  }
+  .modal-backdrop .landing-action-sheet .landing-property-grid {
+    width: calc(100% + 32px);
+    margin: 0 -16px 24px;
+    padding: 16px 22px;
+    border-block: 2px solid #24211f;
+  }
+  .modal-backdrop .landing-action-sheet > .action-sheet-content,
+  .modal-backdrop .landing-action-sheet .landing-property-picker { overflow: visible; }
+  .modal-backdrop .landing-action-sheet .landing-property-picker { gap: 24px; }
+  .modal-backdrop .action-sheet :is(.primary, .quick) { border-radius: 6px; }
+
+  .landing-approval-list article { grid-template-columns: 76px minmax(0, 1fr) 44px; }
+  .landing-location-meta {
+    width: 76px;
+    min-width: 76px;
+    max-width: 76px;
+    align-content: start;
+    padding-top: 4px;
+  }
+  .landing-approval-list .landing-location-meta > span,
+  .landing-approval-list .landing-player-nickname {
+    font: 12px/1.2 STSong, SimSun, serif;
+    font-weight: 700;
+  }
+  .landing-location-meta .landing-player-nickname {
+    margin-top: 8px;
+  }
+  .landing-location-meta .landing-player-nickname::before { position: static; }
+}
+
+@media (orientation: landscape) and (max-height: 560px) and (max-width: 899px) {
+  :root { --mobile-function-bottom-space: calc(58px + env(safe-area-inset-bottom)); }
+
+  .modal-backdrop .landing-action-sheet {
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+  .modal-backdrop .landing-action-sheet .modal-heading { min-height: 38px; }
+  .modal-backdrop .landing-action-sheet .sheet-copy {
+    margin: 2px 0;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .modal-backdrop .landing-action-sheet > .action-sheet-content { overflow: visible; }
+  .modal-backdrop .landing-action-sheet .landing-property-picker {
+    width: calc(100% + 32px);
+    margin-inline: -16px;
+    padding-inline: 16px;
+    overflow: hidden;
+    gap: 6px;
+  }
+  .modal-backdrop .landing-action-sheet .landing-property-owner-filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .modal-backdrop .landing-action-sheet .landing-owner-filter { flex: 0 0 auto; }
+  .modal-backdrop .landing-action-sheet .landing-property-grid {
+    width: calc(100% + 32px);
+    margin: 0 -16px 6px;
+    padding: 6px 22px;
+    border-block: 2px solid #24211f;
+  }
+}

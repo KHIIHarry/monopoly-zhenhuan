@@ -4,6 +4,23 @@ import { describe, expect, test } from 'vitest';
 
 const stylesheetUrl = new URL('./globals.css', import.meta.url);
 
+function extractMediaBlock(stylesheet: string, header: string) {
+  const start = stylesheet.lastIndexOf(header);
+  if (start < 0) throw new Error(`Missing CSS media block: ${header}`);
+  const openingBrace = stylesheet.indexOf('{', start + header.length);
+  if (openingBrace < 0) throw new Error(`Missing opening brace for CSS media block: ${header}`);
+
+  let depth = 0;
+  for (let index = openingBrace; index < stylesheet.length; index += 1) {
+    if (stylesheet[index] === '{') depth += 1;
+    if (stylesheet[index] !== '}') continue;
+    depth -= 1;
+    if (depth === 0) return stylesheet.slice(start, index + 1);
+  }
+
+  throw new Error(`Missing closing brace for CSS media block: ${header}`);
+}
+
 describe('profile device controls', () => {
   test('separates the logout-others action from the device list', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
@@ -171,5 +188,91 @@ describe('manual refresh feedback', () => {
     expect(stylesheet).toMatch(
       /@keyframes\s+refresh-two-turns\s*\{\s*to\s*\{[^}]*transform:\s*rotate\(720deg\);/s,
     );
+  });
+});
+
+describe('mobile landing selection sheet', () => {
+  test('uses full-bleed solid dividers without changing the property-card gap', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const mobileStyles = extractMediaBlock(
+      stylesheet,
+      '@media (max-width: 899px)',
+    );
+    const gridRule = mobileStyles.match(
+      /\.modal-backdrop \.landing-action-sheet \.landing-property-grid\s*\{([^}]*)\}/,
+    )?.[1];
+
+    expect(gridRule).toMatch(/width:\s*calc\(100% \+ 32px\);/);
+    expect(gridRule).toMatch(/margin:\s*0 -16px 24px;/);
+    expect(gridRule).toMatch(/padding:\s*16px 22px;/);
+    expect(gridRule).toMatch(/border-block:\s*2px solid #24211f;/);
+    expect(mobileStyles).toMatch(
+      /\.modal-backdrop \.landing-action-sheet > \.action-sheet-content,\s*\.modal-backdrop \.landing-action-sheet \.landing-property-picker\s*\{\s*overflow:\s*visible;\s*\}/,
+    );
+    expect(gridRule).not.toMatch(/gap:\s*\d+px;/);
+    expect(mobileStyles).not.toMatch(
+      /\.modal-backdrop \.landing-action-sheet \.landing-property-grid\s*\{[^}]*gap:\s*\d+px;[^}]*\}/s,
+    );
+  });
+
+  test('keeps portrait controls above the real navigation and leaves tablet cards content-sized', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const mobileStyles = extractMediaBlock(
+      stylesheet,
+      '@media (max-width: 899px)',
+    );
+
+    expect(mobileStyles).toMatch(
+      /:root\s*\{\s*--mobile-function-bottom-space:\s*calc\(66px \+ env\(safe-area-inset-bottom\)\);\s*\}/,
+    );
+    expect(mobileStyles).not.toMatch(
+      /\.modal-backdrop \.landing-action-sheet \.property-selected-mark\s*\{[^}]*bottom:\s*12px;/,
+    );
+    expect(mobileStyles).not.toMatch(
+      /\.modal-backdrop \.landing-action-sheet \.landing-property-card(?:\s*,|\s*\{)[^}]*height:\s*174px;/s,
+    );
+    expect(mobileStyles).not.toMatch(
+      /\.landing-location-meta \.landing-player-nickname\s*\{[^}]*white-space:\s*nowrap;/,
+    );
+  });
+
+  test('keeps short landscape filters on one scrollable row above a full-bleed property grid', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const landscapeStyles = extractMediaBlock(
+      stylesheet,
+      '@media (orientation: landscape) and (max-height: 560px) and (max-width: 899px)',
+    );
+    const pickerRule = landscapeStyles.match(
+      /\.modal-backdrop \.landing-action-sheet \.landing-property-picker\s*\{([^}]*)\}/,
+    )?.[1];
+    const filterRule = landscapeStyles.match(
+      /\.modal-backdrop \.landing-action-sheet \.landing-property-owner-filters\s*\{([^}]*)\}/,
+    )?.[1];
+    const ownerFilterRule = landscapeStyles.match(
+      /\.modal-backdrop \.landing-action-sheet \.landing-owner-filter\s*\{([^}]*)\}/,
+    )?.[1];
+    const gridRule = landscapeStyles.match(
+      /\.modal-backdrop \.landing-action-sheet \.landing-property-grid\s*\{([^}]*)\}/,
+    )?.[1];
+
+    expect(landscapeStyles).toMatch(
+      /--mobile-function-bottom-space:\s*calc\(58px \+ env\(safe-area-inset-bottom\)\);/,
+    );
+    expect(landscapeStyles).toMatch(
+      /\.modal-backdrop \.landing-action-sheet > \.action-sheet-content\s*\{\s*overflow:\s*visible;\s*\}/,
+    );
+    expect(pickerRule).toMatch(/width:\s*calc\(100% \+ 32px\);/);
+    expect(pickerRule).toMatch(/margin-inline:\s*-16px;/);
+    expect(pickerRule).toMatch(/padding-inline:\s*16px;/);
+    expect(pickerRule).toMatch(/overflow:\s*hidden;/);
+    expect(pickerRule).toMatch(/gap:\s*6px;/);
+    expect(filterRule).toMatch(/flex-wrap:\s*nowrap;/);
+    expect(filterRule).toMatch(/overflow-x:\s*auto;/);
+    expect(filterRule).toMatch(/overflow-y:\s*hidden;/);
+    expect(ownerFilterRule).toMatch(/flex:\s*0 0 auto;/);
+    expect(gridRule).toMatch(/width:\s*calc\(100% \+ 32px\);/);
+    expect(gridRule).toMatch(/margin:\s*0 -16px 6px;/);
+    expect(gridRule).toMatch(/padding:\s*6px 22px;/);
+    expect(gridRule).toMatch(/border-block:\s*2px solid #24211f;/);
   });
 });

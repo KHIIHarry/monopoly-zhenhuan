@@ -246,7 +246,7 @@ test('settlement preview blocks, exact confirmation finishes, and immutable deta
   ]);
 });
 
-test('landing cards search, select a purchased property, and preserve the declaration flow', async ({ page }) => {
+test('landing cards search, select a purchased property, and preserve the declaration flow', async ({ page }, testInfo) => {
   const properties = [
     { name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800, purchasePrice: 1600, build: 1000, buildingSell: 600, tolls: [300, 700, 1800, 5000, 7000, 9000] },
     { name: '景仁宫', ownerId: 'player-2', level: 2, mortgaged: true, mortgage: 1500, purchasePrice: 3000, build: 2000, buildingSell: 1200, tolls: [800, 2000, 3900, 9000, 11000, 13000] }
@@ -270,7 +270,17 @@ test('landing cards search, select a purchased property, and preserve the declar
   await page.getByRole('button', { name: '声明落点' }).click();
   const landingDialog = page.getByRole('dialog', { name: '声明实体落点' });
   await expect(landingDialog.getByText('请选择棋子精确停留的地产。系统不会追踪棋盘位置。')).toBeVisible();
-  await expect(landingDialog.getByRole('button', { name: '确认落点' })).toBeVisible();
+  const confirmLandingButton = landingDialog.getByRole('button', { name: '确认落点' });
+  await expect(confirmLandingButton).toBeVisible();
+  if (!testInfo.project.name.startsWith('desktop-')) {
+    const [confirmBox, navigationBox] = await Promise.all([
+      confirmLandingButton.boundingBox(),
+      page.locator('nav[aria-label="工作台导航"]').boundingBox(),
+    ]);
+    expect(confirmBox).not.toBeNull();
+    expect(navigationBox).not.toBeNull();
+    expect(confirmBox!.y + confirmBox!.height).toBeLessThanOrEqual(navigationBox!.y + 1);
+  }
   const unowned = landingDialog.getByRole('button', { name: /碎玉轩.*无主/ });
   await expect(unowned.getByText('0 两', { exact: true })).toBeVisible();
   const landingSearch = landingDialog.getByRole('searchbox', { name: '搜索声明落点' });
@@ -292,6 +302,181 @@ test('landing cards search, select a purchased property, and preserve the declar
   await expect(pendingStatus).not.toHaveClass(/landing-status-confirmed/);
   await expect(pendingStatus).toHaveCSS('background-color', 'rgb(232, 240, 242)');
   expect(await page.evaluate(() => [...Object.entries(localStorage), ...Object.entries(sessionStorage)].filter(([key, value]) => /auth|token|identity|membership|playerId|roomId|zhenhuan-landings|room-1|player-1/i.test(`${key}:${value}`)))).toEqual([]);
+});
+
+test('landing cards switch from 174 to 220 pixels above the phone breakpoint', async ({ page }) => {
+  const properties = [{
+    name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800,
+    purchasePrice: 1_600, build: 1_000, buildingSell: 600, tolls: [300, 700, 1_800, 5_000, 7_000, 9_000],
+  }];
+
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, properties },
+  }));
+
+  await page.setViewportSize({ width: 430, height: 800 });
+  await openRoom(page);
+  await page.getByRole('button', { name: '声明落点' }).click();
+  const card = page.getByRole('dialog', { name: '声明实体落点' }).getByRole('button', { name: /碎玉轩/ });
+  await expect(card).toBeVisible();
+
+  for (const viewport of [{ width: 430, height: 800 }, { width: 431, height: 800 }]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(() => card.evaluate((element) => element.getBoundingClientRect().height)).toBe(
+      viewport.width === 430 ? 174 : 220,
+    );
+  }
+});
+
+test('landing cards keep long owner nicknames inside tablet card heights', async ({ page }) => {
+  const properties = [{
+    name: '景仁宫', ownerId: 'player-2', level: 2, mortgaged: false, mortgage: 1_500,
+    purchasePrice: 3_000, build: 2_000, buildingSell: 1_200, tolls: [800, 2_000, 3_900, 9_000, 11_000, 13_000],
+  }];
+  const players = [
+    ...snapshot.players,
+    { id: 'player-2', name: '钮祜禄甄嬛并临时代理六宫事务超长昵称', characterId: 'yixiu', balance: 5_000, remainingSkipTurns: 0 },
+  ];
+
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, players, properties },
+  }));
+
+  await page.setViewportSize({ width: 431, height: 800 });
+  await openRoom(page);
+  await page.getByRole('button', { name: '声明落点' }).click();
+  const card = page.getByRole('dialog', { name: '声明实体落点' }).getByRole('button', { name: /景仁宫/ });
+  await expect(card).toBeVisible();
+
+  for (const viewport of [{ width: 431, height: 800 }, { width: 700, height: 800 }]) {
+    await page.setViewportSize(viewport);
+    const geometry = await card.evaluate((element) => {
+      const cardElement = element as HTMLElement;
+      const nickname = cardElement.querySelector<HTMLElement>('.property-owner-nickname');
+      if (!nickname) throw new Error('Missing property owner nickname');
+      const cardRect = cardElement.getBoundingClientRect();
+      const nicknameRect = nickname.getBoundingClientRect();
+      return {
+        cardHeight: cardRect.height,
+        clientHeight: cardElement.clientHeight,
+        scrollHeight: cardElement.scrollHeight,
+        cardBottom: cardRect.bottom,
+        nicknameBottom: nicknameRect.bottom,
+      };
+    });
+
+    expect(geometry.cardHeight, JSON.stringify({ viewport, geometry })).toBe(220);
+    expect(geometry.scrollHeight, JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(geometry.clientHeight);
+    expect(geometry.nicknameBottom, JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(geometry.cardBottom);
+  }
+});
+
+test('short landscape landing sheets keep the scroll region above confirmation', async ({ page }) => {
+  const players = [
+    ...snapshot.players,
+    { id: 'player-2', name: '宜修', characterId: 'yixiu', balance: 5_000, remainingSkipTurns: 0 },
+    { id: 'player-3', name: '年世兰', characterId: 'huashifei', balance: 5_000, remainingSkipTurns: 0 },
+    { id: 'player-4', name: '沈眉庄', characterId: 'meizhuang', balance: 5_000, remainingSkipTurns: 0 },
+    { id: 'player-5', name: '安陵容', characterId: 'anlingrong', balance: 5_000, remainingSkipTurns: 0 },
+  ];
+  const properties = [
+    { name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800, purchasePrice: 1_600, build: 1_000, buildingSell: 600, tolls: [300, 700, 1_800, 5_000, 7_000, 9_000] },
+    { name: '景仁宫', ownerId: null, level: 0, mortgaged: false, mortgage: 1_500, purchasePrice: 3_000, build: 2_000, buildingSell: 1_200, tolls: [800, 2_000, 3_900, 9_000, 11_000, 13_000] },
+  ];
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, players, properties },
+  }));
+
+  await page.setViewportSize({ width: 667, height: 375 });
+  await openRoom(page);
+  await page.getByRole('button', { name: '声明落点' }).click();
+
+  const measure = () => page.getByRole('dialog', { name: '声明实体落点' }).evaluate((dialog) => {
+    const filters = dialog.querySelector<HTMLElement>('.landing-property-owner-filters');
+    const grid = dialog.querySelector<HTMLElement>('.landing-property-grid');
+    const confirm = dialog.querySelector<HTMLElement>('.landing-confirm');
+    const navigation = document.querySelector<HTMLElement>('nav[aria-label="工作台导航"]');
+    if (!filters || !grid || !confirm || !navigation) throw new Error('Missing landscape landing controls');
+    const dialogRect = dialog.getBoundingClientRect();
+    const filtersRect = filters.getBoundingClientRect();
+    const gridRect = grid.getBoundingClientRect();
+    const confirmRect = confirm.getBoundingClientRect();
+    const navigationRect = navigation.getBoundingClientRect();
+    const gridStyle = getComputedStyle(grid);
+    const filterRows = new Set(
+      [...filters.querySelectorAll('button')].map((button) => Math.round(button.getBoundingClientRect().top)),
+    );
+    return {
+      dialogLeft: dialogRect.left,
+      dialogRight: dialogRect.right,
+      filtersBottom: filtersRect.bottom,
+      filtersClientWidth: filters.clientWidth,
+      filtersScrollWidth: filters.scrollWidth,
+      filterRowCount: filterRows.size,
+      gridLeft: gridRect.left,
+      gridRight: gridRect.right,
+      gridBottom: gridRect.bottom,
+      gridClientHeight: grid.clientHeight,
+      gridScrollHeight: grid.scrollHeight,
+      confirmTop: confirmRect.top,
+      confirmBottom: confirmRect.bottom,
+      navigationTop: navigationRect.top,
+      gridBorderTopStyle: gridStyle.borderTopStyle,
+      gridBorderBottomStyle: gridStyle.borderBottomStyle,
+      gridBorderTopWidth: gridStyle.borderTopWidth,
+      gridBorderBottomWidth: gridStyle.borderBottomWidth,
+    };
+  });
+
+  for (const viewport of [{ width: 667, height: 375 }, { width: 360, height: 350 }]) {
+    await page.setViewportSize(viewport);
+    const geometry = await measure();
+    expect(geometry.filtersBottom, JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(geometry.confirmTop);
+    expect(geometry.filterRowCount, JSON.stringify({ viewport, geometry })).toBe(1);
+    expect(Math.abs(geometry.gridLeft - geometry.dialogLeft), JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.gridRight - geometry.dialogRight), JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(1);
+    expect(geometry.gridBorderTopStyle, JSON.stringify({ viewport, geometry })).toBe('solid');
+    expect(geometry.gridBorderBottomStyle, JSON.stringify({ viewport, geometry })).toBe('solid');
+    expect(geometry.gridBorderTopWidth, JSON.stringify({ viewport, geometry })).toBe('2px');
+    expect(geometry.gridBorderBottomWidth, JSON.stringify({ viewport, geometry })).toBe('2px');
+    if (viewport.width === 360) {
+      expect(geometry.filtersScrollWidth, JSON.stringify({ viewport, geometry })).toBeGreaterThan(geometry.filtersClientWidth);
+      const scrollGeometry = await page.getByRole('dialog', { name: '声明实体落点' }).evaluate((dialog) => {
+        const filters = dialog.querySelector<HTMLElement>('.landing-property-owner-filters');
+        const lastFilter = filters?.querySelector<HTMLElement>('button:last-child');
+        if (!filters || !lastFilter) throw new Error('Missing landscape owner filters');
+        filters.scrollLeft = filters.scrollWidth;
+        const filtersRect = filters.getBoundingClientRect();
+        const lastFilterRect = lastFilter.getBoundingClientRect();
+        return {
+          scrollLeft: filters.scrollLeft,
+          filtersLeft: filtersRect.left,
+          filtersRight: filtersRect.right,
+          lastFilterLeft: lastFilterRect.left,
+          lastFilterRight: lastFilterRect.right,
+        };
+      });
+      expect(scrollGeometry.scrollLeft, JSON.stringify({ viewport, scrollGeometry })).toBeGreaterThan(0);
+      expect(scrollGeometry.lastFilterLeft, JSON.stringify({ viewport, scrollGeometry })).toBeGreaterThanOrEqual(scrollGeometry.filtersLeft - 1);
+      expect(scrollGeometry.lastFilterRight, JSON.stringify({ viewport, scrollGeometry })).toBeLessThanOrEqual(scrollGeometry.filtersRight + 1);
+    }
+    expect(geometry.gridBottom, JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(geometry.confirmTop);
+    expect(geometry.gridClientHeight, JSON.stringify({ viewport, geometry })).toBeGreaterThan(0);
+    expect(geometry.gridScrollHeight, JSON.stringify({ viewport, geometry })).toBeGreaterThan(geometry.gridClientHeight);
+    expect(geometry.confirmBottom, JSON.stringify({ viewport, geometry })).toBeLessThanOrEqual(geometry.navigationTop + 1);
+  }
 });
 
 test('physical landing survives a full page reload without browser storage', async ({ page }) => {
@@ -460,8 +645,9 @@ test('landing approval metadata aligns with the existing bank payment format', a
 });
 
 test('landing approval metadata stays aligned across different player nickname lengths', async ({ page }) => {
+  await page.setViewportSize({ width: 700, height: 800 });
   const players = [
-    { id: 'player-1', name: 'Harry', characterId: 'zhenhuan', balance: 5_000, remainingSkipTurns: 0 },
+    { id: 'player-1', name: '钮祜禄甄嬛并临时代理六宫事务超长昵称', characterId: 'zhenhuan', balance: 5_000, remainingSkipTurns: 0 },
     { id: 'player-2', name: '小行老师', characterId: 'yixiu', balance: 5_000, remainingSkipTurns: 0 },
     { id: 'player-3', name: '安陵容', characterId: 'anlingrong', balance: 5_000, remainingSkipTurns: 0 },
   ];
@@ -489,18 +675,37 @@ test('landing approval metadata stays aligned across different player nickname l
   const geometry = await page.locator('.landing-location-meta').evaluateAll((metas) => metas.map((meta) => {
     const article = meta.closest<HTMLElement>('article');
     const icon = meta.querySelector<HTMLElement>('.request-icon');
+    const nickname = meta.querySelector<HTMLElement>('.landing-player-nickname');
     const title = article?.querySelector<HTMLElement>('.landing-approval-title-line');
-    if (!article || !icon || !title) throw new Error('Missing landing approval layout');
+    const details = article?.querySelector<HTMLElement>('.landing-approval-details');
+    if (!article || !icon || !nickname || !title || !details) throw new Error('Missing landing approval layout');
     const articleRect = article.getBoundingClientRect();
+    const metaRect = meta.getBoundingClientRect();
+    const nicknameRect = nickname.getBoundingClientRect();
     return {
       iconOffset: icon.getBoundingClientRect().left - articleRect.left,
       titleOffset: title.getBoundingClientRect().left - articleRect.left,
+      metaLeft: metaRect.left,
+      metaRight: metaRect.right,
+      metaWidth: metaRect.width,
+      nicknameLeft: nicknameRect.left,
+      nicknameRight: nicknameRect.right,
+      nicknameClientWidth: nickname.clientWidth,
+      nicknameScrollWidth: nickname.scrollWidth,
+      detailsLeft: details.getBoundingClientRect().left,
     };
   }));
 
   expect(geometry).toHaveLength(2);
   expect(Math.abs(geometry[0]!.iconOffset - geometry[1]!.iconOffset), JSON.stringify(geometry)).toBeLessThanOrEqual(1);
   expect(Math.abs(geometry[0]!.titleOffset - geometry[1]!.titleOffset), JSON.stringify(geometry)).toBeLessThanOrEqual(1);
+  for (const item of geometry) {
+    expect(Math.abs(item.metaWidth - 76), JSON.stringify(item)).toBeLessThanOrEqual(1);
+    expect(item.nicknameLeft, JSON.stringify(item)).toBeGreaterThanOrEqual(item.metaLeft - 1);
+    expect(item.nicknameRight, JSON.stringify(item)).toBeLessThanOrEqual(item.metaRight + 1);
+    expect(item.nicknameRight, JSON.stringify(item)).toBeLessThanOrEqual(item.detailsLeft);
+    expect(item.nicknameScrollWidth, JSON.stringify(item)).toBeLessThanOrEqual(item.nicknameClientWidth);
+  }
 });
 
 test('property actions use only the confirmed landing and never offer another property as a target', async ({ page }) => {
