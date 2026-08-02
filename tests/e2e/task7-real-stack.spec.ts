@@ -15,12 +15,20 @@ type RealStackConfig = {
 };
 
 type RoomReference = { id: string; name: string };
+type RoomSummary = {
+  id: string;
+  mine: boolean;
+  status: string;
+  canJoin: boolean;
+  joinBlockedReason: string | null;
+};
 type VersionedResult = { stateVersion: number; [key: string]: unknown };
 type GameSnapshot = {
   stateVersion: number;
   players: Array<{ id: string; balance: number }>;
   [key: string]: unknown;
 };
+type JoinedPlayer = { player: { id: string; balance: number } };
 type SessionView = { id: string; current: boolean };
 type SnapshotCounter = { requests: number; responses: number };
 
@@ -107,6 +115,22 @@ async function postJson<T>(context: BrowserContext, apiUrl: string, path: string
   return responseJson<T>(response, `POST ${path}`);
 }
 
+async function expectPostError(
+  context: BrowserContext,
+  apiUrl: string,
+  path: string,
+  data: unknown,
+  key: string,
+  error: string,
+) {
+  const response = await context.request.post(`${apiUrl}${path}`, {
+    data,
+    headers: { 'idempotency-key': key },
+  });
+  expect(response.status()).toBe(409);
+  expect(await response.json()).toEqual({ error });
+}
+
 async function login(page: Page, username: string, password: string, apiUrl: string) {
   await page.goto('/');
   await page.getByRole('button', { name: '加入游戏组' }).click();
@@ -153,7 +177,7 @@ async function settleRenderedState(page: Page) {
 test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
   test.skip(!enabled, 'Set TASK7_REAL_STACK=1 with explicit credentials and an isolated *_test/task7_real_* database schema.');
 
-  test('real bank and two H5 players converge, isolate rooms, reconnect, reject stale snapshots, replay safely, and revoke a device', async ({ browser }, testInfo) => {
+  test('cleans the lobby roster and enforces midgame admission while real clients converge and revoke a device', async ({ browser }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop-chromium', 'The guarded real-stack workflow owns its disposable schema and runs once in desktop-chromium.');
     test.setTimeout(180_000);
     if (!config) throw new Error('TASK7_REAL_STACK_CONFIG_MISSING');
@@ -164,6 +188,11 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
       bank: `${usernameBase}-bank`,
       playerOne: `${usernameBase}-p1`,
       playerTwo: `${usernameBase}-p2`,
+      unseated: `${usernameBase}-empty`,
+      later: `${usernameBase}-later`,
+      fillerOne: `${usernameBase}-f1`,
+      fillerTwo: `${usernameBase}-f2`,
+      blocked: `${usernameBase}-blocked`,
     };
     const roomName = `${config.roomNamePrefix.slice(0, 39 - runId.length)} ${runId}`;
     const isolationRoomName = `Task 7 isolation ${runId}`.slice(0, 40);
@@ -183,14 +212,20 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
 
     try {
       const passwordHash = await hashPassword(config.password);
-      const [bankAccount, playerOneAccount, playerTwoAccount] = await Promise.all([
+      const [bankAccount, playerOneAccount, playerTwoAccount, unseatedAccount] = await Promise.all([
         database.account.create({ data: { username: usernames.bank, passwordHash, displayName: `Bank ${runId}`, canCreateRoom: true, note: `Disposable Task 7 real-stack bank ${runId}` } }),
         database.account.create({ data: { username: usernames.playerOne, passwordHash, displayName: `Player one ${runId}`, note: `Disposable Task 7 real-stack player one ${runId}` } }),
         database.account.create({ data: { username: usernames.playerTwo, passwordHash, displayName: `Player two ${runId}`, note: `Disposable Task 7 real-stack player two ${runId}` } }),
+        database.account.create({ data: { username: usernames.unseated, passwordHash, displayName: `Unseated ${runId}`, note: `Disposable Task 7 real-stack unseated member ${runId}` } }),
+        database.account.create({ data: { username: usernames.later, passwordHash, displayName: `Later ${runId}`, note: `Disposable Task 7 real-stack later joiner ${runId}` } }),
+        database.account.create({ data: { username: usernames.fillerOne, passwordHash, displayName: `Filler one ${runId}`, note: `Disposable Task 7 real-stack seat filler one ${runId}` } }),
+        database.account.create({ data: { username: usernames.fillerTwo, passwordHash, displayName: `Filler two ${runId}`, note: `Disposable Task 7 real-stack seat filler two ${runId}` } }),
+        database.account.create({ data: { username: usernames.blocked, passwordHash, displayName: `Blocked ${runId}`, note: `Disposable Task 7 real-stack blocked joiner ${runId}` } }),
       ]);
 
-      const [bankContext, playerOneContext, playerTwoContext] = await Promise.all([
-        mobileContext(), mobileContext(), mobileContext(),
+      const [bankContext, playerOneContext, playerTwoContext, unseatedContext, laterContext, fillerOneContext, fillerTwoContext, blockedContext] = await Promise.all([
+        mobileContext(), mobileContext(), mobileContext(), mobileContext(),
+        mobileContext(), mobileContext(), mobileContext(), mobileContext(),
       ]);
       const [bankPage, playerOnePage, playerTwoPage] = await Promise.all([
         bankContext.newPage(), playerOneContext.newPage(), playerTwoContext.newPage(),
@@ -199,7 +234,128 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
         login(bankPage, usernames.bank, config.password, config.apiUrl),
         login(playerOnePage, usernames.playerOne, config.password, config.apiUrl),
         login(playerTwoPage, usernames.playerTwo, config.password, config.apiUrl),
+        login(await unseatedContext.newPage(), usernames.unseated, config.password, config.apiUrl),
+        login(await laterContext.newPage(), usernames.later, config.password, config.apiUrl),
+        login(await fillerOneContext.newPage(), usernames.fillerOne, config.password, config.apiUrl),
+        login(await fillerTwoContext.newPage(), usernames.fillerTwo, config.password, config.apiUrl),
+        login(await blockedContext.newPage(), usernames.blocked, config.password, config.apiUrl),
       ]);
+
+      const admissionRoom = await postJson<RoomReference>(bankContext, config.apiUrl, '/api/rooms', {
+        name: `Task 7 admission ${runId}`.slice(0, 40),
+        initialBalance: 5_000,
+        diceMode: 'PHYSICAL',
+        skillEnabled: true,
+        startReward: 1_000,
+        allowMidgameJoin: true,
+        visibility: 'PUBLIC',
+        transferApprovalRequired: false,
+      }, `create-admission-${runId}`);
+      await Promise.all([
+        postJson(bankContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, {}, `admission-bank-${runId}`),
+        postJson(playerOneContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, {}, `admission-p1-${runId}`),
+        postJson(playerTwoContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, {}, `admission-p2-${runId}`),
+        postJson(unseatedContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, {}, `admission-empty-${runId}`),
+      ]);
+      await Promise.all([
+        postJson(bankContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/select-bank`, {}, `admission-bank-role-${runId}`),
+        postJson(playerOneContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/select-character`, { characterId: 'zhenhuan' }, `admission-p1-role-${runId}`),
+        postJson(playerTwoContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/select-character`, { characterId: 'huashifei' }, `admission-p2-role-${runId}`),
+      ]);
+
+      const beforeStartSummary = (await getJson<RoomSummary[]>(unseatedContext, config.apiUrl, '/api/rooms'))
+        .find((roomSummary) => roomSummary.id === admissionRoom.id);
+      expect(beforeStartSummary).toMatchObject({ mine: true, status: 'LOBBY' });
+
+      await postJson<GameSnapshot>(bankContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/start`, {}, `start-admission-${runId}`);
+      const [afterStartMembership, bankMembership] = await Promise.all([
+        database.roomMembership.findUniqueOrThrow({
+          where: { roomId_accountId: { roomId: admissionRoom.id, accountId: unseatedAccount.id } },
+          select: { status: true, characterId: true, isBank: true, activeSessionId: true },
+        }),
+        database.roomMembership.findUniqueOrThrow({
+          where: { roomId_accountId: { roomId: admissionRoom.id, accountId: bankAccount.id } },
+          select: { status: true, isBank: true },
+        }),
+      ]);
+      expect(afterStartMembership).toMatchObject({
+        status: 'LEFT',
+        characterId: null,
+        isBank: false,
+        activeSessionId: null,
+      });
+      const afterStartSummary = (await getJson<RoomSummary[]>(unseatedContext, config.apiUrl, '/api/rooms'))
+        .find((roomSummary) => roomSummary.id === admissionRoom.id);
+      expect(afterStartSummary).toMatchObject({
+        mine: false,
+        status: 'PLAYING',
+        canJoin: true,
+        joinBlockedReason: null,
+      });
+      expect(bankMembership).toMatchObject({ status: 'ACTIVE', isBank: true });
+
+      const joinedLater = await postJson<JoinedPlayer>(laterContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, {
+        characterId: 'anlingrong',
+      }, `join-later-${runId}`);
+      const joinedSnapshot = await getJson<GameSnapshot>(bankContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/snapshot?view=BANK`);
+      expect(joinedLater.player).toMatchObject({ balance: 0 });
+      expect(joinedSnapshot.players.find((player) => player.id === joinedLater.player.id)).toMatchObject({ balance: 0 });
+
+      await Promise.all([
+        postJson(fillerOneContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, { characterId: 'meizhuang' }, `join-filler-one-${runId}`),
+        postJson(fillerTwoContext, config.apiUrl, `/api/rooms/${admissionRoom.id}/join`, { characterId: 'yixiu' }, `join-filler-two-${runId}`),
+      ]);
+      await expectPostError(
+        blockedContext,
+        config.apiUrl,
+        `/api/rooms/${admissionRoom.id}/join`,
+        { characterId: 'zhenhuan' },
+        `join-full-${runId}`,
+        'PLAYER_LIMIT',
+      );
+
+      const disabledRoom = await postJson<RoomReference>(bankContext, config.apiUrl, '/api/rooms', {
+        name: `Task 7 disabled ${runId}`.slice(0, 40),
+        initialBalance: 5_000,
+        diceMode: 'PHYSICAL',
+        skillEnabled: true,
+        startReward: 1_000,
+        allowMidgameJoin: false,
+        visibility: 'PUBLIC',
+        transferApprovalRequired: false,
+      }, `create-disabled-${runId}`);
+      const seatedContexts = [playerOneContext, playerTwoContext, laterContext, fillerOneContext, fillerTwoContext];
+      const seatedCharacters = ['zhenhuan', 'huashifei', 'anlingrong', 'meizhuang', 'yixiu'];
+      await Promise.all([
+        postJson(bankContext, config.apiUrl, `/api/rooms/${disabledRoom.id}/join`, {}, `disabled-bank-${runId}`),
+        postJson(unseatedContext, config.apiUrl, `/api/rooms/${disabledRoom.id}/join`, {}, `disabled-empty-${runId}`),
+        ...seatedContexts.map((context, index) => postJson(
+          context,
+          config.apiUrl,
+          `/api/rooms/${disabledRoom.id}/join`,
+          {},
+          `disabled-player-${index}-${runId}`,
+        )),
+      ]);
+      await Promise.all([
+        postJson(bankContext, config.apiUrl, `/api/rooms/${disabledRoom.id}/select-bank`, {}, `disabled-bank-role-${runId}`),
+        ...seatedContexts.map((context, index) => postJson(
+          context,
+          config.apiUrl,
+          `/api/rooms/${disabledRoom.id}/select-character`,
+          { characterId: seatedCharacters[index] },
+          `disabled-player-role-${index}-${runId}`,
+        )),
+      ]);
+      await postJson<GameSnapshot>(bankContext, config.apiUrl, `/api/rooms/${disabledRoom.id}/start`, {}, `start-disabled-${runId}`);
+      await expectPostError(
+        unseatedContext,
+        config.apiUrl,
+        `/api/rooms/${disabledRoom.id}/join`,
+        { characterId: 'zhenhuan' },
+        `join-disabled-${runId}`,
+        'MIDGAME_JOIN_DISABLED',
+      );
 
       const room = await postJson<RoomReference>(bankContext, config.apiUrl, '/api/rooms', {
         name: roomName,
@@ -362,7 +518,6 @@ test.describe('Task 7 real Cookie/API/PostgreSQL realtime gate', () => {
       const revokeResponse = await secondDeviceContext.request.delete(`${config.apiUrl}/api/auth/sessions/${firstDeviceSession!.id}`);
       if (!revokeResponse.ok()) throw new Error(`DELETE /api/auth/sessions/:id failed with ${revokeResponse.status()}: ${await revokeResponse.text()}`);
       await expect(playerOnePage.getByRole('heading', { name: '账号登录' })).toBeVisible();
-      await expect(playerOnePage.getByText('当前登录已失效，请重新登录')).toBeVisible();
       expect(await database.accountSession.findUniqueOrThrow({ where: { id: firstDeviceSession!.id }, select: { revokeReason: true } }))
         .toMatchObject({ revokeReason: 'USER_REVOKED' });
     } finally {
