@@ -239,6 +239,33 @@ describe('authoritative transfer feedback', () => {
 });
 
 describe('room completion regressions', () => {
+  test('reconciles members removed when a room starts without changing generic subscription recovery', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const handler = component.slice(
+      component.indexOf('const onRoomSubscriptionLost'),
+      component.indexOf('const onRoomToast'),
+    );
+
+    expect(component).toMatch(/const ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE =\s*"游戏已开始，你因未选择人物或银行身份已退出房间";/);
+    expect(handler).toContain('{ roomId?: unknown; reason?: unknown }');
+    expect(handler).toMatch(/notification\?\.reason === "ROOM_STARTED_WITHOUT_CAPABILITY"[\s\S]*?clearRoomState\(\);[\s\S]*?go\("\/rooms\?reason=room-started-without-capability", true\);[\s\S]*?loadRooms\(\)/);
+    expect(handler).toMatch(/snapshotRequestGeneration\.current \+= 1;\s*refresh\(\);/);
+  });
+
+  test('keys route errors and admin keyboard focus to the target URL', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).not.toMatch(/let pendingRouteError|let pendingAdminTabFocus|let suppressNextRouteHeadingFocus/);
+    expect(component).toMatch(/page === "login" && reason === "session-invalid"[\s\S]*?SESSION_INVALID_MESSAGE/);
+    expect(component).toMatch(/page === "rooms" && reason === "room-started-without-capability"[\s\S]*?ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE/);
+    expect(component).toMatch(/setError\(routeError\);[\s\S]*?window\.history\.replaceState\(\s*window\.history\.state,\s*"",\s*window\.location\.pathname,?\s*\)/);
+    expect(component).toContain('go("/login?reason=session-invalid", true);');
+    expect(component).toMatch(/screen === "ADMIN"[\s\S]*?return;/);
+    expect(component).toMatch(/focusAdminTab[\s\S]*?new URLSearchParams\(window\.location\.search\)\.get\("focus"\) === "tab"[\s\S]*?window\.requestAnimationFrame[\s\S]*?admin-tab-\$\{initialTab\.toLowerCase\(\)\}[\s\S]*?window\.history\.replaceState\(\s*window\.history\.state,\s*"",\s*window\.location\.pathname,?\s*\)/);
+    expect(component).toMatch(/onTab\(next, focus\)/);
+    expect(component).toMatch(/focus \? `\$\{path\}\?focus=tab` : path/);
+  });
+
   test('keeps finish intent until its authoritative settlement has loaded', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
     const finishRoom = component.slice(
@@ -281,6 +308,38 @@ describe('room completion regressions', () => {
     expect(companionApproval).toContain('companionCashReward');
     expect(companionApproval).toContain('formatMoney(');
     expect(companionApproval).not.toContain('自动奖励 500 两');
+  });
+});
+
+describe('authoritative room admission', () => {
+  test('uses summary admission independently from lifecycle badges and blocked navigation', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('canJoin: boolean;');
+    expect(component).toContain('joinBlockedReason:');
+    expect(component).toContain('availableCharacters: Array<{ id: string; name: string }>');
+    expect(component).toContain('label: "已加入" | "可加入" | "不可加入" | "准备中" | "游戏中" | "已结束";');
+    expect(component).toMatch(/const accessBadge = room\.mine[\s\S]*?room\.canJoin[\s\S]*?label: "不可加入"[\s\S]*?tone: "unavailable"/);
+    expect(component).toMatch(/if \(!room\.mine && !terminalRoom\(room\.status\) && !room\.canJoin\)[\s\S]*?setError\(code \? API_ERROR_MESSAGES\[code\] : "当前无法加入该房间"\);[\s\S]*?return;/);
+  });
+
+  test('submits one join object and refreshes summaries after stale character conflicts', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('type JoinRoomInput = { password?: string; characterId?: string };');
+    expect(component).toContain('onJoin: (input: JoinRoomInput) => void;');
+    expect(component).toContain('room.availableCharacters.map((character) => (');
+    expect(component).toMatch(/body: input,/);
+    expect(component).toMatch(/ROLE_ALREADY_TAKEN[\s\S]*?PLAYER_LIMIT[\s\S]*?loadRooms\(owner\)[\s\S]*?setSelectedRoom\(items\.find\(\(room\) => room\.id === roomId\) \?\? null\)/);
+    expect(component).toContain('selectedRoom.members.map((member) => (');
+  });
+
+  test('uses the exact admission messages', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('MIDGAME_JOIN_DISABLED: "房间已开局，且不允许中途加入。"');
+    expect(component).toContain('PLAYER_LIMIT: "房间人物已满，暂时无法加入。"');
+    expect(component).toContain('ROLE_ALREADY_TAKEN: "所选人物刚刚已被其他玩家选择，请重新选择。"');
   });
 });
 

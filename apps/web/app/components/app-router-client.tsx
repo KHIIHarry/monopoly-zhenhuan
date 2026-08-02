@@ -59,6 +59,9 @@ import {
 } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const SESSION_INVALID_MESSAGE = "当前登录已失效，请重新登录";
+const ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE =
+  "游戏已开始，你因未选择人物或银行身份已退出房间";
 
 const characters = [
   { id: "zhenhuan", name: "钮祜禄·甄嬛" },
@@ -339,11 +342,11 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   SESSION_INVALID: "登录已失效，请重新登录",
   SESSION_LIMIT_REACHED: "当前账号已在2台设备登录",
   ROOM_PASSWORD_INVALID: "房间密码不正确",
+  MIDGAME_JOIN_DISABLED: "房间已开局，且不允许中途加入。",
   ROOM_CREATE_FORBIDDEN: "当前账号没有创建房间权限",
   ROOM_MEMBERSHIP_REQUIRED: "请先加入该房间",
   ROOM_CONTROL_LOST: "该房间已在另一台设备打开",
-  ROLE_ALREADY_TAKEN:
-    "该角色刚刚已被其他玩家选择，当前页面信息可能已过期，请刷新页面后重新加入房间。",
+  ROLE_ALREADY_TAKEN: "所选人物刚刚已被其他玩家选择，请重新选择。",
   BANK_ALREADY_TAKEN: "银行席位刚刚已被其他成员选择，请刷新页面后重试。",
   ACCOUNT_CHARACTER_LIMIT_REACHED:
     "每个账号在同一房间最多选择一名人物；如需更换，请申请角色交换。",
@@ -362,9 +365,8 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   ROOM_NOT_PLAYING: "房间当前不在游戏中",
   ROOM_ENDED: "房间已经结束，不能继续操作",
   MINIMUM_PLAYERS: "至少需要两位玩家才能开局",
-  PLAYER_LIMIT: "房间人数已满，请联系银行确认",
+  PLAYER_LIMIT: "房间人物已满，暂时无法加入。",
   PLAYER_COUNT_OUT_OF_RANGE: "玩家人数不符合开局要求",
-  MIDGAME_JOIN_DISABLED: "房间已开局，不能中途加入",
   CHARACTER_REQUIRED: "请选择人物后再加入",
   CHARACTER_TAKEN: "该人物已被选择，请换一位人物",
   UNKNOWN_CHARACTER: "人物信息无效，请重新选择",
@@ -718,6 +720,13 @@ type RoomSummary = {
   playerLimit: number;
   hasPassword: boolean;
   mine: boolean;
+  canJoin: boolean;
+  joinBlockedReason:
+    | "MIDGAME_JOIN_DISABLED"
+    | "PLAYER_LIMIT"
+    | "ROOM_FINISHED"
+    | null;
+  availableCharacters: Array<{ id: string; name: string }>;
   characterId: string | null;
   myCharacter: string | null;
   isBank: boolean;
@@ -1024,20 +1033,29 @@ const screens: Record<AppPage, Screen> = {
   forbidden: "FORBIDDEN",
 };
 const screenForPage = (page: AppPage): Screen => screens[page];
+const routeErrorForPage = (page: AppPage, reason: string | null) => {
+  if (page === "login" && reason === "session-invalid")
+    return SESSION_INVALID_MESSAGE;
+  if (page === "rooms" && reason === "room-started-without-capability")
+    return ROOM_STARTED_WITHOUT_CAPABILITY_MESSAGE;
+  return null;
+};
 
 const terminalRoom = (status: RoomStatus) =>
   status === "FINISHED" || status === "ENDED" || status === "CLOSED";
 type RoomStatusBadge = {
-  label: "已加入" | "可加入" | "准备中" | "游戏中" | "已结束";
-  tone: "joined" | "joinable" | "lobby" | "playing" | "ended";
+  label: "已加入" | "可加入" | "不可加入" | "准备中" | "游戏中" | "已结束";
+  tone: "joined" | "joinable" | "unavailable" | "lobby" | "playing" | "ended";
 };
 const roomStatusBadges = (room: RoomSummary): RoomStatusBadge[] => {
   if (terminalRoom(room.status)) return [{ label: "已结束", tone: "ended" }];
+  const accessBadge = room.mine
+    ? { label: "已加入" as const, tone: "joined" as const }
+    : room.canJoin
+      ? { label: "可加入" as const, tone: "joinable" as const }
+      : { label: "不可加入" as const, tone: "unavailable" as const };
   return [
-    {
-      label: room.mine ? "已加入" : "可加入",
-      tone: room.mine ? "joined" : "joinable",
-    },
+    accessBadge,
     {
       label: room.status === "PLAYING" ? "游戏中" : "准备中",
       tone: room.status === "PLAYING" ? "playing" : "lobby",
@@ -1136,6 +1154,8 @@ export default function AppRouterClient({
   const activeRoomTransition = useRef<number | null>(null);
   const snapshotRequestGeneration = useRef(0);
   const roomStateVersion = useRef(-1);
+  const sessionInvalidating = useRef(false);
+  const settlementRouteRequest = useRef<string | null>(null);
   const accountSocket = useRef<ReturnType<typeof io> | null>(null);
   const socketRoomSubscription = useRef<string | null>(null);
   const roomInvalidator = useRef<(() => void) | null>(null);
@@ -1178,10 +1198,26 @@ export default function AppRouterClient({
   }, []);
 
   useEffect(() => {
+    const routeError = routeErrorForPage(
+      page,
+      new URLSearchParams(window.location.search).get("reason"),
+    );
+    if (!routeError) return;
+    setError(routeError);
+    if (page === "login") sessionInvalidating.current = false;
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname,
+    );
+  }, [page]);
+
+  useEffect(() => {
     if (!authChecked) return;
     const publicPage =
       page === "home" || page === "login" || page === "forbidden";
     if (!account && !publicPage) {
+      if (sessionInvalidating.current) return;
       go(
         `/login?next=${encodeURIComponent(roomId ? roomPath(page === "player" ? "player" : page === "bank" ? "bank" : page === "settlement" ? "settlement" : page === "finish" ? "finish" : "seats", roomId) : page === "profile" ? "/profile" : page.startsWith("admin") ? "/admin" : "/rooms")}`,
         true,
@@ -1189,6 +1225,7 @@ export default function AppRouterClient({
       return;
     }
     if (!account) return;
+    if (page !== "settlement") settlementRouteRequest.current = null;
     if (page === "rooms") {
       void loadRooms().catch((caught) => void handleFailure(caught));
       return;
@@ -1221,6 +1258,8 @@ export default function AppRouterClient({
       return;
     }
     if (page === "settlement" && roomId) {
+      if (settlementRouteRequest.current === roomId) return;
+      settlementRouteRequest.current = roomId;
       const owner = beginRoomTransition(roomId);
       void runRoomTransition(owner, () => fetchSettlement(owner));
       return;
@@ -1254,6 +1293,7 @@ export default function AppRouterClient({
   }, []);
 
   useEffect(() => {
+    if (screen === "ADMIN") return;
     const heading = document.querySelector("h1");
     if (heading instanceof HTMLElement) {
       heading.tabIndex = -1;
@@ -1318,7 +1358,7 @@ export default function AppRouterClient({
 
   async function handleFailure(caught: unknown, owner?: RoomOwner) {
     if (isAuthFailure(caught)) {
-      invalidateLogin((caught as Error).message);
+      invalidateLogin();
       return;
     }
     if (owner && !ownsRoom(owner)) return;
@@ -1352,14 +1392,14 @@ export default function AppRouterClient({
     }
   }
 
-  function invalidateLogin(message = "当前登录已失效，请重新登录") {
+  function invalidateLogin() {
+    sessionInvalidating.current = true;
     clearPassword();
     clearPendingIntents();
     clearRoomState();
     setAccount(null);
     setRooms([]);
-    setError(message);
-    go("/login", true);
+    go("/login?reason=session-invalid", true);
   }
 
   async function handleRoomControlLost(failedOwner: RoomOwner) {
@@ -1373,7 +1413,7 @@ export default function AppRouterClient({
     try {
       next = await call<SeatSnapshot>(`/api/rooms/${owner.roomId}/seats`);
     } catch (caught) {
-      if (isAuthFailure(caught)) invalidateLogin((caught as Error).message);
+      if (isAuthFailure(caught)) invalidateLogin();
       else if (ownsRoom(owner)) go(roomPath("seats", owner.roomId), true);
       return;
     }
@@ -1484,6 +1524,11 @@ export default function AppRouterClient({
   }
 
   async function openRoom(room: RoomSummary) {
+    if (!room.mine && !terminalRoom(room.status) && !room.canJoin) {
+      const code = room.joinBlockedReason;
+      setError(code ? API_ERROR_MESSAGES[code] : "当前无法加入该房间");
+      return;
+    }
     if (!room.mine && !terminalRoom(room.status)) {
       go(roomPath("join", room.id));
       return;
@@ -1493,7 +1538,7 @@ export default function AppRouterClient({
     );
   }
 
-  async function joinRoom(password?: string) {
+  async function joinRoom(input: JoinRoomInput) {
     if (!selectedRoom) return;
     const roomId = selectedRoom.id;
     const owner = beginRoomTransition(roomId);
@@ -1501,11 +1546,24 @@ export default function AppRouterClient({
       const result = await write(
         {
           path: `/api/rooms/${roomId}/join`,
-          body: password ? { password } : {},
+          body: input,
         },
         { owner },
       );
-      if (!result.ok || !ownsRoom(owner)) return;
+      if (!result.ok) {
+        if (
+          ownsRoom(owner) &&
+          result.error instanceof ApiError &&
+          ["ROLE_ALREADY_TAKEN", "PLAYER_LIMIT"].includes(result.error.code)
+        ) {
+          const items = await loadRooms(owner);
+          if (ownsRoom(owner)) {
+            setSelectedRoom(items.find((room) => room.id === roomId) ?? null);
+          }
+        }
+        return;
+      }
+      if (!ownsRoom(owner)) return;
       await loadRooms(owner);
       if (!ownsRoom(owner)) return;
       if (await fetchSeats(owner, undefined, "AUTO")) result.confirm();
@@ -1708,12 +1766,6 @@ export default function AppRouterClient({
       );
       if (!result.ok || !ownsRoom(owner)) return;
       if (await fetchSeats(owner, undefined, "AUTO")) {
-        const socket = accountSocket.current;
-        socketRoomSubscription.current = null;
-        if (socket?.connected) {
-          socket.emit("room.subscribe", { roomId });
-          socketRoomSubscription.current = roomId;
-        }
         result.confirm();
       }
     });
@@ -1918,13 +1970,19 @@ export default function AppRouterClient({
     const onRoomSubscriptionLost = (payload: unknown) => {
       const notification =
         payload && typeof payload === "object"
-          ? (payload as { roomId?: unknown })
+          ? (payload as { roomId?: unknown; reason?: unknown })
           : null;
       const roomId =
         typeof notification?.roomId === "string" ? notification.roomId : null;
       if (!roomId || roomId !== roomRuntime.current.roomId) return;
       if (socketRoomSubscription.current === roomId)
         socketRoomSubscription.current = null;
+      if (notification?.reason === "ROOM_STARTED_WITHOUT_CAPABILITY") {
+        clearRoomState();
+        go("/rooms?reason=room-started-without-capability", true);
+        void loadRooms().catch((caught) => void handleFailure(caught));
+        return;
+      }
       snapshotRequestGeneration.current += 1;
       refresh();
     };
@@ -2265,17 +2323,17 @@ export default function AppRouterClient({
                 ? "LOGS"
                 : "DASHBOARD"
         }
-        onTab={(tab) =>
-          go(
+        onTab={(tab, focus) => {
+          const path =
             tab === "DASHBOARD"
               ? "/admin"
               : tab === "ACCOUNTS"
                 ? "/admin/accounts"
                 : tab === "ROOMS"
                   ? "/admin/rooms"
-                  : "/admin/logs",
-          )
-        }
+                  : "/admin/logs";
+          go(focus ? `${path}?focus=tab` : path);
+        }}
       />
     );
   if (screen === "FINISH" && settlementPreview)
@@ -2477,6 +2535,8 @@ function Lobby({
   );
 }
 
+type JoinRoomInput = { password?: string; characterId?: string };
+
 function JoinRoom({
   room,
   busy,
@@ -2487,10 +2547,19 @@ function JoinRoom({
   room: RoomSummary;
   busy: boolean;
   error: string;
-  onJoin: (password?: string) => void;
+  onJoin: (input: JoinRoomInput) => void;
   onBack: () => void;
 }) {
   const [password, setPassword] = useState("");
+  const [characterId, setCharacterId] = useState("");
+  useEffect(() => {
+    if (
+      characterId &&
+      !room.availableCharacters.some((character) => character.id === characterId)
+    ) {
+      setCharacterId("");
+    }
+  }, [characterId, room.availableCharacters]);
   return (
     <main className="v2-page">
       <section className="v2-panel">
@@ -2510,6 +2579,22 @@ function JoinRoom({
             />
           </label>
         )}
+        {room.status === "PLAYING" && (
+          <label>
+            选择人物
+            <select
+              value={characterId}
+              onChange={(event) => setCharacterId(event.target.value)}
+            >
+              <option value="">请选择人物</option>
+              {room.availableCharacters.map((character) => (
+                <option key={character.id} value={character.id}>
+                  {character.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {error && (
           <p className="error" role="alert">
             {error}
@@ -2517,8 +2602,17 @@ function JoinRoom({
         )}
         <button
           className="primary"
-          disabled={busy || (room.hasPassword && !password)}
-          onClick={() => void onJoin(password || undefined)}
+          disabled={
+            busy ||
+            (room.hasPassword && !password) ||
+            (room.status === "PLAYING" && !characterId)
+          }
+          onClick={() =>
+            void onJoin({
+              ...(password ? { password } : {}),
+              ...(room.status === "PLAYING" ? { characterId } : {}),
+            })
+          }
         >
           加入房间
         </button>
@@ -3136,7 +3230,10 @@ function AdminView({
   runAction: TaskRunner;
   writeAction: StableWriter;
   initialTab: "DASHBOARD" | "ACCOUNTS" | "ROOMS" | "LOGS";
-  onTab: (tab: "DASHBOARD" | "ACCOUNTS" | "ROOMS" | "LOGS") => void;
+  onTab: (
+    tab: "DASHBOARD" | "ACCOUNTS" | "ROOMS" | "LOGS",
+    focus?: boolean,
+  ) => void;
 }) {
   useEffect(() => {
     document.documentElement.style.setProperty(
@@ -3205,6 +3302,27 @@ function AdminView({
   const [roomSaveState, setRoomSaveState] = useState<
     "IDLE" | "SAVING" | "SUCCESS" | "ERROR"
   >("IDLE");
+
+  useEffect(() => {
+    const focusAdminTab =
+      new URLSearchParams(window.location.search).get("focus") === "tab";
+    const focusFrame = window.requestAnimationFrame(() => {
+      const focusTarget = focusAdminTab
+        ? document.getElementById(`admin-tab-${initialTab.toLowerCase()}`)
+        : document.querySelector(".admin-page h1");
+      if (focusTarget instanceof HTMLElement) {
+        if (!focusAdminTab) focusTarget.tabIndex = -1;
+        focusTarget.focus({ preventScroll: true });
+      }
+      if (focusAdminTab)
+        window.history.replaceState(
+          window.history.state,
+          "",
+          window.location.pathname,
+        );
+    });
+    return () => window.cancelAnimationFrame(focusFrame);
+  }, [initialTab]);
   const [roomLifecycleNotice, setRoomLifecycleNotice] = useState("");
   const accountSaveTimer = useRef<number | null>(null);
   const roomSaveTimer = useRef<number | null>(null);
@@ -3458,11 +3576,7 @@ function AdminView({
     { id: "LOGS", label: "安全日志" },
   ] as const;
   function activateTab(next: typeof tab, focus = false) {
-    onTab(next);
-    if (focus)
-      window.requestAnimationFrame(() =>
-        document.getElementById(`admin-tab-${next.toLowerCase()}`)?.focus(),
-      );
+    onTab(next, focus);
   }
   function navigateTabs(event: ReactKeyboardEvent<HTMLButtonElement>) {
     const currentIndex = tabs.findIndex((item) => item.id === tab);

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
@@ -242,7 +242,7 @@ class V2GameFixtureFacade {
     }
     const created = (async (): Promise<FixtureIdentity> => {
       const member = await this.createAuth(name);
-      await this.accounts.joinRoom(member.auth, room.id, undefined, `join:${joinKey}`);
+      await this.accounts.joinRoom(member.auth, room.id, {}, `join:${joinKey}`);
       const selected = await this.accounts.selectCharacter(member.auth, room.id, characterId, `character:${joinKey}`);
       const playerId = selected.player.id;
       const actor = { accountId: member.account.id, sessionId: member.auth.session.id };
@@ -265,7 +265,7 @@ class V2GameFixtureFacade {
     }
     const created = (async (): Promise<FixtureIdentity> => {
       const member = await this.createAuth(name);
-      await this.accounts.joinRoom(member.auth, room.id, undefined, `join:${joinKey}`);
+      await this.accounts.joinRoom(member.auth, room.id, {}, `join:${joinKey}`);
       await this.accounts.selectBank(member.auth, room.id, `bank:${joinKey}`);
       const actor = { accountId: member.account.id, sessionId: member.auth.session.id };
       this.state.banks.set(fixtureKey, actor);
@@ -370,6 +370,75 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await first.confirmLanding(room.id, landingA.id, bank.token, true);
     await first.confirmLanding(room.id, landingB.id, bank.token, true);
     return { room, a, b, bank };
+  }
+
+  async function createLobbyMember(
+    roomId: string,
+    displayName: string,
+    input: { membershipCharacterId?: string; playerCharacterId?: string | null; playerStatus?: 'ACTIVE' | 'LEFT' } = {},
+  ) {
+    const suffix = randomUUID();
+    const account = await firstDb.account.create({ data: {
+      username: `start-member-${suffix}`,
+      passwordHash: await hashPassword(`Password-${suffix}`),
+      displayName,
+    } });
+    const session = await firstDb.accountSession.create({ data: {
+      accountId: account.id,
+      sessionTokenHash: randomUUID().replaceAll('-', ''),
+      deviceId: randomUUID(),
+      deviceName: 'Start cleanup fixture',
+      browser: 'Vitest',
+      operatingSystem: 'Test',
+      userAgent: 'Task 3 start cleanup fixture',
+      loginIp: '127.0.0.1',
+      lastIp: '127.0.0.1',
+      expiresAt: new Date(Date.now() + 60_000),
+    } });
+    const membership = await firstDb.roomMembership.create({ data: {
+      roomId,
+      accountId: account.id,
+      displayNameSnapshot: displayName,
+      characterId: input.membershipCharacterId,
+      activeSessionId: session.id,
+      controlClaimedAt: new Date(),
+    } });
+    const player = input.playerCharacterId !== undefined
+      ? await firstDb.player.create({ data: {
+        roomId,
+        memberId: membership.id,
+        characterId: input.playerCharacterId,
+        pawnColor: `fixture-${suffix}`,
+        balance: 5_000,
+        status: input.playerStatus ?? 'ACTIVE',
+      } })
+      : null;
+    return { account, session, membership, player };
+  }
+
+  async function startMutationSnapshot(roomId: string) {
+    return {
+      room: await firstDb.room.findUniqueOrThrow({
+        where: { id: roomId },
+        select: { status: true, stateVersion: true, startedAt: true, currentTurnPlayerId: true, turnNumber: true },
+      }),
+      memberships: await firstDb.roomMembership.findMany({
+        where: { roomId },
+        select: { id: true, status: true, characterId: true, isBank: true, activeSessionId: true, controlClaimedAt: true, leftAt: true },
+        orderBy: { id: 'asc' },
+      }),
+      players: await firstDb.player.findMany({
+        where: { roomId },
+        select: { id: true, status: true, characterId: true },
+        orderBy: { id: 'asc' },
+      }),
+      swaps: await firstDb.roleSwapRequest.findMany({ where: { roomId }, orderBy: { id: 'asc' } }),
+      startAudits: await firstDb.auditLog.count({
+        where: { roomId, action: { in: ['START_ROOM', 'ROOM_START_MEMBER_REMOVED'] } },
+      }),
+      removalSecurityLogs: await firstDb.securityLog.count({ where: { action: 'ROOM_START_MEMBER_REMOVED' } }),
+      turns: await firstDb.turn.findMany({ where: { roomId }, orderBy: { id: 'asc' } }),
+    };
   }
 
   async function unifiedTransferRoom(name = '统一转帐即时结算') {
@@ -568,6 +637,213 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       expect(await firstDb.room.findUniqueOrThrow({ where: { id: racingRoom.id } })).toMatchObject({ status: 'PLAYING' });
       expect(await firstDb.turn.count({ where: { roomId: racingRoom.id, status: 'ACTIVE' } })).toBe(1);
     }
+  });
+
+  it('removes capability-less lobby members when starting', async () => {
+    const room = await first.createRoom({ name: '开局清退空席', initialBalance: 5000, diceMode: 'ELECTRONIC' });
+    const a = await first.joinPlayer(room.code, '有效玩家甲', 'zhenhuan');
+    const b = await first.joinPlayer(room.code, '有效玩家乙', 'huashifei');
+    const bank = await first.joinBank(room.code, '独立银行');
+    const empty = await createLobbyMember(room.id, '空席成员');
+    const retained = await createLobbyMember(room.id, '留存空席', { playerCharacterId: null });
+    const [aPlayer, bPlayer] = await Promise.all([
+      firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } }),
+      firstDb.player.findUniqueOrThrow({ where: { id: b.playerId } }),
+    ]);
+    await firstDb.roleSwapRequest.createMany({ data: [
+      {
+        roomId: room.id,
+        requesterMembershipId: empty.membership.id,
+        targetMembershipId: aPlayer.memberId,
+        targetCharacterId: aPlayer.characterId!,
+        status: 'PENDING_TARGET',
+      },
+      {
+        roomId: room.id,
+        requesterMembershipId: retained.membership.id,
+        targetMembershipId: bPlayer.memberId,
+        targetCharacterId: bPlayer.characterId!,
+        status: 'PENDING_BANK',
+      },
+    ] });
+    const bankActor = state.banks.get(bank.token)!;
+    const bankMembership = await firstDb.roomMembership.findUniqueOrThrow({
+      where: { roomId_accountId: { roomId: room.id, accountId: bankActor.accountId } },
+    });
+    const beforeVersion = (await firstDb.room.findUniqueOrThrow({ where: { id: room.id } })).stateVersion;
+    const afterCommit = vi.fn();
+
+    const started = await new PrismaGameService(firstDb, () => 0).start(bankActor, room.id, 'cleanup-start', afterCommit);
+
+    expect(started).not.toHaveProperty('removedSessionIds');
+    expect(await firstDb.room.findUniqueOrThrow({ where: { id: room.id } })).toMatchObject({
+      status: 'PLAYING',
+      stateVersion: beforeVersion + 1,
+    });
+    expect(await firstDb.roomMembership.findUniqueOrThrow({ where: { id: bankMembership.id } }))
+      .toMatchObject({ status: 'ACTIVE', characterId: null, isBank: true });
+    for (const membershipId of [empty.membership.id, retained.membership.id]) {
+      expect(await firstDb.roomMembership.findUniqueOrThrow({ where: { id: membershipId } }))
+        .toMatchObject({ status: 'LEFT', characterId: null, isBank: false, activeSessionId: null });
+    }
+    expect(await firstDb.player.findUniqueOrThrow({ where: { id: retained.player!.id } }))
+      .toMatchObject({ status: 'LEFT', characterId: null });
+    expect(await firstDb.roleSwapRequest.findMany({
+      where: { roomId: room.id, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } },
+    })).toEqual([]);
+    expect(await firstDb.roleSwapRequest.findMany({ where: { roomId: room.id } }))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: 'CANCELLED', rejectionReason: 'ROOM_STARTED' }),
+      ]));
+    expect(afterCommit).toHaveBeenCalledOnce();
+    expect(afterCommit).toHaveBeenCalledWith({
+      removedSessionIds: expect.arrayContaining([empty.session.id, retained.session.id]),
+    });
+    expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'START_ROOM' } })).toBe(1);
+    const removalAudits = await firstDb.auditLog.findMany({
+      where: { roomId: room.id, action: 'ROOM_START_MEMBER_REMOVED' },
+      orderBy: { entityId: 'asc' },
+    });
+    expect(removalAudits).toHaveLength(2);
+    expect(removalAudits.map((audit) => audit.entityId).sort()).toEqual([empty.membership.id, retained.membership.id].sort());
+    expect(removalAudits).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        actorMemberId: bankMembership.id,
+        actorRole: 'BANK',
+        reason: 'ROOM_STARTED_WITHOUT_CAPABILITY',
+      }),
+    ]));
+    const removalSecurityLogs = await firstDb.securityLog.findMany({
+      where: { accountId: { in: [empty.account.id, retained.account.id] }, action: 'ROOM_START_MEMBER_REMOVED' },
+    });
+    expect(removalSecurityLogs).toHaveLength(2);
+    expect(removalSecurityLogs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ actorAccountId: bankActor.accountId }),
+    ]));
+    const activeTurns = await firstDb.turn.findMany({ where: { roomId: room.id, status: 'ACTIVE' } });
+    expect(activeTurns).toHaveLength(1);
+    expect([a.playerId, b.playerId]).toContain(activeTurns[0]!.playerId);
+  });
+
+  it('rejects player identity drift at start', async () => {
+    const variants = [
+      { name: 'missing Player', member: { membershipCharacterId: 'meizhuang' } },
+      { name: 'inactive Player', member: { membershipCharacterId: 'meizhuang', playerCharacterId: 'meizhuang', playerStatus: 'LEFT' as const } },
+      { name: 'different character', member: { membershipCharacterId: 'meizhuang', playerCharacterId: 'anlingrong' } },
+    ];
+
+    for (const [index, variant] of variants.entries()) {
+      const room = await first.createRoom({ name: `开局身份漂移-${variant.name}`, initialBalance: 5000, diceMode: 'ELECTRONIC' });
+      const a = await first.joinPlayer(room.code, '有效玩家甲', 'zhenhuan');
+      await first.joinPlayer(room.code, '有效玩家乙', 'huashifei');
+      const bank = await first.joinBank(room.code, '独立银行');
+      await createLobbyMember(room.id, `漂移成员-${index}`, variant.member);
+      const empty = await createLobbyMember(room.id, `待清退成员-${index}`);
+      const aPlayer = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+      await firstDb.roleSwapRequest.create({ data: {
+        roomId: room.id,
+        requesterMembershipId: empty.membership.id,
+        targetMembershipId: aPlayer.memberId,
+        targetCharacterId: aPlayer.characterId!,
+      } });
+      const before = await startMutationSnapshot(room.id);
+      const afterCommit = vi.fn();
+
+      await expect(new PrismaGameService(firstDb, () => 0).start(
+        state.banks.get(bank.token)!,
+        room.id,
+        `identity-drift-${index}`,
+        afterCommit,
+      )).rejects.toMatchObject({ code: 'PLAYER_IDENTITY_MISMATCH' });
+
+      expect(await startMutationSnapshot(room.id)).toEqual(before);
+      expect(afterCommit).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rolls start cleanup back when the playable player count is invalid', async () => {
+    const room = await first.createRoom({ name: '开局人数回滚', initialBalance: 5000, diceMode: 'ELECTRONIC' });
+    const onlyPlayer = await first.joinPlayer(room.code, '唯一有效玩家', 'zhenhuan');
+    const bank = await first.joinBank(room.code, '独立银行');
+    const empty = await createLobbyMember(room.id, '待清退空席');
+    await createLobbyMember(room.id, '待清退留存空席', { playerCharacterId: null });
+    const player = await firstDb.player.findUniqueOrThrow({ where: { id: onlyPlayer.playerId } });
+    await firstDb.roleSwapRequest.create({ data: {
+      roomId: room.id,
+      requesterMembershipId: empty.membership.id,
+      targetMembershipId: player.memberId,
+      targetCharacterId: player.characterId!,
+      status: 'PENDING_TARGET',
+    } });
+    const before = await startMutationSnapshot(room.id);
+    const afterCommit = vi.fn();
+
+    await expect(new PrismaGameService(firstDb, () => 0).start(
+      state.banks.get(bank.token)!,
+      room.id,
+      'invalid-player-count-start',
+      afterCommit,
+    )).rejects.toMatchObject({ code: 'PLAYER_COUNT_OUT_OF_RANGE' });
+
+    expect(await startMutationSnapshot(room.id)).toEqual(before);
+    expect(afterCommit).not.toHaveBeenCalled();
+  });
+
+  it('replays start cleanup once', async () => {
+    const room = await first.createRoom({ name: '开局清退重放', initialBalance: 5000, diceMode: 'ELECTRONIC' });
+    const a = await first.joinPlayer(room.code, '有效玩家甲', 'zhenhuan');
+    await first.joinPlayer(room.code, '有效玩家乙', 'huashifei');
+    const bank = await first.joinBank(room.code, '独立银行');
+    const empty = await createLobbyMember(room.id, '待清退成员');
+    const player = await firstDb.player.findUniqueOrThrow({ where: { id: a.playerId } });
+    await firstDb.roleSwapRequest.create({ data: {
+      roomId: room.id,
+      requesterMembershipId: empty.membership.id,
+      targetMembershipId: player.memberId,
+      targetCharacterId: player.characterId!,
+    } });
+    const actor = state.banks.get(bank.token)!;
+    const afterCommit = vi.fn();
+    const game = new PrismaGameService(firstDb, () => 0);
+
+    const committed = await game.start(actor, room.id, 'start-cleanup-once', afterCommit);
+    const replayed = await game.start(actor, room.id, 'start-cleanup-once', afterCommit);
+
+    expect(replayed).toEqual(committed);
+    expect(afterCommit).toHaveBeenCalledOnce();
+    expect(afterCommit).toHaveBeenCalledWith({ removedSessionIds: [empty.session.id] });
+    expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'START_ROOM' } })).toBe(1);
+    expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'ROOM_START_MEMBER_REMOVED' } })).toBe(1);
+    expect(await firstDb.roleSwapRequest.count({ where: { roomId: room.id, status: 'CANCELLED', rejectionReason: 'ROOM_STARTED' } })).toBe(1);
+    expect(await firstDb.turn.count({ where: { roomId: room.id, status: 'ACTIVE' } })).toBe(1);
+    const record = await firstDb.idempotencyRecord.findUniqueOrThrow({
+      where: { scope_key: { scope: `account:${actor.accountId}:room:${room.id}:start`, key: 'start-cleanup-once' } },
+    });
+    expect(JSON.stringify(record.response)).not.toContain(empty.session.id);
+  });
+
+  it('serializes concurrent starts with different keys', async () => {
+    const room = await first.createRoom({ name: '异键并发开局', initialBalance: 5000, diceMode: 'ELECTRONIC' });
+    await first.joinPlayer(room.code, '有效玩家甲', 'zhenhuan');
+    await first.joinPlayer(room.code, '有效玩家乙', 'huashifei');
+    const bank = await first.joinBank(room.code, '独立银行');
+    const empty = await createLobbyMember(room.id, '并发待清退成员');
+    const actor = state.banks.get(bank.token)!;
+    const afterCommit = vi.fn();
+    const attempts = await Promise.allSettled([
+      new PrismaGameService(firstDb, () => 0).start(actor, room.id, 'concurrent-start-left', afterCommit),
+      new PrismaGameService(secondDb, () => 0).start(actor, room.id, 'concurrent-start-right', afterCommit),
+    ]);
+
+    expect(attempts.filter((attempt) => attempt.status === 'fulfilled')).toHaveLength(1);
+    const failures = attempts.filter((attempt): attempt is PromiseRejectedResult => attempt.status === 'rejected');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.reason).toMatchObject({ code: 'ROOM_NOT_IN_LOBBY' });
+    expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'START_ROOM' } })).toBe(1);
+    expect(await firstDb.auditLog.count({ where: { roomId: room.id, action: 'ROOM_START_MEMBER_REMOVED' } })).toBe(1);
+    expect(await firstDb.roomMembership.findUniqueOrThrow({ where: { id: empty.membership.id } })).toMatchObject({ status: 'LEFT' });
+    expect(afterCommit).toHaveBeenCalledOnce();
+    expect(await firstDb.turn.count({ where: { roomId: room.id, status: 'ACTIVE' } })).toBe(1);
   });
 
   it('lets only one transaction lock and buy the same property', async () => {

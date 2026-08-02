@@ -198,9 +198,12 @@ const revokeSocketSession = (sessionId: string, reason: string) => {
   io.to(channel).emit('account.session.revoked', { reason });
   io.in(channel).disconnectSockets(true);
 };
-const removeSessionFromRoom = (sessionId: string, roomId: string) => {
+const removeSessionFromRoom = (sessionId: string, roomId: string, reason?: string) => {
   const sessionRoom = sessionChannel(sessionId);
-  io.to(sessionRoom).emit('room.subscription-rejected', { roomId });
+  io.to(sessionRoom).emit('room.subscription-rejected', {
+    roomId,
+    ...(reason ? { reason } : {}),
+  });
   io.in(sessionRoom).socketsLeave(roomChannel(roomId));
   for (const socket of io.sockets.sockets.values()) {
     if (socket.rooms.has(sessionRoom) && socket.data.subscribedRoomId === roomId) delete socket.data.subscribedRoomId;
@@ -384,8 +387,8 @@ app.post('/api/rooms', async (request) => {
 });
 app.post('/api/rooms/:id/join', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
-  const { password } = z.object({ password: z.string().max(100).optional() }).parse(request.body ?? {});
-  const result = await accounts.joinRoom(auth, id, password, idempotencyKey(request.headers['idempotency-key']));
+  const body = z.object({ password: z.string().max(100).optional(), characterId: z.string().optional() }).strict().parse(request.body ?? {});
+  const result = await accounts.joinRoom(auth, id, body, idempotencyKey(request.headers['idempotency-key']));
   notifyVersion(id, result);
   return result;
 });
@@ -428,7 +431,23 @@ app.delete('/api/admin/rooms/:id', async (request) => {
 });
 
 app.get('/api/rooms/:id/snapshot', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const { view } = z.object({ view: z.enum(['PLAYER', 'BANK']).optional() }).parse(request.query); await accounts.authorizeRoomSession(auth, id); return games.snapshot(gameActor(auth), id, view); });
-app.post('/api/rooms/:id/start', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); await bank(auth, id); const result = await games.start(gameActor(auth), id, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(id, result); return games.snapshot(gameActor(auth), id, 'BANK'); });
+app.post('/api/rooms/:id/start', async (request) => {
+  const auth = await authenticate(request);
+  const { id } = z.object({ id: z.string() }).parse(request.params);
+  await bank(auth, id);
+  const result = await games.start(
+    gameActor(auth),
+    id,
+    idempotencyKey(request.headers['idempotency-key']),
+    ({ removedSessionIds }) => {
+      for (const sessionId of removedSessionIds) {
+        removeSessionFromRoom(sessionId, id, 'ROOM_STARTED_WITHOUT_CAPABILITY');
+      }
+    },
+  );
+  notifyVersion(id, result);
+  return games.snapshot(gameActor(auth), id, 'BANK');
+});
 app.post('/api/rooms/:id/landings', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const body = z.object({ playerId: z.string(), propertyName: z.string() }).parse(request.body); await player(auth, id, body.playerId); const result = await games.declareLanding(gameActor(auth), id, body.playerId, body.propertyName, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(id, result); return result; });
 app.post('/api/rooms/:id/landings/start', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const body = z.object({ playerId: z.string(), landingId: z.string() }).parse(request.body); await player(auth, id, body.playerId); const result = await games.declareStartLanding(gameActor(auth), id, body.playerId, body.landingId, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(id, result); return result; });
 app.post('/api/rooms/:id/landings/:landingId/confirm', async (request) => { const auth = await authenticate(request); const params = z.object({ id: z.string(), landingId: z.string() }).parse(request.params); await bank(auth, params.id); const body = z.object({ plotResolved: z.boolean().default(true) }).parse(request.body ?? {}); const result = await games.confirmLanding(gameActor(auth), params.id, params.landingId, body.plotResolved, idempotencyKey(request.headers['idempotency-key'])); notifyVersion(params.id, result); return result; });

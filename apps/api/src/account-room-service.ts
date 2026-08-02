@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { RuleError } from './api-error.js';
 import { accountSummary, hashPassword, maskIp, passwordSchema, sessionDurationMs, sessionSummary, verifyPassword } from './auth-domain.js';
 import type { PostCommitToastNotifier } from './realtime-toast-notifications.js';
+import { roomJoinability } from './room-admission.js';
 import { buildPropertySettlementDetail, isPristineSettlementTurn, rankSettlementPlayers, type RankedSettlementPlayer, type SettlementCandidate } from './settlement.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -56,6 +57,7 @@ function canonicalValue(value: unknown): unknown {
 const asObject = (value: Prisma.JsonValue) => value as Record<string, unknown>;
 
 type PageCursor = { createdAt: string; id: string };
+type JoinRoomInput = { password?: string; characterId?: string };
 
 function encodeCursor(value: { createdAt: Date; id: string }) {
   return Buffer.from(JSON.stringify({ createdAt: value.createdAt.toISOString(), id: value.id } satisfies PageCursor)).toString('base64url');
@@ -540,12 +542,6 @@ export class AccountRoomService {
     };
   }
 
-  private admissionError(room: { status: string; allowMidgameJoin: boolean }) {
-    if (room.status === 'ENDED' || room.status === 'FINISHED' || room.status === 'CLOSED') return 'ROOM_FINISHED';
-    if (room.status === 'PLAYING' && !room.allowMidgameJoin) return 'MIDGAME_JOIN_DISABLED';
-    return null;
-  }
-
   private requireSeatAcquisitionAllowed(
     membership: { room: { status: string; allowMidgameJoin: boolean } },
     alreadyHasCapability: boolean,
@@ -867,22 +863,63 @@ export class AccountRoomService {
   }
 
   async listRooms(auth: AuthenticatedSession) {
-    const rooms = await this.db.room.findMany({ where: { OR: [{ visibility: 'PUBLIC' }, { members: { some: { accountId: auth.account.id } } }] }, include: { createdByAccount: { select: { displayName: true } }, members: { where: { status: 'ACTIVE' }, select: { accountId: true, characterId: true, isBank: true, character: { select: { name: true } } } }, settlement: { select: { endedAt: true } } }, orderBy: { updatedAt: 'desc' } });
+    const [rooms, enabledCharacters] = await Promise.all([
+      this.db.room.findMany({
+        where: {
+          OR: [
+            { visibility: 'PUBLIC' },
+            { members: { some: { accountId: auth.account.id } } },
+          ],
+        },
+        include: {
+          createdByAccount: { select: { displayName: true } },
+          members: {
+            where: { status: 'ACTIVE' },
+            select: {
+              accountId: true,
+              characterId: true,
+              isBank: true,
+              character: { select: { name: true } },
+              player: { select: { status: true, characterId: true } },
+            },
+          },
+          settlement: { select: { endedAt: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      this.db.character.findMany({
+        where: { enabled: true },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    ]);
     return rooms.map((room) => {
       const mine = room.members.find((member) => member.accountId === auth.account.id);
+      const playableMembers = room.members.filter((member) =>
+        member.characterId !== null
+        && member.player?.status === 'ACTIVE'
+        && member.player.characterId === member.characterId,
+      );
+      const occupied = new Set(playableMembers.map((member) => member.characterId));
+      const admission = roomJoinability(room, playableMembers.length);
       return {
         id: room.id,
         name: room.name,
         status: room.status,
         creator: room.createdByAccount.displayName,
         memberCount: new Set(room.members.map((member) => member.accountId)).size,
-        playerCount: room.members.filter((member) => member.characterId !== null).length,
+        playerCount: playableMembers.length,
         playerLimit: room.playerLimit,
         hasPassword: room.passwordHash !== null,
         mine: Boolean(mine),
         characterId: mine?.characterId ?? null,
         myCharacter: mine?.character?.name ?? null,
         isBank: mine?.isBank ?? false,
+        canJoin: !mine && admission.canJoin,
+        joinBlockedReason: mine ? null : admission.joinBlockedReason,
+        availableCharacters: enabledCharacters.filter((character) =>
+          !occupied.has(character.id),
+        ),
         createdAt: room.createdAt,
         startedAt: room.startedAt,
         endedAt: room.settlement?.endedAt ?? null,
@@ -1238,16 +1275,24 @@ export class AccountRoomService {
     });
   }
 
-  async joinRoom(auth: AuthenticatedSession, roomId: string, password: string | undefined, key: string) {
+  async joinRoom(
+    auth: AuthenticatedSession,
+    roomId: string,
+    input: JoinRoomInput,
+    key: string,
+  ) {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
     const scope = `account:${auth.account.id}:room:${roomId}:join`;
-    const canonicalRequest = JSON.stringify(canonicalValue({ roomId, password }));
+    const canonicalRequest = JSON.stringify(canonicalValue({ roomId, ...input }));
     for (let attempt = 0; attempt < 6; attempt += 1) {
       try {
         const response = await this.db.$transaction(async (tx) => {
           await this.lockRoom(tx, roomId);
           const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
-          const current = await tx.roomMembership.findUnique({ where: { roomId_accountId: { roomId, accountId: auth.account.id } } });
+          const current = await tx.roomMembership.findUnique({
+            where: { roomId_accountId: { roomId, accountId: auth.account.id } },
+            include: { player: true },
+          });
           const previous = await tx.idempotencyRecord.findUnique({ where: { scope_key: { scope, key } } });
           if (previous) {
             await this.assertRequestHash(previous.requestHash, canonicalRequest);
@@ -1263,44 +1308,86 @@ export class AccountRoomService {
             } });
             return stored;
           };
-          if (current?.status === 'ACTIVE') return persist(membershipSummary(current, auth.session.id));
+          if (
+            current?.status === 'ACTIVE'
+            && (room.status === 'LOBBY' || current.characterId !== null || current.isBank)
+          ) return persist(membershipSummary(current, auth.session.id));
 
-          const admissionError = this.admissionError(room);
-          if (admissionError) return persist({ ok: false, error: admissionError });
-          const recentFailures = await tx.securityLog.count({ where: {
-            accountId: auth.account.id,
-            action: 'ROOM_PASSWORD_FAILED',
-            createdAt: { gt: new Date(Date.now() - 10 * 60 * 1000) },
-            detailsJson: { path: ['roomId'], equals: roomId },
-          } });
-          if (recentFailures >= 5) return persist({ ok: false, error: 'RATE_LIMITED' });
-          if (room.passwordHash && (!password || !(await verifyPassword(password, room.passwordHash)))) {
-            await tx.securityLog.create({ data: { accountId: auth.account.id, action: 'ROOM_PASSWORD_FAILED', detailsJson: { roomId } } });
-            return persist({ ok: false, error: 'ROOM_PASSWORD_INVALID' });
+          const playablePlayers = await this.playablePlayers(tx, roomId);
+          const admission = roomJoinability(room, playablePlayers.length);
+          if (!admission.canJoin) return persist({ ok: false, error: admission.joinBlockedReason });
+          if (room.status === 'PLAYING' && !input.characterId) {
+            return persist({ ok: false, error: 'CHARACTER_REQUIRED' });
+          }
+          const validatePassword = async () => {
+            const recentFailures = await tx.securityLog.count({ where: {
+              accountId: auth.account.id,
+              action: 'ROOM_PASSWORD_FAILED',
+              createdAt: { gt: new Date(Date.now() - 10 * 60 * 1000) },
+              detailsJson: { path: ['roomId'], equals: roomId },
+            } });
+            if (recentFailures >= 5) return 'RATE_LIMITED' as const;
+            if (room.passwordHash && (!input.password || !(await verifyPassword(input.password, room.passwordHash)))) {
+              await tx.securityLog.create({ data: { accountId: auth.account.id, action: 'ROOM_PASSWORD_FAILED', detailsJson: { roomId } } });
+              return 'ROOM_PASSWORD_INVALID' as const;
+            }
+            return null;
+          };
+
+          if (room.status === 'LOBBY') {
+            const passwordError = await validatePassword();
+            if (passwordError) return persist({ ok: false, error: passwordError });
+            if (current?.isBank) {
+              const activeBank = await tx.roomMembership.findFirst({ where: { roomId, status: 'ACTIVE', isBank: true, id: { not: current.id } }, select: { id: true } });
+              if (activeBank) return persist({ ok: false, error: 'BANK_ALREADY_TAKEN' });
+            }
+            const membership = current
+              ? await tx.roomMembership.update({ where: { id: current.id }, data: {
+                status: 'ACTIVE', leftAt: null, displayNameSnapshot: auth.account.displayName,
+                activeSessionId: auth.session.id, controlClaimedAt: new Date(),
+              } })
+              : await tx.roomMembership.create({ data: {
+                roomId, accountId: auth.account.id, displayNameSnapshot: auth.account.displayName,
+                activeSessionId: auth.session.id, controlClaimedAt: new Date(),
+              } });
+            await tx.securityLog.create({ data: { accountId: auth.account.id, action: 'ROOM_JOINED', detailsJson: { roomId } } });
+            const state = await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } });
+            return persist({ ...membershipSummary(membership, auth.session.id), stateVersion: state.stateVersion });
           }
 
-          if (current?.isBank) {
-            const activeBank = await tx.roomMembership.findFirst({ where: { roomId, status: 'ACTIVE', isBank: true, id: { not: current.id } }, select: { id: true } });
-            if (activeBank) return persist({ ok: false, error: 'BANK_ALREADY_TAKEN' });
-          }
+          const character = required(await tx.character.findUnique({
+            where: { id: input.characterId! },
+            include: { initialProperty: true },
+          }), 'UNKNOWN_CHARACTER');
+          if (!character.enabled) return persist({ ok: false, error: 'UNKNOWN_CHARACTER' });
+          const occupied = await tx.roomMembership.findFirst({ where: {
+            roomId, status: 'ACTIVE', characterId: character.id, id: current ? { not: current.id } : undefined,
+          }, select: { id: true } });
+          if (occupied) return persist({ ok: false, error: 'ROLE_ALREADY_TAKEN' });
+          const passwordError = await validatePassword();
+          if (passwordError) return persist({ ok: false, error: passwordError });
+
+          const allocation = this.allocatePlayerSeat(room.playerLimit, playablePlayers, current?.player ?? undefined);
           const membership = current
             ? await tx.roomMembership.update({ where: { id: current.id }, data: {
-              status: 'ACTIVE',
-              leftAt: null,
-              displayNameSnapshot: auth.account.displayName,
-              activeSessionId: auth.session.id,
-              controlClaimedAt: new Date(),
+              status: 'ACTIVE', leftAt: null, characterId: character.id, isBank: false,
+              displayNameSnapshot: auth.account.displayName, activeSessionId: auth.session.id, controlClaimedAt: new Date(),
             } })
             : await tx.roomMembership.create({ data: {
-              roomId,
-              accountId: auth.account.id,
-              displayNameSnapshot: auth.account.displayName,
-              activeSessionId: auth.session.id,
-              controlClaimedAt: new Date(),
+              roomId, accountId: auth.account.id, characterId: character.id,
+              displayNameSnapshot: auth.account.displayName, activeSessionId: auth.session.id, controlClaimedAt: new Date(),
             } });
-          await tx.securityLog.create({ data: { accountId: auth.account.id, action: 'ROOM_JOINED', detailsJson: { roomId } } });
+          const player = current?.player
+            ? await tx.player.update({ where: { id: current.player.id }, data: { characterId: character.id, status: 'ACTIVE', ...allocation } })
+            : await tx.player.create({ data: {
+              roomId, memberId: membership.id, characterId: character.id, balance: 0, ...allocation,
+            } });
+          await tx.securityLog.createMany({ data: [
+            { accountId: auth.account.id, action: 'ROOM_JOINED', detailsJson: { roomId } },
+            { accountId: auth.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId, characterId: character.id } },
+          ] });
           const state = await tx.room.update({ where: { id: roomId }, data: { stateVersion: { increment: 1 } }, select: { stateVersion: true } });
-          return persist({ ...membershipSummary(membership, auth.session.id), stateVersion: state.stateVersion });
+          return persist({ ...membershipSummary(membership, auth.session.id), player: playerSummary(player), stateVersion: state.stateVersion });
         }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
         if (response.ok === false && typeof response.error === 'string') fail(response.error);
         return response;

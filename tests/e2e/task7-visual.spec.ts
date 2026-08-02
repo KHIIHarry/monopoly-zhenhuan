@@ -8,7 +8,7 @@ const longDisplayName = '钮祜禄甄嬛并临时代理六宫事务超长昵称'
 const account = { id: 'account-1', username: 'zhenhuan', displayName: longDisplayName, isSuperAdmin: true, canCreateRoom: true, lastLoginAt: now };
 const room = (overrides: Partial<BrowserRoomSummary> = {}): BrowserRoomSummary => ({
   id: 'room-1', name: longRoomName, status: 'PLAYING', creator: '甄嬛', memberCount: 5, playerCount: 5, playerLimit: 5,
-  hasPassword: true, mine: true, characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true,
+  hasPassword: true, mine: true, canJoin: true, joinBlockedReason: null, availableCharacters: [], characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true,
   createdAt: '2026-07-29T00:05:00', startedAt: null, endedAt: null, ...overrides,
 });
 const dual = { characterId: 'zhenhuan', playerId: 'player-1', isBank: true, activeHere: true };
@@ -287,8 +287,14 @@ async function capture(page: Page, testInfo: TestInfo, label: string) {
 }
 
 test('landing, login, long lobby, profile dialog, and admin remain accessible', async ({ page }, testInfo) => {
-  await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
-  await page.route('**/api/auth/login', (route) => route.fulfill({ json: { account } }));
+  let authenticated = false;
+  await page.route('**/api/auth/me', (route) => authenticated
+    ? route.fulfill({ json: { account, sessions: devices } })
+    : route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } }));
+  await page.route('**/api/auth/login', (route) => {
+    authenticated = true;
+    return route.fulfill({ json: { account } });
+  });
   await mockLobby(page);
   await page.route('**/api/auth/sessions', (route) => route.fulfill({ json: devices }));
   await page.route('**/api/admin/**', (route) => {
@@ -325,6 +331,7 @@ test('landing, login, long lobby, profile dialog, and admin remain accessible', 
     await password.fill('StrongPassword42');
     await login.click();
   }
+  await expect(page).toHaveURL(/\/rooms$/);
   await assertSurface(page);
   await assertWraps(page, longRoomName);
   await assertIconControl(page, '个人信息', keyboardOnly);
@@ -365,20 +372,32 @@ test('landing, login, long lobby, profile dialog, and admin remain accessible', 
     await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
     await assertSurface(page);
     await tabTo(page, dashboardTab);
+    await page.keyboard.press('Home');
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(dashboardTab).toBeFocused();
     await page.keyboard.press('ArrowRight');
+    await expect(page).toHaveURL(/\/admin\/accounts$/);
     await expect(accountTab).toHaveAttribute('aria-selected', 'true');
     await expect(accountTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('ArrowLeft');
+    await expect(page).toHaveURL(/\/admin$/);
     await expect(dashboardTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('End');
-    await expect(page.getByRole('tab', { name: '安全日志' })).toBeFocused();
+    await expect(page).toHaveURL(/\/admin\/logs$/);
+    const logsTab = page.getByRole('tab', { name: '安全日志' });
+    await expect(logsTab).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(page).toHaveURL(/\/admin\/logs$/);
+    await expect(logsTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('Home');
+    await expect(page).toHaveURL(/\/admin$/);
     await expect(dashboardTab).toBeFocused();
     await assertSurface(page);
     await page.keyboard.press('ArrowRight');
+    await expect(page).toHaveURL(/\/admin\/accounts$/);
     await expect(accountTab).toBeFocused();
     await assertSurface(page);
     await assertWraps(page, longDisplayName);
@@ -433,14 +452,16 @@ test('lobby and room management show room lifecycle times', async ({ page }) => 
   }
 });
 
-test('room list renders membership and lifecycle status badges', async ({ page }) => {
+test('room admission badges render membership and lifecycle status independently', async ({ page }) => {
   const joinedLobby = room({ id: 'joined-lobby', name: '已加入的准备房间', status: 'LOBBY', mine: true });
   const joinedPlaying = room({ id: 'joined-playing', name: '已加入的对局', status: 'PLAYING', mine: true });
   const joinableLobby = room({ id: 'joinable-lobby', name: '可加入的准备房间', status: 'LOBBY', mine: false, characterId: null, myCharacter: null, isBank: false });
   const joinablePlaying = room({ id: 'joinable-playing', name: '可加入的对局', status: 'PLAYING', mine: false, characterId: null, myCharacter: null, isBank: false });
+  const blockedDisabled = room({ id: 'blocked-disabled', name: '禁止中途加入房间', status: 'PLAYING', mine: false, canJoin: false, joinBlockedReason: 'MIDGAME_JOIN_DISABLED', characterId: null, myCharacter: null, isBank: false });
+  const blockedFull = room({ id: 'blocked-full', name: '人数已满房间', status: 'PLAYING', mine: false, canJoin: false, joinBlockedReason: 'PLAYER_LIMIT', characterId: null, myCharacter: null, isBank: false });
   const finished = room({ id: 'finished', name: '已结束的对局', status: 'FINISHED', mine: true });
 
-  await mockAuthenticated(page, [joinedLobby, joinedPlaying, joinableLobby, joinablePlaying, finished]);
+  await mockAuthenticated(page, [joinedLobby, joinedPlaying, joinableLobby, joinablePlaying, blockedDisabled, blockedFull, finished]);
   await page.goto('/rooms');
 
   for (const [name, badges] of [
@@ -448,6 +469,8 @@ test('room list renders membership and lifecycle status badges', async ({ page }
     ['已加入的对局', ['已加入', '游戏中']],
     ['可加入的准备房间', ['可加入', '准备中']],
     ['可加入的对局', ['可加入', '游戏中']],
+    ['禁止中途加入房间', ['不可加入', '游戏中']],
+    ['人数已满房间', ['不可加入', '游戏中']],
     ['已结束的对局', ['已结束']],
   ] as const) {
     const item = page.getByRole('button', { name: new RegExp(name) });
@@ -456,6 +479,8 @@ test('room list renders membership and lifecycle status badges', async ({ page }
 
   await expect(page.locator('.room-status-joined').first()).toHaveCSS('background-color', 'rgb(36, 104, 72)');
   await expect(page.locator('.room-status-joinable').first()).toHaveCSS('background-color', 'rgb(54, 95, 113)');
+  await expect(page.locator('.room-status-unavailable').first()).toHaveCSS('background-color', 'rgb(98, 105, 99)');
+  await expect(page.locator('.room-status-unavailable').first()).toHaveCSS('border-radius', '6px');
   await expect(page.locator('.room-status-lobby').first()).toHaveCSS('background-color', 'rgb(184, 137, 47)');
   await expect(page.locator('.room-status-playing').first()).toHaveCSS('background-color', 'rgb(116, 31, 40)');
   await expect(page.locator('.room-status-ended')).toHaveCSS('background-color', 'rgb(98, 105, 99)');
@@ -652,7 +677,11 @@ test('player, bank, finish preview, and settlement survive zoom and orientation'
     await confirmFinish.click();
   }
   await expect(page.getByText('不可变结算快照')).toBeVisible();
-  expect(finishSequence).toEqual(['POST /finish', 'GET /settlement']);
+  expect(finishSequence).toEqual([
+    'POST /finish',
+    'GET /settlement',
+    'GET /settlement',
+  ]);
   await assertSurface(page);
   const propertyDetails = page.getByText('地产结算明细（1）');
   if (keyboardOnly) {

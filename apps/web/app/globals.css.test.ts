@@ -71,6 +71,15 @@ describe('admin room configuration controls', () => {
   });
 });
 
+describe('room admission badges', () => {
+  test('uses the unavailable tone without changing the badge radius', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(/\.room-row \.room-status-badge\s*\{[^}]*border-radius:\s*6px;/s);
+    expect(stylesheet).toMatch(/\.room-status-unavailable\s*\{\s*background:\s*#626963;\s*\}/);
+  });
+});
+
 describe('H5 scroll ownership', () => {
   test('locks the document roots', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');

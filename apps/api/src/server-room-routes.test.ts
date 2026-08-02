@@ -58,6 +58,9 @@ async function routeHarness() {
       if (token !== 'cookie-token') throw new RuleError('AUTH_REQUIRED');
       return auth;
     }),
+    joinRoom: vi.fn(async (_auth: AuthenticatedSession, roomId: string, input: { password?: string; characterId?: string }, key: string) => ({
+      id: 'membership-1', roomId, status: 'ACTIVE', characterId: input.characterId ?? null, isBank: false, stateVersion: key.length,
+    })),
     previewSettlement: vi.fn(async (_auth: AuthenticatedSession, _roomId: string, access?: 'ADMIN') => ({
       blockers: [],
       players: access === 'ADMIN' ? [{ accountId: 'admin-preview' }] : [{ accountId: 'member-preview' }],
@@ -77,6 +80,16 @@ async function routeHarness() {
     })),
   };
   const games = {
+    start: vi.fn(async (
+      _actor: unknown,
+      _roomId: string,
+      _key: string,
+      afterCommit?: (event: { removedSessionIds: string[] }) => void,
+    ) => {
+      afterCommit?.({ removedSessionIds: ['private-session-id'] });
+      return { stateVersion: 24 };
+    }),
+    snapshot: vi.fn(async () => ({ id: 'room-1', stateVersion: 24, status: 'PLAYING' })),
     transfer: vi.fn(async () => ({ id: 'transfer-1', status: 'EXECUTED', stateVersion: 22 })),
   };
   const app = await buildApiApp({
@@ -95,7 +108,7 @@ describe('room write route idempotency contract', () => {
     const source = await readFile(new URL('./app.ts', import.meta.url), 'utf8');
     const expectedCalls = [
       /accounts\.createRoom\(auth, body, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
-      /accounts\.joinRoom\(auth, id, password, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
+      /accounts\.joinRoom\(auth, id, body, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
       /accounts\.selectCharacter\(auth, id, characterId, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
       /accounts\.selectBank\(auth, id, idempotencyKey\(request\.headers\['idempotency-key'\]\)\)/,
       /accounts\.takeControl\(auth, id, idempotencyKey\(request\.headers\['idempotency-key'\]\),/,
@@ -127,6 +140,55 @@ describe('room write route idempotency contract', () => {
     const source = await readFile(new URL('./app.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/games\.[A-Za-z]+\([^;\n]*auth\.rawToken/);
     expect(source).not.toMatch(/rawToken:\s*string/);
+  });
+});
+
+describe('room join route contract', () => {
+  it('forwards password and character selection unchanged', async () => {
+    const { accounts, app, headers } = await routeHarness();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/join',
+      headers: { ...headers, 'idempotency-key': 'join-key' },
+      payload: { password: 'secret', characterId: 'meizhuang' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(accounts.joinRoom).toHaveBeenCalledWith(auth, 'room-1', { password: 'secret', characterId: 'meizhuang' }, 'join-key');
+  });
+
+  it('rejects a non-string character before invoking the service', async () => {
+    const { accounts, app, headers } = await routeHarness();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/join',
+      headers: { ...headers, 'idempotency-key': 'invalid-character-key' },
+      payload: { characterId: 42 },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(accounts.joinRoom).not.toHaveBeenCalled();
+  });
+});
+
+describe('room start route contract', () => {
+  it('passes the post-commit callback and keeps removed Session identifiers out of HTTP responses', async () => {
+    const { app, games, headers } = await routeHarness();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room-1/start',
+      headers: { ...headers, 'idempotency-key': 'start-key' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(games.start).toHaveBeenCalledWith(
+      expect.any(Object),
+      'room-1',
+      'start-key',
+      expect.any(Function),
+    );
+    expect(response.json()).toEqual({ id: 'room-1', stateVersion: 24, status: 'PLAYING' });
+    expect(response.body).not.toContain('private-session-id');
   });
 });
 

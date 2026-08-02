@@ -10,6 +10,9 @@ export type BrowserRoomSummary = {
   playerLimit: number;
   hasPassword: boolean;
   mine: boolean;
+  canJoin: boolean;
+  joinBlockedReason: 'MIDGAME_JOIN_DISABLED' | 'PLAYER_LIMIT' | 'ROOM_FINISHED' | null;
+  availableCharacters: Array<{ id: string; name: string }>;
   characterId: string | null;
   myCharacter: string | null;
   isBank: boolean;

@@ -245,6 +245,7 @@
 .room-row .room-status-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border-radius: 6px; color: #fff; font-size: 12px; font-weight: 700; line-height: 1.2; white-space: nowrap; }
 .room-status-joined { background: #246848; }
 .room-status-joinable { background: #365f71; }
+.room-status-unavailable { background: #626963; }
 .room-status-lobby { background: #b8892f; }
 .room-status-playing { background: #741f28; }
 .room-status-ended { background: #626963; }
@@ -925,7 +926,7 @@ label textarea { display: block; margin-top: 7px; }
 .landing-property-search svg { position: absolute; top: 50%; left: 12px; width: 18px; height: 18px; color: var(--muted); transform: translateY(-50%); pointer-events: none; }
 .landing-property-search input { width: 100%; padding-left: 40px; border-radius: 6px; }
 .landing-property-owner-filters { display: flex; flex-wrap: wrap; gap: 7px; }
-.landing-owner-filter { min-height: 32px; padding: 5px 11px; border-radius: 999px; color: var(--ink); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.landing-owner-filter { min-height: 44px; padding: 5px 11px; border-radius: 999px; color: var(--ink); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .property-owner-filter { border: 1px solid color-mix(in srgb, var(--property-theme) 52%, white); background: color-mix(in srgb, var(--property-theme) var(--property-filter-fill, 20%), white); }
 .property-owner-filter.selected { box-shadow: inset 0 0 0 1px var(--property-theme); }
 .landing-owner-filter:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
@@ -975,10 +976,10 @@ label textarea { display: block; margin-top: 7px; }
   .landing-action-sheet .modal-heading h2 { font-size: 19px; }
   .landing-action-sheet .sheet-copy { margin: 3px 0 5px; font-size: 11px; line-height: 1.4; }
   .landing-action-sheet .landing-property-picker { gap: 6px; }
-  .landing-action-sheet .landing-property-search input { min-height: 40px; padding-left: 36px; font-size: 16px; }
+  .landing-action-sheet .landing-property-search input { min-height: 44px; padding-left: 36px; font-size: 16px; }
   .landing-action-sheet .landing-property-search svg { left: 11px; width: 16px; height: 16px; }
   .landing-action-sheet .landing-property-owner-filters { gap: 5px; }
-  .landing-action-sheet .landing-owner-filter { min-height: 40px; padding: 4px 10px; font-size: 11px; }
+  .landing-action-sheet .landing-owner-filter { min-height: 44px; padding: 4px 10px; font-size: 11px; }
   .landing-action-sheet .landing-property-grid { gap: 10px; }
   .landing-action-sheet .landing-property-card { min-height: 174px; padding: 12px 10px 12px 14px; gap: 8px; }
   .landing-action-sheet .landing-property-card.collapsed { height: 174px; }
@@ -997,10 +998,10 @@ label textarea { display: block; margin-top: 7px; }
 @media (max-width: 430px) {
   .browse-property-picker { margin-inline: 16px; gap: 8px; }
   .browse-property-picker .property-expand-hint { padding: 5px 8px; font-size: 11px; }
-  .browse-property-picker .landing-property-search input { min-height: 40px; padding-left: 36px; font-size: 16px; }
+  .browse-property-picker .landing-property-search input { min-height: 44px; padding-left: 36px; font-size: 16px; }
   .browse-property-picker .landing-property-search svg { left: 11px; width: 16px; height: 16px; }
   .browse-property-picker .landing-property-owner-filters { gap: 5px; }
-  .browse-property-picker .landing-owner-filter { min-height: 40px; padding: 4px 10px; font-size: 11px; }
+  .browse-property-picker .landing-owner-filter { min-height: 44px; padding: 4px 10px; font-size: 11px; }
   .browse-property-picker .landing-property-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 0; }
   .browse-property-picker .landing-property-card { min-height: 184px; padding: 12px 10px 12px 14px; gap: 8px; }
   .browse-property-picker .landing-property-card.collapsed { height: 184px; }
