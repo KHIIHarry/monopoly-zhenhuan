@@ -7,6 +7,7 @@ import type { PostCommitToastNotifier } from './realtime-toast-notifications.js'
 
 export type GameActor = { accountId: string; sessionId: string };
 export type SnapshotView = 'PLAYER' | 'BANK';
+export type StartRemovalEvent = { removedSessionIds: string[] };
 export type TransferInput = {
   fromPlayerId: string;
   recipientType: 'PLAYER' | 'BANK';
@@ -215,19 +216,120 @@ export class PrismaGameService {
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
-  async start(actor: GameActor, roomId: string, key: string) {
+  async start(
+    actor: GameActor,
+    roomId: string,
+    key: string,
+    afterCommit?: (event: StartRemovalEvent) => void | Promise<void>,
+  ) {
+    let removedSessionIds: string[] = [];
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
     return this.executeIdempotent(actor, roomId, 'BANK', undefined, 'start', key, { roomId }, async (tx, bank) => {
       const room = await tx.room.findUnique({ where: { id: roomId } });
       if (!room) fail('ROOM_NOT_FOUND');
+      if (room.status !== 'LOBBY') fail('ROOM_NOT_IN_LOBBY');
+      const characterMembers = await tx.roomMembership.findMany({
+        where: { roomId, status: 'ACTIVE', characterId: { not: null } },
+        include: { player: true },
+      });
+      if (characterMembers.some((member) =>
+        !member.player
+        || member.player.status !== 'ACTIVE'
+        || member.player.characterId !== member.characterId,
+      )) {
+        fail('PLAYER_IDENTITY_MISMATCH');
+      }
       const players = await this.playablePlayers(tx, roomId);
-      if (room.status !== 'LOBBY') fail('ROOM_NOT_IN_LOBBY'); if (players.length < 2 || players.length > room.playerLimit) fail('PLAYER_COUNT_OUT_OF_RANGE');
-      const claimed = await tx.room.updateMany({ where: { id: roomId, status: 'LOBBY' }, data: { status: 'PLAYING', startedAt: room.startedAt ?? new Date(), currentTurnPlayerId: null, turnNumber: null } });
+      if (players.length < 2 || players.length > room.playerLimit) fail('PLAYER_COUNT_OUT_OF_RANGE');
+
+      const at = new Date();
+      const emptyMembers = await tx.roomMembership.findMany({
+        where: { roomId, status: 'ACTIVE', characterId: null, isBank: false },
+        include: { player: true },
+      });
+      removedSessionIds = [...new Set(emptyMembers.flatMap((member) =>
+        member.activeSessionId ? [member.activeSessionId] : [],
+      ))];
+
+      await tx.roleSwapRequest.updateMany({
+        where: { roomId, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } },
+        data: { status: 'CANCELLED', rejectionReason: 'ROOM_STARTED', resolvedAt: at },
+      });
+
+      for (const member of emptyMembers) {
+        if (member.player) {
+          await tx.player.update({
+            where: { id: member.player.id },
+            data: { status: 'LEFT', characterId: null },
+          });
+        }
+        await tx.roomMembership.update({
+          where: { id: member.id },
+          data: {
+            status: 'LEFT',
+            characterId: null,
+            isBank: false,
+            activeSessionId: null,
+            controlClaimedAt: null,
+            leftAt: at,
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            roomId,
+            actorMemberId: bank.id,
+            actorRole: 'BANK',
+            action: 'ROOM_START_MEMBER_REMOVED',
+            entityType: 'RoomMembership',
+            entityId: member.id,
+            beforeJson: { status: 'ACTIVE', characterId: null, isBank: false },
+            afterJson: { status: 'LEFT', characterId: null, isBank: false },
+            reason: 'ROOM_STARTED_WITHOUT_CAPABILITY',
+            createdAt: at,
+          },
+        });
+        await tx.securityLog.create({
+          data: {
+            accountId: member.accountId,
+            actorAccountId: actor.accountId,
+            action: 'ROOM_START_MEMBER_REMOVED',
+            detailsJson: { roomId, membershipId: member.id, reason: 'ROOM_STARTED_WITHOUT_CAPABILITY' },
+            createdAt: at,
+          },
+        });
+      }
+
+      const claimed = await tx.room.updateMany({
+        where: { id: roomId, status: 'LOBBY' },
+        data: {
+          status: 'PLAYING',
+          startedAt: room.startedAt ?? at,
+          currentTurnPlayerId: null,
+          turnNumber: null,
+        },
+      });
       if (claimed.count !== 1) fail('ROOM_NOT_IN_LOBBY');
-      if (room.diceMode === 'ELECTRONIC') await this.createNextActionableTurn(tx, roomId, players, 0, 1);
-      await tx.auditLog.create({ data: { roomId, actorMemberId: bank.id, actorRole: 'BANK', action: 'START_ROOM', entityType: 'Room', entityId: roomId, afterJson: { status: 'PLAYING' } } });
+      if (room.diceMode === 'ELECTRONIC') {
+        await this.createNextActionableTurn(tx, roomId, players, 0, 1);
+      }
+      await tx.auditLog.create({
+        data: {
+          roomId,
+          actorMemberId: bank.id,
+          actorRole: 'BANK',
+          action: 'START_ROOM',
+          entityType: 'Room',
+          entityId: roomId,
+          afterJson: { status: 'PLAYING' },
+          createdAt: at,
+        },
+      });
       return { id: roomId, status: 'PLAYING' };
-    });
+    },
+    undefined,
+    () => true,
+    async () => afterCommit?.({ removedSessionIds }),
+  );
   }
 
   async roll(actor: GameActor, roomId: string, playerId: string, key: string) {
