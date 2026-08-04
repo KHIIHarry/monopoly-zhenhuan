@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 
 const workspaceRoot = fileURLToPath(new URL('../../../', import.meta.url));
@@ -793,6 +793,39 @@ integration('V2.1 populated legacy migration', () => {
         actorAccountId: account.id,
         action: 'ROOM_TRASH_TEST',
       } });
+
+      const expectAuthorizedMutationRejected = async (
+        operation: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      ) => {
+        await expect(db.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(
+            "SELECT set_config('zhenhuan.physical_delete_txid', pg_current_xact_id()::text, true)",
+          );
+          await operation(tx);
+        })).rejects.toThrow(/append-only|immutable/);
+      };
+
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`
+        UPDATE "LedgerEntry" SET "description" = "description" WHERE "id" = ${ledger.id}
+      `);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`
+        UPDATE "AuditLog" SET "action" = "action" WHERE "id" = ${audit.id}
+      `);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`
+        UPDATE "SecurityLog" SET "action" = "action" WHERE "id" = ${security.id}
+      `);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`
+        UPDATE "GameSettlement" SET "durationSeconds" = "durationSeconds" WHERE "id" = ${settlement.id}
+      `);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`
+        UPDATE "SettlementPlayer" SET "cash" = "cash" WHERE "id" = ${settlementPlayer.id}
+      `);
+
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`TRUNCATE "LedgerEntry"`);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`TRUNCATE "AuditLog"`);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`TRUNCATE "SecurityLog"`);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`TRUNCATE "SettlementPlayer"`);
+      await expectAuthorizedMutationRejected((tx) => tx.$executeRaw`TRUNCATE "GameSettlement" CASCADE`);
 
       await expect(db.ledgerEntry.delete({ where: { id: ledger.id } })).rejects.toThrow(/LedgerEntry is append-only/);
       await expect(db.auditLog.delete({ where: { id: audit.id } })).rejects.toThrow(/AuditLog is append-only/);
