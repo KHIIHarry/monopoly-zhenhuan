@@ -193,12 +193,15 @@ const notifyVersion = (roomId: string, result: object) => {
   const stateVersion = (result as { stateVersion?: unknown }).stateVersion;
   if (typeof stateVersion === 'number') notify(roomId, 'room.updated', { stateVersion });
 };
+const roomSubscriptionGeneration = new Map<string, number>();
+const currentRoomSubscriptionGeneration = (roomId: string) => roomSubscriptionGeneration.get(roomId) ?? 0;
 const revokeSocketSession = (sessionId: string, reason: string) => {
   const channel = sessionChannel(sessionId);
   io.to(channel).emit('account.session.revoked', { reason });
   io.in(channel).disconnectSockets(true);
 };
 const evictRoomSubscriptions = (roomId: string, reason: string) => {
+  roomSubscriptionGeneration.set(roomId, currentRoomSubscriptionGeneration(roomId) + 1);
   const channel = roomChannel(roomId);
   io.to(channel).emit('room.subscription-rejected', { roomId, reason });
   io.in(channel).socketsLeave(channel);
@@ -516,10 +519,12 @@ io.on('connection', (socket) => {
     return result;
   };
   const subscribedRoomId = () => typeof socket.data.subscribedRoomId === 'string' ? socket.data.subscribedRoomId : null;
-  const applyRoomSubscriptionIntent = async (intent: number, roomId: string | null) => {
-    if (intent !== roomSubscriptionIntent) return false;
+  const applyRoomSubscriptionIntent = async (intent: number, roomId: string | null, generation?: number) => {
+    const current = () => intent === roomSubscriptionIntent
+      && (roomId === null || generation === currentRoomSubscriptionGeneration(roomId));
+    if (!current()) return false;
     await replaceRoomSubscription(socket, roomId);
-    if (intent === roomSubscriptionIntent) return true;
+    if (current()) return true;
     await replaceRoomSubscription(socket, null);
     return false;
   };
@@ -528,10 +533,11 @@ io.on('connection', (socket) => {
     const subscription = parseRoomSubscriptionPayload(payload);
     if (!subscription) { socket.emit('room.subscription-rejected', {}); return; }
     const intent = ++roomSubscriptionIntent;
+    const generation = currentRoomSubscriptionGeneration(subscription.roomId);
     void accounts.authenticate(rawToken, clientIp)
       .then((auth) => accounts.authorizeRoomSession(auth, subscription.roomId))
       .then((membership) => commitRoomSubscription(async () => {
-        if (await applyRoomSubscriptionIntent(intent, subscription.roomId)) {
+        if (await applyRoomSubscriptionIntent(intent, subscription.roomId, generation)) {
           socket.emit('room.snapshot-required', { roomId: subscription.roomId, stateVersion: membership.room.stateVersion });
         }
       }))

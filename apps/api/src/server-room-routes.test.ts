@@ -53,6 +53,7 @@ afterEach(async () => {
 
 async function routeHarness() {
   const notifications: Array<{ roomId: string; event: string; payload: Record<string, unknown> }> = [];
+  let deleteRoomCalls = 0;
   const accounts = {
     authenticate: vi.fn(async (token: string) => {
       if (token !== 'cookie-token') throw new RuleError('AUTH_REQUIRED');
@@ -72,7 +73,7 @@ async function routeHarness() {
       return { created: key !== 'replay-key', settlement: { ...settlement, roomId, forced: input.mode === 'FORCED', stateVersion: input.mode === 'FORCED' ? 12 : 11 } };
     }),
     deleteAccount: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, revokedSessionIds: ['target-session'] })),
-    deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, status: 'LOBBY', deletedAt: new Date(), purgeAfter: new Date(), stateVersion: 13, created: true })),
+    deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, status: 'LOBBY', deletedAt: new Date(), purgeAfter: new Date(), stateVersion: 13, created: ++deleteRoomCalls === 1 })),
     listDeletedRooms: vi.fn(async () => ({ items: [{
       id: 'room-trash', name: '待删房间', code: 'TRASH1', status: 'FINISHED',
       deletedAt: '2026-08-04T00:00:00.000Z', purgeAfter: '2026-08-05T00:00:00.000Z',
@@ -353,6 +354,42 @@ describe('admin deletion routes', () => {
     expect(accounts.restoreRoom).toHaveBeenCalledWith(auth, 'room-trash', 'restore-room-key');
     expect(notifications).toContainEqual({ roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 13 } });
     expect(notifications).toContainEqual({ roomId: 'room-trash', event: 'room.updated', payload: { stateVersion: 14 } });
+  });
+
+  it('returns the trash DTO on replay without repeating its room update notification', async () => {
+    const { app, accounts, headers, notifications } = await routeHarness();
+    const request = {
+      method: 'DELETE' as const,
+      url: '/api/admin/rooms/room-1',
+      headers: { ...headers, 'idempotency-key': 'delete-room-key' },
+    };
+
+    const first = await app.inject(request);
+    const replay = await app.inject(request);
+
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      deleted: true,
+      id: 'room-1',
+      status: 'LOBBY',
+      deletedAt: expect.any(String),
+      purgeAfter: expect.any(String),
+      stateVersion: 13,
+      created: true,
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toMatchObject({
+      deleted: true,
+      id: 'room-1',
+      status: 'LOBBY',
+      deletedAt: expect.any(String),
+      purgeAfter: expect.any(String),
+      stateVersion: 13,
+      created: false,
+    });
+    expect(accounts.deleteRoom).toHaveBeenCalledTimes(2);
+    expect(notifications.filter((notice) => notice.roomId === 'room-1' && notice.event === 'room.updated'))
+      .toEqual([{ roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 13 } }]);
   });
 });
 

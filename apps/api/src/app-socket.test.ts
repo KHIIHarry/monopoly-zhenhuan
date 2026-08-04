@@ -781,6 +781,65 @@ describe('Socket.IO room subscription ownership', () => {
     expect(rejectionCount).toBe(1);
   });
 
+  it('does not subscribe when trash eviction wins an in-flight authorization', async () => {
+    const authorizationStarted = deferred();
+    const releaseAuthorization = deferred();
+    const authorizationFinished = deferred();
+    const roomJoinStarted = deferred();
+    const releaseRoomJoin = deferred();
+    const serverSockets = new Set<ServerSocket>();
+    const originalJoin = ServerSocket.prototype.join;
+    vi.spyOn(ServerSocket.prototype, 'join').mockImplementation(function (this: ServerSocket, rooms) {
+      serverSockets.add(this);
+      if (rooms === 'room:room-a') {
+        roomJoinStarted.resolve();
+        return releaseRoomJoin.promise.then(() => originalJoin.call(this, rooms));
+      }
+      return originalJoin.call(this, rooms);
+    });
+    const accounts = {
+      authenticate: vi.fn(async () => auth),
+      authorizeRoomSession: vi.fn(async () => {
+        authorizationStarted.resolve();
+        await releaseAuthorization.promise;
+        authorizationFinished.resolve();
+        return { room: { stateVersion: 1 } };
+      }),
+      deleteRoom: vi.fn(async () => ({
+        deleted: true as const,
+        id: 'room-a',
+        status: 'LOBBY' as const,
+        deletedAt: new Date(),
+        purgeAfter: new Date(),
+        stateVersion: 2,
+        created: true,
+      })),
+    };
+    const app = await appModule.buildApiApp({ accounts: accounts as unknown as AccountRoomService, games: {} as PrismaGameService, logger: false });
+    openApps.push(app);
+    const address = await app.listen({ host: '127.0.0.1', port: 0 });
+    const client = createSocketClient(address, { extraHeaders: { Cookie: `${sessionCookieName}=cookie-token` }, forceNew: true, reconnection: false, transports: ['websocket'] });
+    openClients.push(client);
+    if (!client.connected) await event(client, 'connect');
+    const snapshots: Array<{ roomId: string }> = [];
+    client.on('room.snapshot-required', (payload) => snapshots.push(payload));
+
+    client.emit('room.subscribe', { roomId: 'room-a' });
+    await authorizationStarted.promise;
+    releaseAuthorization.resolve();
+    await authorizationFinished.promise;
+    await roomJoinStarted.promise;
+    const deleted = await app.inject({ method: 'DELETE', url: '/api/admin/rooms/room-a', headers: { cookie: `${sessionCookieName}=cookie-token`, 'idempotency-key': 'trash-race' } });
+    expect(deleted.statusCode).toBe(200);
+
+    releaseRoomJoin.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const serverSocket = serverSockets.values().next().value;
+    expect(snapshots).toEqual([]);
+    expect(serverSocket?.rooms.has('room:room-a')).toBe(false);
+    expect(serverSocket?.data.subscribedRoomId).toBeUndefined();
+  });
+
   it('delivers one versioned invalidation only to authorized room sockets and disconnects a revoked Session', async () => {
     const sessions = new Map([
       ['cookie-1', { ...auth, session: { id: 'session-1', accountId: auth.account.id } }],
