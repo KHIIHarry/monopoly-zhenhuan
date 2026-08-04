@@ -1112,8 +1112,12 @@ export class AccountRoomService {
         if (!result) break;
         serializationConflicts = 0;
         processed += 1;
-        this.roomPurgeLogger(result.log);
         results.push(result.value);
+        try {
+          this.roomPurgeLogger(result.log);
+        } catch {
+          // Logging observes a committed delete and cannot change its result.
+        }
       } catch (error) {
         if (isSerializationConflict(error) && serializationConflicts < 2) {
           serializationConflicts += 1;
@@ -1123,7 +1127,11 @@ export class AccountRoomService {
         if (!claimedRoomId) throw error;
         processed += 1;
         failedRoomIds.add(claimedRoomId);
-        this.roomPurgeErrorLogger(error, claimedRoomId);
+        try {
+          this.roomPurgeErrorLogger(error, claimedRoomId);
+        } catch {
+          // A failed observer cannot stop the remaining batch.
+        }
       }
     }
 

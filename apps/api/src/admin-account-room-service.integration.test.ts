@@ -1981,6 +1981,32 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(await db.room.count({ where: { id: { in: [beforeDeadline.id, atDeadline.id] } } })).toBe(0);
   });
 
+  it('keeps committed results and continues when the success logger throws', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const rooms = await Promise.all(Array.from({ length: 2 }, () => createRoom(creator.account.id, 'ENDED')));
+    const now = new Date('1999-01-02T00:00:00.000Z');
+    await db.room.updateMany({
+      where: { id: { in: rooms.map((room) => room.id) } },
+      data: {
+        deletedAt: new Date('1999-01-01T00:00:00.000Z'),
+        purgeAfter: now,
+        deletedByAccountId: admin.account.id,
+      },
+    });
+    let loggerCalls = 0;
+    const service = new AccountRoomService(db, undefined, undefined, () => {
+      loggerCalls += 1;
+      throw new Error('SUCCESS_LOGGER_FAILED');
+    });
+
+    const results = await service.purgeExpiredRooms(now);
+
+    expect(results.map((result) => result.id).sort()).toEqual(rooms.map((room) => room.id).sort());
+    expect(loggerCalls).toBe(2);
+    expect(await db.room.count({ where: { id: { in: rooms.map((room) => room.id) } } })).toBe(0);
+  });
+
   it('never purges more than 20 rooms in one batch', async () => {
     const admin = await createAccount({ superAdmin: true });
     const creator = await createAccount();
@@ -1999,6 +2025,11 @@ integration('Task 6 real-Cookie admin routes', () => {
     try {
       await expect(service.purgeExpiredRooms(now, 100)).resolves.toHaveLength(20);
       expect(await db.room.count({ where: { id: { in: rooms.map((room) => room.id) } } })).toBe(1);
+      await expect(service.purgeExpiredRooms(now, -1)).resolves.toEqual([]);
+      const remaining = await db.room.findFirstOrThrow({ where: { id: { in: rooms.map((room) => room.id) } } });
+      await expect(service.purgeExpiredRooms(now, Number.NaN)).resolves.toEqual([
+        { id: remaining.id, deleted: true },
+      ]);
     } finally {
       await db.room.deleteMany({ where: { id: { in: rooms.map((room) => room.id) } } });
     }
@@ -2043,16 +2074,65 @@ integration('Task 6 real-Cookie admin routes', () => {
       },
     });
     const service = new AccountRoomService(db);
+    const suffix = randomUUID().replaceAll('-', '');
+    const barrierFunction = `expired_room_barrier_function_${suffix}`;
+    const barrierTrigger = `expired_room_barrier_trigger_${suffix}`;
+    const barrierKey = (Number.parseInt(suffix.slice(0, 8), 16) % 2_000_000_000) + 1;
+    let releaseBarrier = () => undefined;
+    let barrierTransaction: Promise<unknown> | undefined;
 
-    const batches = await Promise.all([
-      service.purgeExpiredRooms(now),
-      service.purgeExpiredRooms(now),
-    ]);
-    const deletedIds = batches.flat().filter((result) => result.deleted).map((result) => result.id).sort();
+    try {
+      await db.$executeRawUnsafe(`
+        CREATE FUNCTION "${barrierFunction}"() RETURNS TRIGGER AS $$
+        BEGIN
+          IF OLD."id" IN (${rooms.map((room) => `'${room.id}'`).join(', ')}) THEN
+            PERFORM pg_advisory_xact_lock(${barrierKey});
+          END IF;
+          RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql
+      `);
+      await db.$executeRawUnsafe(`
+        CREATE TRIGGER "${barrierTrigger}"
+        BEFORE DELETE ON "Room"
+        FOR EACH ROW EXECUTE FUNCTION "${barrierFunction}"()
+      `);
+      let markBarrierHeld!: () => void;
+      const barrierHeld = new Promise<void>((resolve) => { markBarrierHeld = resolve; });
+      const barrierRelease = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+      barrierTransaction = db.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(${barrierKey})::text`);
+        markBarrierHeld();
+        await barrierRelease;
+      }, { timeout: 30_000 });
+      await barrierHeld;
 
-    expect(deletedIds).toEqual(rooms.map((room) => room.id).sort());
-    expect(new Set(deletedIds).size).toBe(rooms.length);
-  });
+      const scans = [service.purgeExpiredRooms(now), service.purgeExpiredRooms(now)];
+      await expect.poll(async () => {
+        const rows = await db.$queryRawUnsafe<Array<{ count: number }>>(`
+          SELECT COUNT(*)::int AS "count"
+          FROM pg_locks
+          WHERE locktype = 'advisory'
+            AND objid = ${barrierKey}
+            AND granted = false
+        `);
+        return rows[0]?.count ?? 0;
+      }).toBeGreaterThanOrEqual(2);
+      releaseBarrier();
+      await barrierTransaction;
+      const batches = await Promise.all(scans);
+      const deletedIds = batches.flat().filter((result) => result.deleted).map((result) => result.id).sort();
+
+      expect(deletedIds).toEqual(rooms.map((room) => room.id).sort());
+      expect(new Set(deletedIds).size).toBe(rooms.length);
+    } finally {
+      releaseBarrier();
+      await barrierTransaction?.catch(() => undefined);
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${barrierTrigger}" ON "Room"`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${barrierFunction}"()`);
+      await db.room.deleteMany({ where: { id: { in: rooms.map((room) => room.id) } } });
+    }
+  }, 20_000);
 
   it('records one room failure and continues with other rooms without retrying it in the same batch', async () => {
     const admin = await createAccount({ superAdmin: true });
@@ -2076,7 +2156,10 @@ integration('Task 6 real-Cookie admin routes', () => {
       undefined,
       undefined,
       undefined,
-      (error, roomId) => failures.push({ roomId, error }),
+      (error, roomId) => {
+        failures.push({ roomId, error });
+        throw new Error('FAILURE_LOGGER_FAILED');
+      },
     );
     const suffix = randomUUID().replaceAll('-', '');
     const failureFunction = `expired_room_failure_function_${suffix}`;
