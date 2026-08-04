@@ -32,7 +32,9 @@ describe('workbench dialog viewport ownership', () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
     const focusHook = functionSource(component, 'useDialogFocus', 'ActionSheet');
 
-    expect(focusHook).toContain('function useDialogFocus(onClose: () => void, enabled: boolean)');
+    expect(focusHook).toMatch(
+      /function useDialogFocus\(\s*onClose: \(\) => void,\s*enabled: boolean,\s*restoreFocusFallbackRef\?: DialogFocusFallbackRef,\s*\)/,
+    );
     expect(focusHook).toMatch(/useEffect\([\s\S]*?, \[enabled\]\);/);
   });
 });

@@ -10,7 +10,7 @@ afterEach(async () => {
 
 describe('browser CORS preflight', () => {
   it.each(['PATCH', 'DELETE'])('allows %s for cross-origin API writes', async (method) => {
-    const app = await buildApiApp({ logger: false });
+    const app = await buildApiApp({ accounts: {} as AccountRoomService, logger: false });
     openApps.push(app);
 
     const response = await app.inject({
