@@ -344,6 +344,7 @@ app.get('/api/admin/rooms', async (request) => {
   const query = z.object({ query: z.string().trim().min(1).max(100).optional(), status: z.enum(['LOBBY', 'PLAYING', 'FINISHED']).optional(), cursor: z.string().optional(), limit: z.coerce.number().int().min(1).max(100).optional() }).parse(request.query);
   return accounts.listAdminRooms(auth, query);
 });
+app.get('/api/admin/rooms/trash', async (request) => accounts.listDeletedRooms(await authenticate(request)));
 app.get('/api/admin/rooms/:id', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); return accounts.getAdminRoom(auth, id); });
 app.patch('/api/admin/rooms/:id', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
@@ -427,7 +428,13 @@ app.delete('/api/admin/rooms/:id', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
   const result = await accounts.deleteRoom(auth, id, idempotencyKey(request.headers['idempotency-key']));
   if (result.created) notifyVersion(id, result);
-  return { deleted: true, id: result.id };
+  return result;
+});
+app.post('/api/admin/rooms/:id/restore', async (request) => {
+  const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
+  const result = await accounts.restoreRoom(auth, id, idempotencyKey(request.headers['idempotency-key']));
+  if (result.created) notifyVersion(id, result);
+  return result;
 });
 
 app.get('/api/rooms/:id/snapshot', async (request) => { const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params); const { view } = z.object({ view: z.enum(['PLAYER', 'BANK']).optional() }).parse(request.query); await accounts.authorizeRoomSession(auth, id); return games.snapshot(gameActor(auth), id, view); });

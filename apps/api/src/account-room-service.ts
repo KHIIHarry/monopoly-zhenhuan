@@ -515,6 +515,13 @@ export class AccountRoomService {
     if (!rows.length) fail('ROOM_NOT_FOUND');
   }
 
+  private async lockRoomIncludingTrash(tx: Prisma.TransactionClient, roomId: string) {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Room" WHERE "id" = ${roomId} FOR UPDATE
+    `;
+    if (!rows.length) fail('ROOM_NOT_FOUND');
+  }
+
   private async playablePlayers(tx: Prisma.TransactionClient, roomId: string) {
     const candidates = await tx.player.findMany({
       where: {
@@ -931,8 +938,14 @@ export class AccountRoomService {
     });
   }
 
-  async deleteRoom(auth: AuthenticatedSession, roomId: string, key: string) {
-    const replay = await this.replayAdminDelete<{ deleted: true; id: string; stateVersion: number }>(auth, 'room:delete', roomId, key, { roomId });
+  async deleteRoom(auth: AuthenticatedSession, roomId: string, key: string): Promise<{
+    deleted: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED';
+    deletedAt: Date; purgeAfter: Date; stateVersion: number; created: boolean;
+  }> {
+    const replay = await this.replayAdminDelete<{
+      deleted: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED';
+      deletedAt: Date; purgeAfter: Date; stateVersion: number;
+    }>(auth, 'room:delete', roomId, key, { roomId });
     if (replay) return { ...replay, created: false };
     const result = await this.executeAdminWrite({
       auth,
@@ -940,64 +953,104 @@ export class AccountRoomService {
       resourceId: roomId,
       key,
       input: { roomId },
-      lock: (tx) => this.lockRoom(tx, roomId),
+      lock: (tx) => this.lockRoomIncludingTrash(tx, roomId),
       authorize: async () => undefined,
       mutate: async (tx) => {
         const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
-        const existingArchive = await tx.auditLog.findFirst({
-          where: { roomId, action: 'ADMIN_ROOM_ARCHIVED' },
-          select: { id: true },
-        });
-        if (existingArchive) {
-          return { value: { deleted: true as const, id: roomId }, mutationCreated: false };
+        if (room.status === 'PLAYING') fail('ROOM_MUST_END_BEFORE_DELETE');
+        if (room.deletedAt && room.purgeAfter) {
+          return {
+            value: { deleted: true as const, id: roomId, status: room.status, deletedAt: room.deletedAt, purgeAfter: room.purgeAfter, stateVersion: room.stateVersion },
+            mutationCreated: false,
+          };
         }
-        const archivedAt = new Date();
-        await tx.gameRequest.updateMany({
-          where: { roomId, status: 'PENDING' },
-          data: { status: 'CANCELLED', rejectionReason: 'ADMIN_ROOM_ARCHIVED', resolvedAt: archivedAt },
-        });
-        await tx.roomProperty.updateMany({
-          where: { roomId, lockedByRequestId: { not: null } },
-          data: { lockedByRequestId: null, version: { increment: 1 } },
-        });
-        await tx.roleSwapRequest.updateMany({
-          where: { roomId, status: { in: ['PENDING_TARGET', 'PENDING_BANK'] } },
-          data: { status: 'CANCELLED', rejectionReason: 'ADMIN_ROOM_ARCHIVED', resolvedAt: archivedAt },
-        });
-        await tx.landingEvent.updateMany({
-          where: { roomId, status: { in: ['DECLARED', 'CONFIRMED'] } },
-          data: { status: 'INVALIDATED', invalidatedAt: archivedAt, propertyActionsCancelled: true },
-        });
-        await tx.turn.updateMany({
-          where: { roomId, status: 'ACTIVE' },
-          data: { status: 'ENDED', endedAt: archivedAt },
-        });
-        const archivedStatus = room.status === 'FINISHED' ? 'FINISHED' : 'CLOSED';
+        const deletedAt = new Date();
+        const purgeAfter = new Date(deletedAt.getTime() + 86_400_000);
         await tx.room.update({
           where: { id: roomId },
-          data: { status: archivedStatus, currentTurnPlayerId: null, turnNumber: null },
+          data: { deletedAt, purgeAfter, deletedByAccountId: auth.account.id },
         });
-        await tx.auditLog.create({ data: {
-          roomId,
-          actorRole: 'ADMIN',
-          action: 'ADMIN_ROOM_ARCHIVED',
-          entityType: 'Room',
-          entityId: roomId,
-          beforeJson: { status: room.status },
-          afterJson: { status: archivedStatus },
-          createdAt: archivedAt,
-        } });
         await tx.securityLog.create({ data: {
           actorAccountId: auth.account.id,
-          action: 'ADMIN_ROOM_ARCHIVED',
-          detailsJson: { roomId, previousStatus: room.status, status: archivedStatus },
-          createdAt: archivedAt,
+          action: 'ADMIN_ROOM_MOVED_TO_TRASH',
+          detailsJson: { roomId, roomName: room.name, status: room.status, deletedAt, purgeAfter },
+          createdAt: deletedAt,
         } });
-        return { value: { deleted: true as const, id: roomId } };
+        return { value: { deleted: true as const, id: roomId, status: room.status, deletedAt, purgeAfter, stateVersion: room.stateVersion + 1 } };
       },
       roomId,
     });
-    return { ...result.value, created: result.created };
+    return { ...result.value, created: result.created } as {
+      deleted: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED';
+      deletedAt: Date; purgeAfter: Date; stateVersion: number; created: boolean;
+    };
+  }
+
+  async listDeletedRooms(auth: AuthenticatedSession) {
+    await this.requireCurrentAdmin(auth);
+    const rooms = await this.db.room.findMany({
+      where: { deletedAt: { not: null } },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+        status: true,
+        deletedAt: true,
+        purgeAfter: true,
+        deletedByAccount: { select: { id: true, displayName: true } },
+      },
+      orderBy: [{ purgeAfter: 'asc' }, { id: 'asc' }],
+    });
+    return {
+      items: rooms.map((room) => ({
+        id: room.id,
+        name: room.name,
+        code: room.code,
+        status: room.status,
+        deletedAt: required(room.deletedAt, 'ROOM_NOT_IN_TRASH'),
+        purgeAfter: required(room.purgeAfter, 'ROOM_NOT_IN_TRASH'),
+        deletedBy: room.deletedByAccount,
+      })),
+    };
+  }
+
+  async restoreRoom(auth: AuthenticatedSession, roomId: string, key: string): Promise<{
+    restored: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED'; stateVersion: number; created: boolean;
+  }> {
+    const replay = await this.replayAdminDelete<{
+      restored: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED'; stateVersion: number;
+    }>(auth, 'room:restore', roomId, key, { roomId });
+    if (replay) return { ...replay, created: false };
+    const result = await this.executeAdminWrite({
+      auth,
+      operation: 'room:restore',
+      resourceId: roomId,
+      key,
+      input: { roomId },
+      lock: (tx) => this.lockRoomIncludingTrash(tx, roomId),
+      authorize: async () => undefined,
+      mutate: async (tx) => {
+        const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
+        if (!room.deletedAt && !room.purgeAfter && !room.deletedByAccountId) {
+          return { value: { restored: true as const, id: roomId, status: room.status, stateVersion: room.stateVersion }, mutationCreated: false };
+        }
+        if (!room.deletedAt || !room.purgeAfter) fail('ROOM_NOT_IN_TRASH');
+        await tx.room.update({
+          where: { id: roomId },
+          data: { deletedAt: null, purgeAfter: null, deletedByAccountId: null },
+        });
+        await tx.securityLog.create({ data: {
+          actorAccountId: auth.account.id,
+          action: 'ADMIN_ROOM_RESTORED',
+          detailsJson: { roomId, roomName: room.name, status: room.status },
+        } });
+        return { value: { restored: true as const, id: roomId, status: room.status, stateVersion: room.stateVersion + 1 } };
+      },
+      roomId,
+    });
+    return { ...result.value, created: result.created } as {
+      restored: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED'; stateVersion: number; created: boolean;
+    };
   }
 
   async listAdminRooms(auth: AuthenticatedSession, input: { query?: string; status?: 'LOBBY' | 'PLAYING' | 'FINISHED'; cursor?: string; limit?: number } = {}) {

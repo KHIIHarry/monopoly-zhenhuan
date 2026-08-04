@@ -16,6 +16,7 @@ const permissionErrors = new Set([
   'UNAUTHORIZED',
 ]);
 const rateLimitErrors = new Set(['RATE_LIMITED']);
+const conflictErrors = new Set(['ROOM_MUST_END_BEFORE_DELETE', 'ROOM_NOT_IN_TRASH']);
 
 const fastifyParserErrors = new Map<string, { status: number; code: string }>([
   ['FST_ERR_CTP_EMPTY_TYPE', { status: 400, code: 'INVALID_REQUEST' }],
@@ -56,8 +57,10 @@ export function mapApiError(error: unknown) {
       ? 401
       : permissionErrors.has(error.code)
         ? 403
-        : rateLimitErrors.has(error.code)
+      : rateLimitErrors.has(error.code)
           ? 429
+      : conflictErrors.has(error.code)
+          ? 409
       : error.code.endsWith('_NOT_FOUND')
         ? 404
         : 409;

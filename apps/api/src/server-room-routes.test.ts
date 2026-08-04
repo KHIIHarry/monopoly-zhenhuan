@@ -72,7 +72,13 @@ async function routeHarness() {
       return { created: key !== 'replay-key', settlement: { ...settlement, roomId, forced: input.mode === 'FORCED', stateVersion: input.mode === 'FORCED' ? 12 : 11 } };
     }),
     deleteAccount: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, revokedSessionIds: ['target-session'] })),
-    deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, stateVersion: 13 })),
+    deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, status: 'LOBBY', deletedAt: new Date(), purgeAfter: new Date(), stateVersion: 13, created: true })),
+    listDeletedRooms: vi.fn(async () => ({ items: [{
+      id: 'room-trash', name: '待删房间', code: 'TRASH1', status: 'FINISHED',
+      deletedAt: '2026-08-04T00:00:00.000Z', purgeAfter: '2026-08-05T00:00:00.000Z',
+      deletedBy: { id: 'account-1', displayName: '结算银行' },
+    }] })),
+    restoreRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ restored: true as const, id, status: 'FINISHED', stateVersion: 14, created: true })),
     listRooms: vi.fn(async () => [
       { id: 'lobby', mine: true, status: 'LOBBY' },
       { id: 'playing', mine: true, status: 'PLAYING' },
@@ -309,7 +315,7 @@ describe('unified transfer route contract', () => {
 });
 
 describe('admin deletion routes', () => {
-  it('forwards idempotency keys and emits post-commit account and room invalidations', async () => {
+  it('routes trash lifecycle operations before dynamic room ids and forwards idempotency keys', async () => {
     const { accounts, app, headers, notifications } = await routeHarness();
 
     const accountResponse = await app.inject({
@@ -322,12 +328,31 @@ describe('admin deletion routes', () => {
       url: '/api/admin/rooms/room-1',
       headers: { ...headers, 'idempotency-key': 'delete-room-key' },
     });
+    const trashResponse = await app.inject({
+      method: 'GET',
+      url: '/api/admin/rooms/trash',
+      headers,
+    });
+    const restoreResponse = await app.inject({
+      method: 'POST',
+      url: '/api/admin/rooms/room-trash/restore',
+      headers: { ...headers, 'idempotency-key': 'restore-room-key' },
+    });
 
     expect(accountResponse.json()).toEqual({ deleted: true, id: 'account-target' });
-    expect(roomResponse.json()).toEqual({ deleted: true, id: 'room-1' });
+    expect(roomResponse.json()).toMatchObject({ deleted: true, id: 'room-1', status: 'LOBBY', stateVersion: 13 });
+    expect(trashResponse.json()).toEqual({ items: [{
+      id: 'room-trash', name: '待删房间', code: 'TRASH1', status: 'FINISHED',
+      deletedAt: '2026-08-04T00:00:00.000Z', purgeAfter: '2026-08-05T00:00:00.000Z',
+      deletedBy: { id: 'account-1', displayName: '结算银行' },
+    }] });
+    expect(restoreResponse.json()).toEqual({ restored: true, id: 'room-trash', status: 'FINISHED', stateVersion: 14, created: true });
     expect(accounts.deleteAccount).toHaveBeenCalledWith(auth, 'account-target', 'delete-account-key');
     expect(accounts.deleteRoom).toHaveBeenCalledWith(auth, 'room-1', 'delete-room-key');
+    expect(accounts.listDeletedRooms).toHaveBeenCalledWith(auth);
+    expect(accounts.restoreRoom).toHaveBeenCalledWith(auth, 'room-trash', 'restore-room-key');
     expect(notifications).toContainEqual({ roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 13 } });
+    expect(notifications).toContainEqual({ roomId: 'room-trash', event: 'room.updated', payload: { stateVersion: 14 } });
   });
 });
 

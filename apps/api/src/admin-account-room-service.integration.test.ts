@@ -100,7 +100,7 @@ async function loginCookie(account: { username: string }, password: string, ip =
   return { header: `${sessionCookieName}=${cookie!.value}`, token: cookie!.value };
 }
 
-async function createRoom(creatorId: string, status: 'LOBBY' | 'PLAYING' | 'FINISHED' = 'LOBBY') {
+async function createRoom(creatorId: string, status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED' = 'LOBBY') {
   return db.room.create({ data: {
     code: randomUUID().slice(0, 8).toUpperCase(),
     name: `Task 6 Room ${randomUUID().slice(0, 6)}`,
@@ -146,99 +146,59 @@ function socketEvent<T>(socket: ClientSocket, name: string) {
 }
 
 integration('Task 6 real-Cookie admin routes', () => {
-  it('archives only the selected room while retaining its immutable history', async () => {
+  it('moves ended rooms to trash without changing status, lists them, and restores them idempotently', async () => {
     const admin = await createAccount({ superAdmin: true });
     const creator = await createAccount();
-    const unrelatedCreator = await createAccount();
     const cookie = await loginCookie(admin.account, admin.password);
-    const target = await createRoom(creator.account.id);
-    const unrelated = await createRoom(unrelatedCreator.account.id);
-    const definition = await db.propertyDefinition.create({ data: {
-      name: `Dashboard delete property ${randomUUID()}`,
-      displayOrder: Math.floor(Math.random() * 1_000_000),
-      mortgagePrice: 100,
-      purchasePrice: 200,
-      buildCost: 50,
-      buildingSellPrice: 25,
-      tollEmpty: 10,
-      tollLevel1: 20,
-      tollLevel2: 30,
-      tollLevel3: 40,
-      tollLevel4: 50,
-      tollPalace: 60,
-    } });
-    const characterId = `dashboard-delete-${randomUUID()}`;
-    await db.character.create({ data: {
-      id: characterId,
-      name: 'Deleted room character',
-      skillCode: `dashboard-delete-skill-${randomUUID()}`,
-      skillConfig: {},
-      initialPropertyId: definition.id,
-    } });
-    await db.securityLog.createMany({ data: [
-      { accountId: creator.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: target.id, characterId, characterNameSnapshot: 'Deleted room character' } },
-      { accountId: unrelatedCreator.account.id, action: 'CHARACTER_SELECTED', detailsJson: { roomId: unrelated.id, characterId, characterNameSnapshot: 'Deleted room character' } },
-    ] });
-    await db.auditLog.create({ data: { roomId: target.id, actorRole: 'ADMIN', action: 'DELETE_COVERAGE', entityType: 'Room', entityId: target.id } });
-    const member = await db.roomMembership.create({ data: { roomId: target.id, accountId: creator.account.id, displayNameSnapshot: creator.account.displayName } });
-    const player = await db.player.create({ data: { roomId: target.id, memberId: member.id, pawnColor: '测试', balance: 0 } });
-    const transaction = await db.gameTransaction.create({ data: { roomId: target.id, type: 'DELETE_COVERAGE', metadata: {} } });
-    await db.ledgerEntry.create({ data: { roomId: target.id, transactionId: transaction.id, playerId: player.id, amount: 0, balanceBefore: 0, balanceAfter: 0, type: 'DELETE_COVERAGE', description: '删除覆盖' } });
+    const adminHeaders = { cookie: cookie.header };
+    const moveToTrash = (roomId: string, key: string) => app.inject({
+      method: 'DELETE', url: `/api/admin/rooms/${roomId}`,
+      headers: { ...adminHeaders, 'idempotency-key': key },
+    });
+    const playing = await createRoom(creator.account.id, 'PLAYING');
 
-    const blocked = await app.inject({
-      method: 'DELETE', url: `/api/admin/accounts/${creator.account.id}`,
-      headers: { cookie: cookie.header, 'idempotency-key': 'blocked-account-delete' },
-    });
-    expect(blocked.statusCode).toBe(409);
-    expect(blocked.json()).toEqual({ error: 'ACCOUNT_DELETE_BLOCKED' });
-    expect(await db.account.findUnique({ where: { id: creator.account.id } })).not.toBeNull();
+    expect((await moveToTrash(playing.id, 'playing-delete')).json())
+      .toEqual({ error: 'ROOM_MUST_END_BEFORE_DELETE' });
+    expect(await db.room.findUnique({ where: { id: playing.id } }))
+      .toMatchObject({ status: 'PLAYING', deletedAt: null, purgeAfter: null });
 
-    const deleted = await app.inject({
-      method: 'DELETE', url: `/api/admin/rooms/${target.id}`,
-      headers: { cookie: cookie.header, 'idempotency-key': 'room-delete' },
-    });
-    const replay = await app.inject({
-      method: 'DELETE', url: `/api/admin/rooms/${target.id}`,
-      headers: { cookie: cookie.header, 'idempotency-key': 'room-delete' },
-    });
-    const repeatedWithNewKey = await app.inject({
-      method: 'DELETE', url: `/api/admin/rooms/${target.id}`,
-      headers: { cookie: cookie.header, 'idempotency-key': 'room-delete-again' },
-    });
-    expect(deleted.statusCode).toBe(200);
-    expect(replay.json()).toEqual(deleted.json());
-    expect(repeatedWithNewKey.statusCode).toBe(200);
-    expect(repeatedWithNewKey.json()).toEqual(deleted.json());
-    expect(await db.room.findUnique({ where: { id: target.id } })).toMatchObject({
-      status: 'CLOSED',
-      currentTurnPlayerId: null,
-      stateVersion: 1,
-    });
-    expect(await db.auditLog.count({ where: { roomId: target.id } })).toBe(2);
-    expect(await db.auditLog.findFirst({ where: { roomId: target.id, action: 'ADMIN_ROOM_ARCHIVED' } })).not.toBeNull();
-    expect(await db.securityLog.count({ where: { action: 'ADMIN_ROOM_ARCHIVED', detailsJson: { path: ['roomId'], equals: target.id } } })).toBe(1);
-    expect(await db.ledgerEntry.count({ where: { roomId: target.id } })).toBe(1);
-    await expect(db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(
-        "SELECT set_config('zhenhuan.physical_delete_txid', pg_current_xact_id()::text, true)",
-      );
-      await tx.ledgerEntry.deleteMany({ where: { roomId: target.id } });
-    })).rejects.toThrow(/LedgerEntry is append-only/);
-    await expect(db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(
-        "SELECT set_config('zhenhuan.physical_delete_txid', pg_current_xact_id()::text, true)",
-      );
-      await tx.auditLog.deleteMany({ where: { roomId: target.id } });
-    })).rejects.toThrow(/AuditLog is append-only/);
-    expect(await db.securityLog.count({ where: { action: 'CHARACTER_SELECTED', detailsJson: { path: ['roomId'], equals: target.id } } })).toBe(1);
-    expect(await db.securityLog.count({ where: { action: 'CHARACTER_SELECTED', detailsJson: { path: ['roomId'], equals: unrelated.id } } })).toBe(1);
-    expect(await db.room.findUnique({ where: { id: unrelated.id } })).not.toBeNull();
-    expect(await db.account.findUnique({ where: { id: creator.account.id } })).not.toBeNull();
-    expect(await db.account.findUnique({ where: { id: unrelatedCreator.account.id } })).not.toBeNull();
+    for (const status of ['LOBBY', 'ENDED', 'FINISHED', 'CLOSED'] as const) {
+      const target = await createRoom(creator.account.id, status);
+      const response = await moveToTrash(target.id, `trash-${status}`);
+      expect(response.statusCode).toBe(200);
+      const stored = await db.room.findUniqueOrThrow({ where: { id: target.id } });
+      expect(stored.status).toBe(status);
+      expect(stored.purgeAfter!.getTime() - stored.deletedAt!.getTime()).toBe(86_400_000);
+    }
 
-    const dashboard = await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: { cookie: cookie.header } });
-    expect(dashboard.statusCode).toBe(200);
-    expect(dashboard.json().characterSelections).toContainEqual({ characterId, characterNameSnapshot: 'Deleted room character', count: 2 });
+    const lobby = await createRoom(creator.account.id, 'LOBBY');
+    const first = await moveToTrash(lobby.id, 'trash-lobby');
+    expect(first.statusCode).toBe(200);
+    const firstStored = await db.room.findUniqueOrThrow({ where: { id: lobby.id } });
+    await moveToTrash(lobby.id, 'trash-lobby');
+    await moveToTrash(lobby.id, 'trash-lobby-new-key');
+    const repeatedStored = await db.room.findUniqueOrThrow({ where: { id: lobby.id } });
+    expect(repeatedStored.deletedAt).toEqual(firstStored.deletedAt);
+    expect(repeatedStored.purgeAfter).toEqual(firstStored.purgeAfter);
+
+    const trash = await app.inject({ method: 'GET', url: '/api/admin/rooms/trash', headers: adminHeaders });
+    expect(trash.statusCode).toBe(200);
+    expect(trash.json().items.map((item: { purgeAfter: string }) => item.purgeAfter))
+      .toEqual([...trash.json().items.map((item: { purgeAfter: string }) => item.purgeAfter)].sort());
+
+    const restored = await app.inject({
+      method: 'POST', url: `/api/admin/rooms/${lobby.id}/restore`,
+      headers: { ...adminHeaders, 'idempotency-key': 'restore-lobby' },
+    });
+    expect(restored.statusCode).toBe(200);
+    const restoredRoom = await db.room.findUniqueOrThrow({ where: { id: lobby.id } });
+    expect(restoredRoom).toMatchObject({ status: 'LOBBY', deletedAt: null, purgeAfter: null, deletedByAccountId: null });
+    const restoredAgain = await app.inject({
+      method: 'POST', url: `/api/admin/rooms/${lobby.id}/restore`,
+      headers: { ...adminHeaders, 'idempotency-key': 'restore-lobby-new-key' },
+    });
+    expect(restoredAgain.statusCode).toBe(200);
+    expect((await db.room.findUniqueOrThrow({ where: { id: lobby.id } })).stateVersion).toBe(restoredRoom.stateVersion);
   });
 
   it('excludes character selections from deleted rooms', async () => {

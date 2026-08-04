@@ -73,6 +73,16 @@ describe('mapApiError', () => {
       body: { error: 'LEGACY_SETTLEMENT_UNAVAILABLE' },
       expose: true,
     });
+    expect(mapApiError(new RuleError('ROOM_MUST_END_BEFORE_DELETE'))).toEqual({
+      status: 409,
+      body: { error: 'ROOM_MUST_END_BEFORE_DELETE' },
+      expose: true,
+    });
+    expect(mapApiError(new RuleError('ROOM_NOT_IN_TRASH'))).toEqual({
+      status: 409,
+      body: { error: 'ROOM_NOT_IN_TRASH' },
+      expose: true,
+    });
     expect(mapApiError(new RuleError('SETTLEMENT_INCONSISTENT'))).toEqual({
       status: 500,
       body: { error: 'SETTLEMENT_INCONSISTENT' },
