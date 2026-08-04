@@ -129,7 +129,9 @@ export class PrismaGameService {
   }
 
   async snapshot(actor: GameActor, roomId: string, requestedView?: SnapshotView) {
-    return this.db.$transaction(async (tx) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.db.$transaction(async (tx) => {
       await this.lockRoom(tx, roomId);
       const membership = await this.authorizeActor(tx, actor, roomId);
       const hasPlayableIdentity = membership.characterId !== null
@@ -220,7 +222,12 @@ export class PrismaGameService {
         effects: reversal.ledgerEntries.map((entry) => ({ playerId: entry.playerId, amount: entry.amount })),
       } : null
     };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      } catch (error) {
+        if (!isSerializationConflict(error) || attempt === 2) throw error;
+      }
+    }
+    return fail('TRANSACTION_RETRY_EXHAUSTED');
   }
 
   async start(
@@ -1510,7 +1517,12 @@ export class PrismaGameService {
 
   private async lockRoom(tx: Prisma.TransactionClient, roomId: string) {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT "id" FROM "Room" WHERE "id" = ${roomId} AND "deletedAt" IS NULL FOR UPDATE
+      SELECT "id"
+      FROM "Room"
+      WHERE "id" = ${roomId}
+        AND "deletedAt" IS NULL
+      /* zhenhuan:prisma-game-lock-room */
+      FOR UPDATE
     `;
     if (!rows.length) fail('ROOM_NOT_FOUND');
   }

@@ -15,6 +15,16 @@ import { buildFundToastDeliveries } from './realtime-toast-notifications.js';
 
 const unsafeResetConfirmation = 'I_UNDERSTAND_THIS_WILL_DELETE_ALL_DATA';
 
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function parseDatabaseTarget(rawUrl: string, variableName: string) {
   let parsed: URL;
   try {
@@ -371,6 +381,44 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     await first.confirmLanding(room.id, landingA.id, bank.token, true);
     await first.confirmLanding(room.id, landingB.id, bank.token, true);
     return { room, a, b, bank };
+  }
+
+  async function holdRoomTrash(roomId: string) {
+    const ready = deferred();
+    const release = deferred();
+    const deletedAt = new Date();
+    let signaled = false;
+    const deletion = secondDb.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Room" WHERE "id" = ${roomId} FOR UPDATE`;
+      await tx.room.update({
+        where: { id: roomId },
+        data: { deletedAt, purgeAfter: new Date(deletedAt.getTime() + 86_400_000) },
+      });
+      signaled = true;
+      ready.resolve();
+      await release.promise;
+    }).catch((error) => {
+      if (!signaled) ready.reject(error);
+      throw error;
+    });
+    void deletion.catch(() => undefined);
+    await ready.promise;
+    return { deletedAt, deletion, release: release.resolve };
+  }
+
+  async function waitForGameRoomLock() {
+    await vi.waitFor(async () => {
+      const [waiting] = await firstDb.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(*)::int AS "count"
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND backend_type = 'client backend'
+          AND pid <> pg_backend_pid()
+          AND wait_event_type = 'Lock'
+          AND query LIKE '%zhenhuan:prisma-game-lock-room%'
+      `;
+      expect(waiting?.count ?? 0).toBeGreaterThan(0);
+    }, { timeout: 2_000, interval: 10 });
   }
 
   async function createLobbyMember(
@@ -2392,18 +2440,7 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       firstDb.idempotencyRecord.findMany({ where: { scope: { contains: `:room:${room.id}:` } }, orderBy: [{ scope: 'asc' }, { key: 'asc' }] }),
     ]));
     const before = await mutationState();
-    let deletionReady!: () => void;
-    let commitDeletion!: () => void;
-    const deletionHasRoomLock = new Promise<void>((resolve) => { deletionReady = resolve; });
-    const deletionCanCommit = new Promise<void>((resolve) => { commitDeletion = resolve; });
-    const deletedAt = new Date();
-    const deletion = secondDb.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Room" WHERE "id" = ${room.id} FOR UPDATE`;
-      await tx.room.update({ where: { id: room.id }, data: { deletedAt, purgeAfter: new Date(deletedAt.getTime() + 86_400_000) } });
-      deletionReady();
-      await deletionCanCommit;
-    });
-    await deletionHasRoomLock;
+    const heldTrash = await holdRoomTrash(room.id);
 
     const writes = Promise.allSettled([
       first.createRequest(room.id, a.playerId, { type: 'BUY_PROPERTY', propertyName: '甘露寺' }, 'trash-race-player-buy'),
@@ -2411,21 +2448,13 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     ]);
     let lockWaitError: unknown;
     try {
-      await vi.waitFor(async () => {
-        const [waiting] = await firstDb.$queryRaw<Array<{ count: number }>>`
-          SELECT COUNT(*)::int AS "count"
-          FROM pg_stat_activity
-          WHERE wait_event_type = 'Lock'
-            AND query LIKE '%SELECT "id" FROM "Room"%'
-        `;
-        expect(waiting?.count ?? 0).toBeGreaterThan(0);
-      }, { timeout: 2_000, interval: 10 });
+      await waitForGameRoomLock();
     } catch (error) {
       lockWaitError = error;
     } finally {
-      commitDeletion();
+      heldTrash.release();
     }
-    await deletion;
+    await heldTrash.deletion;
 
     const outcomes = await writes;
     if (lockWaitError) throw lockWaitError;
@@ -2434,7 +2463,27 @@ integration('PrismaGameService PostgreSQL transactions', () => {
       if (outcome.status === 'rejected') expect(outcome.reason).toMatchObject({ code: 'ROOM_NOT_FOUND' });
     }
     expect(await mutationState()).toBe(before);
-    expect(await firstDb.room.findUniqueOrThrow({ where: { id: room.id } })).toMatchObject({ deletedAt, purgeAfter: expect.any(Date) });
+    expect(await firstDb.room.findUniqueOrThrow({ where: { id: room.id } })).toMatchObject({ deletedAt: heldTrash.deletedAt, purgeAfter: expect.any(Date) });
+  });
+
+  it('returns ROOM_NOT_FOUND when a snapshot reached the Room lock before a concurrent trash commit', async () => {
+    const { room, a } = await physicalRoom();
+    const heldTrash = await holdRoomTrash(room.id);
+    const snapshot = first.snapshot(room.id, { role: 'PLAYER', playerId: a.playerId });
+    void snapshot.catch(() => undefined);
+    let lockWaitError: unknown;
+
+    try {
+      await waitForGameRoomLock();
+    } catch (error) {
+      lockWaitError = error;
+    } finally {
+      heldTrash.release();
+    }
+    await heldTrash.deletion;
+
+    if (lockWaitError) throw lockWaitError;
+    await expect(snapshot).rejects.toMatchObject({ code: 'ROOM_NOT_FOUND' });
   });
 
   it('rejects every game-write family without mutation in ENDED, FINISHED, and CLOSED rooms', async () => {

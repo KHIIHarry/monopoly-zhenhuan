@@ -29,6 +29,7 @@ type RoomPurgeLog = {
   roomName: string;
   source: RoomPurgeSource['kind'];
   actorAccountId: string | null;
+  purgeAfter: Date;
 };
 
 export async function resetAccountPassword(
@@ -306,8 +307,8 @@ export class AccountRoomService {
     private readonly isConfiguredSuperAdmin: (username: string) => boolean = () => false,
     private readonly toastNotifier?: PostCommitToastNotifier,
     private readonly roomPurgeLogger: (details: RoomPurgeLog) => void = () => undefined,
-    private readonly roomPurgeErrorLogger: (error: unknown, roomId: string) => void = (error, roomId) => {
-      console.error('Automatic room purge failed', { roomId, error });
+    private readonly roomPurgeErrorLogger: (error: unknown, roomId: string, purgeAfter: Date) => void = (error, roomId, purgeAfter) => {
+      console.error('Automatic room purge failed', { roomId, purgeAfter, error });
     },
   ) {}
 
@@ -360,6 +361,18 @@ export class AccountRoomService {
       || active.revokedAt || active.expiresAt <= new Date() || active.account.status !== 'ACTIVE') fail('SESSION_INVALID');
     if (!this.isConfiguredSuperAdmin(active.account.username)) fail('ADMIN_REQUIRED');
     return active.account;
+  }
+
+  private async ensureLockedAdminActor(tx: Prisma.TransactionClient, auth: AuthenticatedSession) {
+    const sessions = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "AccountSession"
+      WHERE "id" = ${auth.session.id}
+        AND "accountId" = ${auth.account.id}
+      FOR UPDATE
+    `;
+    if (!sessions.length) fail('SESSION_INVALID');
+    return this.ensureAdminActor(tx, auth);
   }
 
   private async requireCurrentAdmin(auth: AuthenticatedSession) {
@@ -537,7 +550,7 @@ export class AccountRoomService {
 
   private async deleteLockedRoom(
     tx: Prisma.TransactionClient,
-    room: { id: string; name: string },
+    room: { id: string; name: string; purgeAfter: Date },
     source: RoomPurgeSource,
   ): Promise<RoomPurgeLog> {
     const roomId = room.id;
@@ -594,6 +607,7 @@ export class AccountRoomService {
       roomName: room.name,
       source: source.kind,
       actorAccountId: source.kind === 'ADMIN' ? source.actorAccountId : null,
+      purgeAfter: room.purgeAfter,
     };
   }
 
@@ -1062,16 +1076,32 @@ export class AccountRoomService {
     };
   }
 
-  async purgeRoom(roomId: string, source: RoomPurgeSource): Promise<{ deleted: boolean; id: string }> {
+  async purgeRoom(
+    roomId: string,
+    source: RoomPurgeSource,
+    adminAuth?: AuthenticatedSession,
+  ): Promise<{ deleted: boolean; id: string }> {
     const result = await this.serializable(async (tx) => {
       await this.lockRoomIncludingTrash(tx, roomId, true);
+      if (source.kind === 'ADMIN') {
+        const auth = adminAuth ?? fail('ADMIN_REQUIRED');
+        if (auth.account.id !== source.actorAccountId) fail('ADMIN_REQUIRED');
+        await this.ensureLockedAdminActor(tx, auth);
+      }
       const room = await tx.room.findUnique({ where: { id: roomId }, select: { id: true, name: true, deletedAt: true, purgeAfter: true } });
       if (!room) return { value: { deleted: false, id: roomId }, log: null };
-      if (!room.deletedAt || !room.purgeAfter) fail('ROOM_NOT_IN_TRASH');
-      const log = await this.deleteLockedRoom(tx, room, source);
+      if (!room.deletedAt) fail('ROOM_NOT_IN_TRASH');
+      const purgeAfter = room.purgeAfter ?? fail('ROOM_NOT_IN_TRASH');
+      const log = await this.deleteLockedRoom(tx, { ...room, purgeAfter }, source);
       return { value: { deleted: true, id: roomId }, log };
     });
-    if (result.log) this.roomPurgeLogger(result.log);
+    if (result.log) {
+      try {
+        this.roomPurgeLogger(result.log);
+      } catch {
+        // Logging observes a committed delete and cannot change its result.
+      }
+    }
     return result.value;
   }
 
@@ -1084,13 +1114,14 @@ export class AccountRoomService {
 
     while (processed < batchLimit) {
       let claimedRoomId: string | undefined;
+      let claimedPurgeAfter: Date | undefined;
       try {
         const result = await this.serializable(async (tx) => {
           const exclusion = failedRoomIds.size
             ? Prisma.sql`AND "id" NOT IN (${Prisma.join([...failedRoomIds])})`
             : Prisma.empty;
-          const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-            SELECT "id"
+          const rows = await tx.$queryRaw<Array<{ id: string; purgeAfter: Date }>>(Prisma.sql`
+            SELECT "id", "purgeAfter"
             FROM "Room"
             WHERE "deletedAt" IS NOT NULL
               AND "purgeAfter" <= ${now}
@@ -1100,13 +1131,15 @@ export class AccountRoomService {
             LIMIT 1
           `);
           claimedRoomId = rows[0]?.id;
+          claimedPurgeAfter = rows[0]?.purgeAfter;
           if (!claimedRoomId) return null;
           const room = await tx.room.findUnique({
             where: { id: claimedRoomId },
             select: { id: true, name: true, deletedAt: true, purgeAfter: true },
           });
-          if (!room?.deletedAt || !room.purgeAfter || room.purgeAfter > now) return null;
-          const log = await this.deleteLockedRoom(tx, room, { kind: 'AUTO' });
+          const purgeAfter = room?.purgeAfter;
+          if (!room?.deletedAt || !purgeAfter || purgeAfter > now) return null;
+          const log = await this.deleteLockedRoom(tx, { ...room, purgeAfter }, { kind: 'AUTO' });
           return { value: { id: room.id, deleted: true }, log };
         });
         if (!result) break;
@@ -1124,11 +1157,11 @@ export class AccountRoomService {
           await new Promise((resolve) => setTimeout(resolve, serializationConflicts * 10));
           continue;
         }
-        if (!claimedRoomId) throw error;
+        if (!claimedRoomId || !claimedPurgeAfter) throw error;
         processed += 1;
         failedRoomIds.add(claimedRoomId);
         try {
-          this.roomPurgeErrorLogger(error, claimedRoomId);
+          this.roomPurgeErrorLogger(error, claimedRoomId, claimedPurgeAfter);
         } catch {
           // A failed observer cannot stop the remaining batch.
         }
@@ -1145,7 +1178,7 @@ export class AccountRoomService {
   ): Promise<{ deleted: true; id: string }> {
     if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
     const actor = await this.requireCurrentAdmin(auth);
-    await this.purgeRoom(roomId, { kind: 'ADMIN', actorAccountId: actor.id });
+    await this.purgeRoom(roomId, { kind: 'ADMIN', actorAccountId: actor.id }, auth);
     return { deleted: true, id: roomId };
   }
 

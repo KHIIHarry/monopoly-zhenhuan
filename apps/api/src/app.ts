@@ -170,7 +170,7 @@ const accounts = options.accounts ?? (() => {
     (username) => security.superAdminUsernames.has(username),
     toastNotifier,
     (details) => app.log.info(details, 'Room permanently purged'),
-    (error, roomId) => app.log.error({ err: error, roomId }, 'Automatic room purge failed'),
+    (error, roomId, purgeAfter) => app.log.error({ err: error, roomId, purgeAfter }, 'Automatic room purge failed'),
   );
 })();
 const games = options.games ?? new PrismaGameService(database, Math.random, toastNotifier);

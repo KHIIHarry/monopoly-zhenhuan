@@ -31,6 +31,16 @@ let db: PrismaClient;
 let app: Awaited<ReturnType<typeof buildApiApp>>;
 const configuredSuperAdmins = new Set<string>();
 
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function executeSql(databaseUrl: string, sql: string) {
   execFileSync(process.execPath, [prismaCli, 'db', 'execute', '--stdin', '--url', databaseUrl], {
     cwd: workspaceRoot,
@@ -1947,6 +1957,7 @@ integration('Task 6 real-Cookie admin routes', () => {
       roomName: fixture.room.name,
       source: 'AUTO',
       actorAccountId: null,
+      purgeAfter: new Date('2026-08-05T00:00:00.000Z'),
     }]);
     await expect(service.purgeRoom(fixture.room.id, { kind: 'AUTO' }))
       .resolves.toEqual({ deleted: false, id: fixture.room.id });
@@ -2005,6 +2016,41 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(results.map((result) => result.id).sort()).toEqual(rooms.map((room) => room.id).sort());
     expect(loggerCalls).toBe(2);
     expect(await db.room.count({ where: { id: { in: rooms.map((room) => room.id) } } })).toBe(0);
+  });
+
+  it('keeps a committed manual purge successful when the success logger throws', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const room = await createRoom(creator.account.id, 'ENDED');
+    const purgeAfter = new Date('2026-08-05T00:00:00.000Z');
+    await db.room.update({ where: { id: room.id }, data: {
+      deletedAt: new Date('2026-08-04T00:00:00.000Z'),
+      purgeAfter,
+      deletedByAccountId: admin.account.id,
+    } });
+    const observations: Array<Record<string, unknown>> = [];
+    const service = new AccountRoomService(
+      db,
+      (username) => configuredSuperAdmins.has(username),
+      undefined,
+      (details) => {
+        observations.push(details);
+        throw new Error('SUCCESS_LOGGER_FAILED');
+      },
+    );
+    const auth = await service.authenticate(cookie.token, '120.31.22.36');
+
+    await expect(service.permanentlyDeleteRoom(auth, room.id, 'manual-logger-failure'))
+      .resolves.toEqual({ deleted: true, id: room.id });
+    expect(observations).toEqual([{
+      roomId: room.id,
+      roomName: room.name,
+      source: 'ADMIN',
+      actorAccountId: admin.account.id,
+      purgeAfter,
+    }]);
+    expect(await db.room.findUnique({ where: { id: room.id } })).toBeNull();
   });
 
   it('never purges more than 20 rooms in one batch', async () => {
@@ -2150,14 +2196,14 @@ integration('Task 6 real-Cookie admin routes', () => {
       purgeAfter: new Date('2002-01-02T00:00:00.001Z'),
       deletedByAccountId: admin.account.id,
     } });
-    const failures: Array<{ roomId: string; error: unknown }> = [];
+    const failures: Array<{ roomId: string; purgeAfter: Date; error: unknown }> = [];
     const service = new AccountRoomService(
       db,
       undefined,
       undefined,
       undefined,
-      (error, roomId) => {
-        failures.push({ roomId, error });
+      (error, roomId, purgeAfter) => {
+        failures.push({ roomId, purgeAfter, error });
         throw new Error('FAILURE_LOGGER_FAILED');
       },
     );
@@ -2187,6 +2233,7 @@ integration('Task 6 real-Cookie admin routes', () => {
       ]);
       expect(failures).toHaveLength(1);
       expect(failures[0]?.roomId).toBe(failedRoom.id);
+      expect(failures[0]?.purgeAfter).toEqual(new Date('2002-01-02T00:00:00.000Z'));
       expect(String(failures[0]?.error)).toContain('INJECTED_EXPIRED_ROOM_FAILURE');
       expect(await db.room.findUnique({ where: { id: failedRoom.id } })).not.toBeNull();
       expect(await db.room.findUnique({ where: { id: successfulRoom.id } })).toBeNull();
@@ -2196,6 +2243,95 @@ integration('Task 6 real-Cookie admin routes', () => {
       await db.room.deleteMany({ where: { id: failedRoom.id } });
     }
   });
+
+  it('revalidates the admin session after the Room lock before a permanent purge', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const fixture = await createPurgeFixture(creator.account.id, admin.account.id);
+    const purgeLogs: Array<Record<string, unknown>> = [];
+    const service = new AccountRoomService(
+      db,
+      (username) => configuredSuperAdmins.has(username),
+      undefined,
+      (details) => purgeLogs.push(details),
+    );
+    const auth = await service.authenticate(cookie.token, '120.31.22.36');
+    const lockerDb = new PrismaClient({ datasources: { db: { url: isolatedUrl } } });
+    const lockReady = deferred();
+    const releaseLock = deferred();
+    let signaled = false;
+    const lockHolder = lockerDb.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Room" WHERE "id" = ${fixture.room.id} FOR UPDATE`;
+      signaled = true;
+      lockReady.resolve();
+      await releaseLock.promise;
+    }).catch((error) => {
+      if (!signaled) lockReady.reject(error);
+      throw error;
+    });
+    void lockHolder.catch(() => undefined);
+
+    const roomState = async () => Promise.all([
+      db.room.count({ where: { id: fixture.room.id } }),
+      db.gameSettlement.count({ where: { roomId: fixture.room.id } }),
+      db.settlementPlayer.count({ where: { settlementId: fixture.settlement.id } }),
+      db.ledgerEntry.count({ where: { roomId: fixture.room.id } }),
+      db.auditLog.count({ where: { roomId: fixture.room.id } }),
+      db.securityLog.count({ where: { detailsJson: { path: ['roomId'], equals: fixture.room.id } } }),
+      db.gameResult.count({ where: { roomId: fixture.room.id } }),
+      db.roleSwapRequest.count({ where: { roomId: fixture.room.id } }),
+      db.debtRecord.count({ where: { roomId: fixture.room.id } }),
+      db.skipTurnEntry.count({ where: { roomId: fixture.room.id } }),
+      db.roomProperty.count({ where: { roomId: fixture.room.id } }),
+      db.landingEvent.count({ where: { roomId: fixture.room.id } }),
+      db.gameRequest.count({ where: { roomId: fixture.room.id } }),
+      db.gameTransaction.count({ where: { roomId: fixture.room.id } }),
+      db.turn.count({ where: { roomId: fixture.room.id } }),
+      db.player.count({ where: { roomId: fixture.room.id } }),
+      db.roomMembership.count({ where: { roomId: fixture.room.id } }),
+      db.idempotencyRecord.count({ where: { id: { in: fixture.targetIdempotencyRecords.map((record) => record.id) } } }),
+    ]);
+
+    try {
+      await lockReady.promise;
+      const before = await roomState();
+      const deletion = service.permanentlyDeleteRoom(auth, fixture.room.id, 'revoke-during-purge-lock');
+      void deletion.catch(() => undefined);
+      let lockWaitError: unknown;
+      try {
+        await expect.poll(async () => {
+          const [waiting] = await db.$queryRaw<Array<{ count: number }>>`
+            SELECT COUNT(*)::int AS "count"
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND backend_type = 'client backend'
+              AND pid <> pg_backend_pid()
+              AND wait_event_type = 'Lock'
+              AND query LIKE '%SELECT "id" FROM "Room" WHERE "id" = $1 FOR UPDATE%'
+          `;
+          return waiting?.count ?? 0;
+        }, { timeout: 2_000, interval: 10 }).toBeGreaterThan(0);
+      } catch (error) {
+        lockWaitError = error;
+      }
+      await db.accountSession.update({
+        where: { id: auth.session.id },
+        data: { revokedAt: new Date(), revokeReason: 'TEST_REVOKED_DURING_PURGE' },
+      });
+      releaseLock.resolve();
+      await lockHolder;
+      if (lockWaitError) throw lockWaitError;
+
+      await expect(deletion).rejects.toMatchObject({ code: 'SESSION_INVALID' });
+      expect(await roomState()).toEqual(before);
+      expect(purgeLogs).toEqual([]);
+    } finally {
+      releaseLock.resolve();
+      await lockHolder.catch(() => undefined);
+      await lockerDb.$disconnect();
+    }
+  }, 20_000);
 
   it('serializes restore against permanent delete so exactly one outcome wins', async () => {
     const admin = await createAccount({ superAdmin: true });
