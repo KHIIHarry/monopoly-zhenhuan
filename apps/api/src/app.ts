@@ -162,7 +162,12 @@ const toastNotifier = createPostCommitToastNotifier(database, io, (error, contex
 });
 const accounts = options.accounts ?? (() => {
   const security = loadSecurityConfig();
-  return new AccountRoomService(database, (username) => security.superAdminUsernames.has(username), toastNotifier);
+  return new AccountRoomService(
+    database,
+    (username) => security.superAdminUsernames.has(username),
+    toastNotifier,
+    (details) => app.log.info(details, 'Room permanently purged'),
+  );
 })();
 const games = options.games ?? new PrismaGameService(database, Math.random, toastNotifier);
 
@@ -443,6 +448,15 @@ app.delete('/api/admin/rooms/:id', async (request) => {
     notifyVersion(id, result);
   }
   return result;
+});
+app.delete('/api/admin/rooms/:id/permanent', async (request) => {
+  const auth = await authenticate(request);
+  const { id } = z.object({ id: z.string() }).parse(request.params);
+  return accounts.permanentlyDeleteRoom(
+    auth,
+    id,
+    idempotencyKey(request.headers['idempotency-key']),
+  );
 });
 app.post('/api/admin/rooms/:id/restore', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);

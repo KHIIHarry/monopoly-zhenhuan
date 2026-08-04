@@ -74,6 +74,7 @@ async function routeHarness() {
     }),
     deleteAccount: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, created: true, revokedSessionIds: ['target-session'] })),
     deleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id, status: 'LOBBY', deletedAt: new Date(), purgeAfter: new Date(), stateVersion: 13, created: ++deleteRoomCalls === 1 })),
+    permanentlyDeleteRoom: vi.fn(async (_auth: AuthenticatedSession, id: string) => ({ deleted: true as const, id })),
     listDeletedRooms: vi.fn(async () => ({ items: [{
       id: 'room-trash', name: '待删房间', code: 'TRASH1', status: 'FINISHED',
       deletedAt: '2026-08-04T00:00:00.000Z', purgeAfter: '2026-08-05T00:00:00.000Z',
@@ -390,6 +391,28 @@ describe('admin deletion routes', () => {
     expect(accounts.deleteRoom).toHaveBeenCalledTimes(2);
     expect(notifications.filter((notice) => notice.roomId === 'room-1' && notice.event === 'room.updated'))
       .toEqual([{ roomId: 'room-1', event: 'room.updated', payload: { stateVersion: 13 } }]);
+  });
+
+  it('requires an idempotency key and routes permanent room deletion to the account service', async () => {
+    const { app, accounts, headers } = await routeHarness();
+
+    const missingKey = await app.inject({
+      method: 'DELETE',
+      url: '/api/admin/rooms/room-trash/permanent',
+      headers,
+    });
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: '/api/admin/rooms/room-trash/permanent',
+      headers: { ...headers, 'idempotency-key': 'permanent-room-key' },
+    });
+
+    expect(missingKey.statusCode).toBe(409);
+    expect(missingKey.json()).toEqual({ error: 'IDEMPOTENCY_KEY_REQUIRED' });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ deleted: true, id: 'room-trash' });
+    expect(accounts.permanentlyDeleteRoom).toHaveBeenCalledTimes(1);
+    expect(accounts.permanentlyDeleteRoom).toHaveBeenCalledWith(auth, 'room-trash', 'permanent-room-key');
   });
 });
 

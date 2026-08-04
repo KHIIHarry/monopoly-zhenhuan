@@ -21,6 +21,15 @@ const required = <T>(value: T | null | undefined, code: string): T => value ?? f
 const activeSessionWhere = (now = new Date()) => ({ revokedAt: null, expiresAt: { gt: now } });
 
 type PasswordResetSource = 'OFFLINE_OPERATIONS_CLI';
+export type RoomPurgeSource =
+  | { kind: 'ADMIN'; actorAccountId: string }
+  | { kind: 'AUTO' };
+type RoomPurgeLog = {
+  roomId: string;
+  roomName: string;
+  source: RoomPurgeSource['kind'];
+  actorAccountId: string | null;
+};
 
 export async function resetAccountPassword(
   tx: Prisma.TransactionClient,
@@ -296,6 +305,7 @@ export class AccountRoomService {
     private readonly db: PrismaClient,
     private readonly isConfiguredSuperAdmin: (username: string) => boolean = () => false,
     private readonly toastNotifier?: PostCommitToastNotifier,
+    private readonly roomPurgeLogger: (details: RoomPurgeLog) => void = () => undefined,
   ) {}
 
   private async serializable<T>(task: (tx: Prisma.TransactionClient) => Promise<T>) {
@@ -303,7 +313,7 @@ export class AccountRoomService {
       try {
         return await this.db.$transaction(task, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2034' || attempt === 2) throw error;
+        if (!isSerializationConflict(error) || attempt === 2) throw error;
       }
     }
     return fail('TRANSACTION_RETRY_EXHAUSTED');
@@ -515,11 +525,52 @@ export class AccountRoomService {
     if (!rows.length) fail('ROOM_NOT_FOUND');
   }
 
-  private async lockRoomIncludingTrash(tx: Prisma.TransactionClient, roomId: string) {
+  private async lockRoomIncludingTrash(tx: Prisma.TransactionClient, roomId: string, allowMissing = false) {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "Room" WHERE "id" = ${roomId} FOR UPDATE
     `;
-    if (!rows.length) fail('ROOM_NOT_FOUND');
+    if (!rows.length && !allowMissing) fail('ROOM_NOT_FOUND');
+  }
+
+  private async deleteLockedRoom(
+    tx: Prisma.TransactionClient,
+    room: { id: string; name: string },
+    source: RoomPurgeSource,
+  ): Promise<RoomPurgeLog> {
+    const roomId = room.id;
+    await this.allowPhysicalHistoryDelete(tx);
+    await tx.settlementPlayer.deleteMany({ where: { settlement: { roomId } } });
+    await tx.gameSettlement.deleteMany({ where: { roomId } });
+    await tx.ledgerEntry.deleteMany({ where: { roomId } });
+    await tx.auditLog.deleteMany({ where: { roomId } });
+    await tx.securityLog.deleteMany({
+      where: { detailsJson: { path: ['roomId'], equals: roomId } },
+    });
+    await tx.gameResult.deleteMany({ where: { roomId } });
+    await tx.roleSwapRequest.deleteMany({ where: { roomId } });
+    await tx.debtRecord.deleteMany({ where: { roomId } });
+    await tx.skipTurnEntry.deleteMany({ where: { roomId } });
+    await tx.roomProperty.updateMany({
+      where: { roomId }, data: { lockedByRequestId: null },
+    });
+    await tx.landingEvent.deleteMany({ where: { roomId } });
+    await tx.gameRequest.deleteMany({ where: { roomId } });
+    await tx.gameTransaction.deleteMany({ where: { roomId } });
+    await tx.turn.deleteMany({ where: { roomId } });
+    await tx.roomProperty.deleteMany({ where: { roomId } });
+    await tx.player.deleteMany({ where: { roomId } });
+    await tx.roomMembership.deleteMany({ where: { roomId } });
+    await tx.idempotencyRecord.deleteMany({ where: { OR: [
+      { scope: { contains: `:room:${roomId}:` } },
+      { scope: { contains: ':admin:room:', endsWith: `:${roomId}` } },
+    ] } });
+    await tx.room.delete({ where: { id: roomId } });
+    return {
+      roomId,
+      roomName: room.name,
+      source: source.kind,
+      actorAccountId: source.kind === 'ADMIN' ? source.actorAccountId : null,
+    };
   }
 
   private async playablePlayers(tx: Prisma.TransactionClient, roomId: string) {
@@ -985,6 +1036,30 @@ export class AccountRoomService {
       deleted: true; id: string; status: 'LOBBY' | 'PLAYING' | 'ENDED' | 'FINISHED' | 'CLOSED';
       deletedAt: Date; purgeAfter: Date; stateVersion: number; created: boolean;
     };
+  }
+
+  async purgeRoom(roomId: string, source: RoomPurgeSource): Promise<{ deleted: boolean; id: string }> {
+    const result = await this.serializable(async (tx) => {
+      await this.lockRoomIncludingTrash(tx, roomId, true);
+      const room = await tx.room.findUnique({ where: { id: roomId }, select: { id: true, name: true, deletedAt: true, purgeAfter: true } });
+      if (!room) return { value: { deleted: false, id: roomId }, log: null };
+      if (!room.deletedAt || !room.purgeAfter) fail('ROOM_NOT_IN_TRASH');
+      const log = await this.deleteLockedRoom(tx, room, source);
+      return { value: { deleted: true, id: roomId }, log };
+    });
+    if (result.log) this.roomPurgeLogger(result.log);
+    return result.value;
+  }
+
+  async permanentlyDeleteRoom(
+    auth: AuthenticatedSession,
+    roomId: string,
+    key: string,
+  ): Promise<{ deleted: true; id: string }> {
+    if (!key) fail('IDEMPOTENCY_KEY_REQUIRED');
+    const actor = await this.requireCurrentAdmin(auth);
+    await this.purgeRoom(roomId, { kind: 'ADMIN', actorAccountId: actor.id });
+    return { deleted: true, id: roomId };
   }
 
   async listDeletedRooms(auth: AuthenticatedSession) {

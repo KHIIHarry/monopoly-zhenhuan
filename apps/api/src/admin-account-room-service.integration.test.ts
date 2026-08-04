@@ -126,6 +126,235 @@ async function createRoom(creatorId: string, status: 'LOBBY' | 'PLAYING' | 'ENDE
   } });
 }
 
+async function createPurgeFixture(creatorId: string, deletedByAccountId: string) {
+  const shared = await createAccount();
+  const peer = await createAccount();
+  const latestDefinition = await db.propertyDefinition.findFirst({ orderBy: { displayOrder: 'desc' } });
+  const definition = await db.propertyDefinition.create({ data: {
+    name: `Purge Property ${randomUUID()}`,
+    displayOrder: (latestDefinition?.displayOrder ?? 0) + 1,
+    mortgagePrice: 100,
+    purchasePrice: 200,
+    buildCost: 50,
+    buildingSellPrice: 25,
+    tollEmpty: 10,
+    tollLevel1: 20,
+    tollLevel2: 30,
+    tollLevel3: 40,
+    tollLevel4: 50,
+    tollPalace: 60,
+  } });
+  const character = await db.character.create({ data: {
+    id: `purge-character-${randomUUID()}`,
+    name: `Purge Character ${randomUUID()}`,
+    skillCode: `purge-skill-${randomUUID()}`,
+    skillConfig: {},
+    initialPropertyId: definition.id,
+  } });
+  const room = await createRoom(creatorId, 'ENDED');
+  const otherRoom = await createRoom(creatorId, 'ENDED');
+  const member = await db.roomMembership.create({ data: {
+    roomId: room.id,
+    accountId: shared.account.id,
+    characterId: character.id,
+    displayNameSnapshot: shared.account.displayName,
+  } });
+  const peerMember = await db.roomMembership.create({ data: {
+    roomId: room.id,
+    accountId: peer.account.id,
+    displayNameSnapshot: peer.account.displayName,
+  } });
+  const player = await db.player.create({ data: {
+    roomId: room.id,
+    memberId: member.id,
+    characterId: character.id,
+    pawnColor: `purge-${randomUUID()}`,
+    balance: 90,
+    turnOrder: 1,
+  } });
+  const peerPlayer = await db.player.create({ data: {
+    roomId: room.id,
+    memberId: peerMember.id,
+    pawnColor: `purge-peer-${randomUUID()}`,
+    balance: 100,
+    turnOrder: 2,
+  } });
+  const property = await db.roomProperty.create({ data: {
+    roomId: room.id,
+    propertyDefinitionId: definition.id,
+    ownerPlayerId: player.id,
+  } });
+  const turn = await db.turn.create({ data: {
+    roomId: room.id,
+    turnNumber: 1,
+    playerId: player.id,
+    status: 'ENDED',
+  } });
+  const landing = await db.landingEvent.create({ data: {
+    roomId: room.id,
+    turnId: turn.id,
+    playerId: player.id,
+    spaceType: 'PROPERTY',
+    propertyId: property.id,
+    status: 'CONFIRMED',
+    plotResolved: true,
+    declaredBy: member.id,
+    confirmedBy: peerMember.id,
+  } });
+  const request = await db.gameRequest.create({ data: {
+    roomId: room.id,
+    type: 'TRADE_PROPERTY',
+    status: 'EXECUTED',
+    actorPlayerId: player.id,
+    targetPlayerId: peerPlayer.id,
+    propertyId: property.id,
+    landingEventId: landing.id,
+    turnId: turn.id,
+    idempotencyKey: `purge-request-${randomUUID()}`,
+    approvedByMemberId: peerMember.id,
+  } });
+  await db.roomProperty.update({ where: { id: property.id }, data: { lockedByRequestId: request.id } });
+  const transaction = await db.gameTransaction.create({ data: {
+    roomId: room.id,
+    type: 'PURGE_FIXTURE',
+    requestId: request.id,
+    metadata: { roomId: room.id },
+  } });
+  await db.ledgerEntry.create({ data: {
+    roomId: room.id,
+    transactionId: transaction.id,
+    playerId: player.id,
+    amount: -10,
+    balanceBefore: 100,
+    balanceAfter: 90,
+    type: 'PURGE_FIXTURE',
+    description: 'purge fixture ledger',
+    createdBy: member.id,
+  } });
+  await db.skipTurnEntry.create({ data: {
+    roomId: room.id,
+    playerId: player.id,
+    sourceType: 'MANUAL',
+    sourceDescription: 'purge fixture skip',
+    originalCount: 1,
+    remainingCount: 1,
+    blocksTollCollection: true,
+    createdBy: member.id,
+    approvedBy: peerMember.id,
+  } });
+  await db.debtRecord.create({ data: {
+    roomId: room.id,
+    debtorPlayerId: player.id,
+    creditorType: 'PLAYER',
+    creditorPlayerId: peerPlayer.id,
+    sourceRequestId: request.id,
+    originalAmount: 10,
+    outstandingAmount: 10,
+  } });
+  await db.roleSwapRequest.create({ data: {
+    roomId: room.id,
+    requesterMembershipId: member.id,
+    targetMembershipId: peerMember.id,
+    kind: 'BANK',
+    status: 'PENDING_BANK',
+    bankApprovedById: peerMember.id,
+  } });
+  await db.gameResult.create({ data: {
+    roomId: room.id,
+    victoryMode: 'LAST_SOLVENT',
+    endReason: 'purge fixture result',
+    rulesSnapshot: {},
+    playerAssetBreakdown: [],
+    winnerPlayerIds: [player.id],
+    confirmedBy: member.id,
+  } });
+  await db.auditLog.create({ data: {
+    roomId: room.id,
+    actorMemberId: member.id,
+    actorRole: 'ADMIN',
+    action: 'PURGE_FIXTURE',
+    entityType: 'Room',
+    entityId: room.id,
+  } });
+  await db.securityLog.create({ data: {
+    actorAccountId: deletedByAccountId,
+    action: 'PURGE_FIXTURE',
+    detailsJson: { roomId: room.id },
+  } });
+  const settlement = await db.gameSettlement.create({ data: {
+    roomId: room.id,
+    endedByAccountId: deletedByAccountId,
+    totalTurns: 1,
+    durationSeconds: 60,
+    winnersJson: [shared.account.id],
+    rankingJson: [{ accountId: shared.account.id, rank: 1 }],
+    overriddenBlockersJson: [],
+  } });
+  await db.settlementPlayer.create({ data: {
+    settlementId: settlement.id,
+    accountId: shared.account.id,
+    displayNameSnapshot: shared.account.displayName,
+    characterNameSnapshot: character.name,
+    cash: 90,
+    unmortgagedPropertyValue: 200,
+    mortgagedPropertyNetValue: 0,
+    buildingSellValue: 0,
+    totalWealth: 290,
+    rank: 1,
+    isWinner: true,
+    propertyDetailsJson: [],
+  } });
+  await db.idempotencyRecord.createMany({ data: [
+    {
+      scope: `account:${shared.account.id}:room:${room.id}:request`,
+      key: `purge-room-${randomUUID()}`,
+      response: { roomId: room.id },
+    },
+    {
+      scope: `account:${deletedByAccountId}:admin:room:restore:${room.id}`,
+      key: `purge-admin-${randomUUID()}`,
+      response: { roomId: room.id },
+    },
+  ] });
+
+  const otherMember = await db.roomMembership.create({ data: {
+    roomId: otherRoom.id,
+    accountId: shared.account.id,
+    characterId: character.id,
+    displayNameSnapshot: shared.account.displayName,
+  } });
+  const otherPlayer = await db.player.create({ data: {
+    roomId: otherRoom.id,
+    memberId: otherMember.id,
+    characterId: character.id,
+    pawnColor: `purge-other-${randomUUID()}`,
+    balance: 100,
+    turnOrder: 1,
+  } });
+  await db.roomProperty.create({ data: {
+    roomId: otherRoom.id,
+    propertyDefinitionId: definition.id,
+    ownerPlayerId: otherPlayer.id,
+  } });
+  await db.securityLog.create({ data: {
+    actorAccountId: deletedByAccountId,
+    action: 'PURGE_OTHER_ROOM',
+    detailsJson: { roomId: otherRoom.id },
+  } });
+  await db.idempotencyRecord.create({ data: {
+    scope: `account:${shared.account.id}:room:${otherRoom.id}:request`,
+    key: `purge-other-${randomUUID()}`,
+    response: { roomId: otherRoom.id },
+  } });
+  await db.room.update({ where: { id: room.id }, data: {
+    deletedAt: new Date('2026-08-04T00:00:00.000Z'),
+    purgeAfter: new Date('2026-08-05T00:00:00.000Z'),
+    deletedByAccountId,
+  } });
+
+  return { character, definition, otherRoom, room, settlement, shared };
+}
+
 function expectNoSecrets(value: unknown) {
   expect(JSON.stringify(value)).not.toMatch(/password|passwordHash|sessionTokenHash|activeSessionId|120\.31\.22\.36/);
 }
@@ -792,7 +1021,7 @@ integration('Task 6 real-Cookie admin routes', () => {
     const first = await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'update-note' }, payload: { note: 'reviewed' } });
     const second = await app.inject({ method: 'PATCH', url: `/api/admin/accounts/${target.account.id}`, headers: { cookie: cookie.header, 'idempotency-key': 'update-create-room' }, payload: { canCreateRoom: true } });
     expect(first.statusCode).toBe(200);
-    expect(second.statusCode).toBe(200);
+    expect(second.statusCode, second.body).toBe(200);
     expect(second.json()).toMatchObject({ isSuperAdmin: false, canCreateRoom: true });
 
     const list = await app.inject({ method: 'GET', url: '/api/admin/accounts?status=ACTIVE&permission=canCreateRoom&limit=2&query=Task', headers: { cookie: cookie.header } });
@@ -1494,6 +1723,162 @@ integration('Task 6 real-Cookie admin routes', () => {
     } finally {
       await notifyingApp.close();
     }
+  });
+
+  it('permanently deletes every target-room row while preserving shared and other-room data', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const fixture = await createPurgeFixture(creator.account.id, admin.account.id);
+    const permanentDelete = (roomId: string, key: string) => app.inject({
+      method: 'DELETE',
+      url: `/api/admin/rooms/${roomId}/permanent`,
+      headers: { cookie: cookie.header, 'idempotency-key': key },
+    });
+
+    const [first, second] = await Promise.all([
+      permanentDelete(fixture.room.id, 'permanent-a'),
+      permanentDelete(fixture.room.id, 'permanent-b'),
+    ]);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json()).toEqual({ deleted: true, id: fixture.room.id });
+    expect(second.json()).toEqual(first.json());
+    expect(await db.settlementPlayer.count({ where: { settlementId: fixture.settlement.id } })).toBe(0);
+    expect(await db.gameSettlement.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.ledgerEntry.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.auditLog.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.securityLog.count({ where: { detailsJson: { path: ['roomId'], equals: fixture.room.id } } })).toBe(0);
+    expect(await db.gameResult.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.roleSwapRequest.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.debtRecord.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.skipTurnEntry.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.landingEvent.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.gameRequest.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.gameTransaction.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.turn.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.roomProperty.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.player.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.roomMembership.count({ where: { roomId: fixture.room.id } })).toBe(0);
+    expect(await db.idempotencyRecord.count({ where: { OR: [
+      { scope: { contains: `:room:${fixture.room.id}:` } },
+      { scope: { contains: ':admin:room:', endsWith: `:${fixture.room.id}` } },
+    ] } })).toBe(0);
+    expect(await db.room.count({ where: { id: fixture.room.id } })).toBe(0);
+
+    expect(await db.account.findUnique({ where: { id: fixture.shared.account.id } })).not.toBeNull();
+    expect(await db.propertyDefinition.findUnique({ where: { id: fixture.definition.id } })).not.toBeNull();
+    expect(await db.character.findUnique({ where: { id: fixture.character.id } })).not.toBeNull();
+    expect(await db.room.findUnique({ where: { id: fixture.otherRoom.id } })).not.toBeNull();
+    expect(await db.roomMembership.count({ where: { roomId: fixture.otherRoom.id } })).toBe(1);
+    expect(await db.player.count({ where: { roomId: fixture.otherRoom.id } })).toBe(1);
+    expect(await db.roomProperty.count({ where: { roomId: fixture.otherRoom.id } })).toBe(1);
+    expect(await db.securityLog.count({ where: { detailsJson: { path: ['roomId'], equals: fixture.otherRoom.id } } })).toBe(1);
+    expect(await db.idempotencyRecord.count({ where: { scope: { contains: `:room:${fixture.otherRoom.id}:` } } })).toBe(1);
+  });
+
+  it('rejects active rooms and converges every retry after a permanent delete', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const permanentDelete = (roomId: string, key: string) => app.inject({
+      method: 'DELETE',
+      url: `/api/admin/rooms/${roomId}/permanent`,
+      headers: { cookie: cookie.header, 'idempotency-key': key },
+    });
+    const activeRoom = await createRoom(creator.account.id);
+    const trashed = await createRoom(creator.account.id, 'ENDED');
+    await db.room.update({ where: { id: trashed.id }, data: {
+      deletedAt: new Date('2026-08-04T00:00:00.000Z'),
+      purgeAfter: new Date('2026-08-05T00:00:00.000Z'),
+      deletedByAccountId: admin.account.id,
+    } });
+
+    expect((await permanentDelete(activeRoom.id, 'not-trashed')).json())
+      .toEqual({ error: 'ROOM_NOT_IN_TRASH' });
+    expect((await permanentDelete(trashed.id, 'first-delete')).json())
+      .toEqual({ deleted: true, id: trashed.id });
+    expect((await permanentDelete(trashed.id, 'first-delete')).json())
+      .toEqual({ deleted: true, id: trashed.id });
+    expect((await permanentDelete(trashed.id, 'new-delete-key')).json())
+      .toEqual({ deleted: true, id: trashed.id });
+  });
+
+  it('rolls a purge failure back atomically and logs only after a successful commit', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const fixture = await createPurgeFixture(creator.account.id, admin.account.id);
+    const purgeLogs: Array<Record<string, unknown>> = [];
+    const service = new AccountRoomService(
+      db,
+      (username) => configuredSuperAdmins.has(username),
+      undefined,
+      (details) => purgeLogs.push(details),
+    );
+    const suffix = randomUUID().replaceAll('-', '');
+    const failureFunction = `purge_failure_function_${suffix}`;
+    const failureTrigger = `purge_failure_trigger_${suffix}`;
+
+    await db.$executeRawUnsafe(`
+      CREATE FUNCTION "${failureFunction}"() RETURNS TRIGGER AS $$
+      BEGIN RAISE EXCEPTION 'INJECTED_PURGE_FAILURE'; END;
+      $$ LANGUAGE plpgsql
+    `);
+    await db.$executeRawUnsafe(`
+      CREATE TRIGGER "${failureTrigger}"
+      BEFORE DELETE ON "GameTransaction"
+      FOR EACH ROW EXECUTE FUNCTION "${failureFunction}"()
+    `);
+    try {
+      await expect(service.purgeRoom(fixture.room.id, { kind: 'AUTO' }))
+        .rejects.toThrow('INJECTED_PURGE_FAILURE');
+      expect(await db.room.findUnique({ where: { id: fixture.room.id } })).not.toBeNull();
+      expect(await db.gameSettlement.findUnique({ where: { roomId: fixture.room.id } })).not.toBeNull();
+      expect(await db.settlementPlayer.count({ where: { settlementId: fixture.settlement.id } })).toBe(1);
+      expect(await db.ledgerEntry.count({ where: { roomId: fixture.room.id } })).toBe(1);
+      expect(purgeLogs).toEqual([]);
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${failureTrigger}" ON "GameTransaction"`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${failureFunction}"()`);
+    }
+
+    await expect(service.purgeRoom(fixture.room.id, { kind: 'AUTO' }))
+      .resolves.toEqual({ deleted: true, id: fixture.room.id });
+    expect(purgeLogs).toEqual([{
+      roomId: fixture.room.id,
+      roomName: fixture.room.name,
+      source: 'AUTO',
+      actorAccountId: null,
+    }]);
+    await expect(service.purgeRoom(fixture.room.id, { kind: 'AUTO' }))
+      .resolves.toEqual({ deleted: false, id: fixture.room.id });
+    expect(purgeLogs).toHaveLength(1);
+  });
+
+  it('serializes restore against permanent delete so exactly one outcome wins', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const cookie = await loginCookie(admin.account, admin.password);
+    const service = new AccountRoomService(db, (username) => configuredSuperAdmins.has(username));
+    const auth = await service.authenticate(cookie.token, '120.31.22.36');
+    const trashedForRace = await createRoom(creator.account.id, 'ENDED');
+    await db.room.update({ where: { id: trashedForRace.id }, data: {
+      deletedAt: new Date('2026-08-04T00:00:00.000Z'),
+      purgeAfter: new Date('2026-08-05T00:00:00.000Z'),
+      deletedByAccountId: admin.account.id,
+    } });
+    const restore = (roomId: string, key: string) => service.restoreRoom(auth, roomId, key);
+    const permanentDelete = (roomId: string, key: string) => service.permanentlyDeleteRoom(auth, roomId, key);
+
+    const race = await Promise.allSettled([
+      restore(trashedForRace.id, 'race-restore'),
+      permanentDelete(trashedForRace.id, 'race-delete'),
+    ]);
+
+    expect(race.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const roomAfterRace = await db.room.findUnique({ where: { id: trashedForRace.id } });
+    if (roomAfterRace) expect(roomAfterRace.deletedAt).toBeNull();
   });
 
   it('rejects SecurityLog update, delete, and truncate while retaining every stored row', async () => {
