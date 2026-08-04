@@ -4,8 +4,8 @@ import { describe, expect, test } from 'vitest';
 
 const stylesheetUrl = new URL('./globals.css', import.meta.url);
 
-function extractMediaBlock(stylesheet: string, header: string) {
-  const start = stylesheet.lastIndexOf(header);
+function extractMediaBlock(stylesheet: string, header: string, occurrence: 'first' | 'last' = 'last') {
+  const start = occurrence === 'first' ? stylesheet.indexOf(header) : stylesheet.lastIndexOf(header);
   if (start < 0) throw new Error(`Missing CSS media block: ${header}`);
   const openingBrace = stylesheet.indexOf('{', start + header.length);
   if (openingBrace < 0) throw new Error(`Missing opening brace for CSS media block: ${header}`);
@@ -235,12 +235,13 @@ describe('mobile landing selection sheet', () => {
 
   test('places the selected property mark in the lower-right corner on every viewport', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const compactStyles = extractMediaBlock(stylesheet, '@media (max-width: 430px)', 'first');
 
     expect(stylesheet).toMatch(
       /\.property-selected-mark\s*\{[^}]*top:\s*auto;[^}]*right:\s*12px;[^}]*bottom:\s*12px;/s,
     );
-    expect(stylesheet).toMatch(
-      /@media\s*\(max-width:\s*430px\)[\s\S]*?\.landing-action-sheet \.property-selected-mark\s*\{[^}]*top:\s*auto;[^}]*right:\s*9px;[^}]*bottom:\s*9px;/,
+    expect(compactStyles).toMatch(
+      /\.landing-action-sheet \.property-selected-mark\s*\{[^}]*top:\s*auto;[^}]*right:\s*9px;[^}]*bottom:\s*9px;/,
     );
   });
 

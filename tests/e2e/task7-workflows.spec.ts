@@ -332,6 +332,53 @@ test('landing cards switch from 174 to 220 pixels above the phone breakpoint', a
   }
 });
 
+test('selected property mark stays clear of card values at the compact breakpoint', async ({ page }) => {
+  const properties = [{
+    name: '碎玉轩', ownerId: null, level: 0, mortgaged: false, mortgage: 800,
+    purchasePrice: 1_600, build: 1_000, buildingSell: 600, tolls: [300, 700, 1_800, 5_000, 7_000, 9_000],
+  }];
+
+  await mockBase(page, { ...baseRoom, isBank: false });
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({
+    json: seats({ characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true }),
+  }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({
+    json: { ...snapshot, properties },
+  }));
+
+  await page.setViewportSize({ width: 430, height: 800 });
+  await openRoom(page);
+  await page.getByRole('button', { name: '声明落点' }).click();
+  const card = page.getByRole('dialog', { name: '声明实体落点' }).getByRole('button', { name: /碎玉轩.*无主/ });
+  await card.click();
+  await expect(card).toHaveAttribute('aria-pressed', 'true');
+
+  const geometry = await card.evaluate((element) => {
+    const mark = element.querySelector<HTMLElement>('.property-selected-mark');
+    const buildingValue = element.querySelector<HTMLElement>('.landing-property-card-meta > span:nth-child(4) strong');
+    if (!mark || !buildingValue) throw new Error('Missing selected mark or building value');
+    const cardRect = element.getBoundingClientRect();
+    const markRect = mark.getBoundingClientRect();
+    const valueRect = buildingValue.getBoundingClientRect();
+    return {
+      mark: { left: markRect.left, top: markRect.top, right: markRect.right, bottom: markRect.bottom },
+      buildingValue: { left: valueRect.left, top: valueRect.top, right: valueRect.right, bottom: valueRect.bottom },
+      rightInset: cardRect.right - markRect.right,
+      bottomInset: cardRect.bottom - markRect.bottom,
+      overlaps: markRect.left < valueRect.right
+        && markRect.right > valueRect.left
+        && markRect.top < valueRect.bottom
+        && markRect.bottom > valueRect.top,
+    };
+  });
+
+  expect(geometry.rightInset, JSON.stringify(geometry)).toBeGreaterThanOrEqual(9);
+  expect(geometry.rightInset, JSON.stringify(geometry)).toBeLessThanOrEqual(11);
+  expect(geometry.bottomInset, JSON.stringify(geometry)).toBeGreaterThanOrEqual(9);
+  expect(geometry.bottomInset, JSON.stringify(geometry)).toBeLessThanOrEqual(11);
+  expect(geometry.overlaps, JSON.stringify(geometry)).toBe(false);
+});
+
 test('landing cards keep long owner nicknames inside tablet card heights', async ({ page }) => {
   const properties = [{
     name: '景仁宫', ownerId: 'player-2', level: 2, mortgaged: false, mortgage: 1_500,
