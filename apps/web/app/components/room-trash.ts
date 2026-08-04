@@ -75,10 +75,10 @@ export function createTrashRoomLoader({
 export async function reloadAdminWithTrash<T>(
   reloadAdmin: () => Promise<TrashOperationResult<T>>,
   loadTrash: () => Promise<TrashOperationResult<AdminTrashRoom[]>>,
-  shouldLoadTrash: () => boolean,
+  trashActive: { readonly current: boolean },
 ): Promise<TrashOperationResult<T>> {
   const reloaded = await reloadAdmin();
-  if (!reloaded.ok || !shouldLoadTrash()) return reloaded;
+  if (!reloaded.ok || !trashActive.current) return reloaded;
   const trash = await loadTrash();
   return trash.ok ? reloaded : trash;
 }

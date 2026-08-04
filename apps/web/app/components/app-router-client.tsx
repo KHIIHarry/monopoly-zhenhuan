@@ -3410,6 +3410,7 @@ function AdminView({
   const [trashRooms, setTrashRooms] = useState<AdminTrashRoom[]>([]);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trashNowMs, setTrashNowMs] = useState(() => Date.now());
+  const trashTabActive = useRef(false);
   const onLoadErrorRef = useRef(onLoadError);
   onLoadErrorRef.current = onLoadError;
   const trashLoaderRef = useRef<ReturnType<typeof createTrashRoomLoader> | null>(
@@ -3507,17 +3508,19 @@ function AdminView({
     return reloadAdminWithTrash(
       onReload,
       loadTrashRooms,
-      () => tab === "ROOMS",
+      trashTabActive,
     );
   }
 
   useEffect(() => {
     if (tab !== "ROOMS") {
+      trashTabActive.current = false;
       setTrashOpen(false);
       trashLoader.invalidate();
       return;
     }
 
+    trashTabActive.current = true;
     setTrashNowMs(Date.now());
     void loadTrashRooms();
     const trashTimer = window.setInterval(
@@ -3525,6 +3528,7 @@ function AdminView({
       60_000,
     );
     return () => {
+      trashTabActive.current = false;
       trashLoader.invalidate();
       window.clearInterval(trashTimer);
     };

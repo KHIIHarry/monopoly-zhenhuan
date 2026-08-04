@@ -129,6 +129,54 @@ describe('room trash loading control', () => {
     expect(onValue).toHaveBeenCalledWith([trashRoom('latest')]);
   });
 
+  test('keeps sharing the latest request after the invalidated request settles first', async () => {
+    const old = deferred<AdminTrashRoom[]>();
+    const latest = deferred<AdminTrashRoom[]>();
+    const read = vi
+      .fn<() => Promise<AdminTrashRoom[]>>()
+      .mockReturnValueOnce(old.promise)
+      .mockReturnValueOnce(latest.promise);
+    const loader = createTrashRoomLoader({ read, onValue: vi.fn() });
+
+    const oldLoad = loader.load();
+    loader.invalidate();
+    const latestLoad = loader.load();
+    old.resolve([trashRoom('old')]);
+    await oldLoad;
+
+    const reentrant = loader.load();
+    expect(reentrant).toBe(latestLoad);
+    expect(read).toHaveBeenCalledTimes(2);
+    latest.resolve([trashRoom('latest')]);
+    await Promise.all([latestLoad, reentrant]);
+  });
+
+  test('does not report an invalidated request failure', async () => {
+    const old = deferred<AdminTrashRoom[]>();
+    const latest = deferred<AdminTrashRoom[]>();
+    const error = new Error('stale trash failure');
+    const onError = vi.fn();
+    const read = vi
+      .fn<() => Promise<AdminTrashRoom[]>>()
+      .mockReturnValueOnce(old.promise)
+      .mockReturnValueOnce(latest.promise);
+    const loader = createTrashRoomLoader({
+      read,
+      onValue: vi.fn(),
+      onError,
+    });
+
+    const oldLoad = loader.load();
+    loader.invalidate();
+    const latestLoad = loader.load();
+    old.reject(error);
+    await expect(oldLoad).resolves.toEqual({ ok: false, error });
+    expect(onError).not.toHaveBeenCalled();
+
+    latest.resolve([trashRoom('latest')]);
+    await latestLoad;
+  });
+
   test('reports a current read failure and resolves it as failed', async () => {
     const error = new Error('trash unavailable');
     const onError = vi.fn();
@@ -155,10 +203,30 @@ describe('room trash reload and write completion', () => {
       reloadAdminWithTrash(
         vi.fn().mockResolvedValue({ ok: true, value: adminData }),
         loadTrash,
-        () => true,
+        { current: true },
       ),
     ).resolves.toEqual({ ok: false, error });
     expect(loadTrash).toHaveBeenCalledOnce();
+  });
+
+  test('skips trash when the rooms tab becomes inactive during the main reload', async () => {
+    const mainReload = deferred<{
+      ok: true;
+      value: typeof adminData;
+    }>();
+    const active = { current: true };
+    const loadTrash = vi.fn();
+
+    const reloaded = reloadAdminWithTrash(
+      () => mainReload.promise,
+      loadTrash,
+      active,
+    );
+    active.current = false;
+    mainReload.resolve({ ok: true, value: adminData });
+
+    await expect(reloaded).resolves.toEqual({ ok: true, value: adminData });
+    expect(loadTrash).not.toHaveBeenCalled();
   });
 
   test('does not confirm the stable write intent unless both reloads succeed', async () => {

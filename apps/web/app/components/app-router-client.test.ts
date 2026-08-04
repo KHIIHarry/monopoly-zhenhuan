@@ -72,8 +72,9 @@ describe('admin room trash state', () => {
     expect(loadTrashRooms).toContain('trashLoader.load()');
     expect(loadTrashRooms).not.toContain('runAction');
     expect(reloadAdmin).toMatch(
-      /return reloadAdminWithTrash\(\s*onReload,\s*loadTrashRooms,\s*\(\) => tab === "ROOMS",?\s*\)/,
+      /return reloadAdminWithTrash\(\s*onReload,\s*loadTrashRooms,\s*trashTabActive,?\s*\)/,
     );
+    expect(reloadAdmin).not.toContain('tab === "ROOMS"');
   });
 
   test('closes trash and stops its clock immediately outside the rooms tab', async () => {
@@ -87,7 +88,9 @@ describe('admin room trash state', () => {
 
     expect(adminView).toContain('const [trashOpen, setTrashOpen] = useState(false)');
     expect(adminView).toContain('const [trashNowMs, setTrashNowMs] = useState(() => Date.now())');
-    expect(roomsEffect).toMatch(/if \(tab !== "ROOMS"\) \{[\s\S]*?setTrashOpen\(false\);[\s\S]*?trashLoader\.invalidate\(\);[\s\S]*?return;/);
+    expect(adminView).toContain('const trashTabActive = useRef(false)');
+    expect(roomsEffect).toMatch(/if \(tab !== "ROOMS"\) \{[\s\S]*?trashTabActive\.current = false;[\s\S]*?setTrashOpen\(false\);[\s\S]*?trashLoader\.invalidate\(\);[\s\S]*?return;/);
+    expect(roomsEffect).toMatch(/trashTabActive\.current = true;[\s\S]*?void loadTrashRooms\(\)/);
     expect(roomsEffect).toMatch(
       /window\.setInterval\(\s*\(\) => setTrashNowMs\(Date\.now\(\)\),\s*60_000,?\s*\)/,
     );
@@ -96,6 +99,7 @@ describe('admin room trash state', () => {
       'return () => {',
       '    };',
     );
+    expect(cleanup).toContain('trashTabActive.current = false');
     expect(cleanup).toContain('trashLoader.invalidate()');
     expect(cleanup).toContain('window.clearInterval(trashTimer)');
   });
