@@ -1930,13 +1930,14 @@ nav span { font-size: 10px; white-space: nowrap; }
   .modal-backdrop .landing-action-sheet .landing-property-picker { gap: 24px; }
   .modal-backdrop .action-sheet :is(.primary, .quick) { border-radius: 6px; }
 
-  .landing-approval-list article { grid-template-columns: 76px minmax(0, 1fr) 44px; }
+  .landing-approval-list article {
+    grid-template-columns: 76px minmax(0, 1fr) 44px;
+    column-gap: 4px;
+  }
   .landing-location-meta {
     width: 76px;
     min-width: 76px;
     max-width: 76px;
-    align-content: start;
-    padding-top: 4px;
   }
   .landing-approval-list .landing-location-meta > span,
   .landing-approval-list .landing-player-nickname {
