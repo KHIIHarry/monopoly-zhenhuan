@@ -9,6 +9,7 @@ import { authMeResponse, clearSessionCookie, loginBodySchema, passwordSchema, se
 import { mapApiError, RuleError } from './api-error.js';
 import { loadOriginPolicy } from './origin-policy.js';
 import { parseRoomSubscriptionPayload, PrismaGameService } from './prisma-game-service.js';
+import { startRoomTrashCleaner } from './room-trash-cleaner.js';
 import {
   buildFundToastDeliveries,
   buildLandingRejectionToastDelivery,
@@ -131,6 +132,8 @@ export type BuildApiAppOptions = {
   database?: ApiDatabase;
   logger?: boolean;
   notifier?: ApiNotifier;
+  startRoomTrashCleaner?: boolean;
+  trashCleanupIntervalMs?: number;
 };
 
 function socketClientIp(
@@ -167,9 +170,20 @@ const accounts = options.accounts ?? (() => {
     (username) => security.superAdminUsernames.has(username),
     toastNotifier,
     (details) => app.log.info(details, 'Room permanently purged'),
+    (error, roomId) => app.log.error({ err: error, roomId }, 'Automatic room purge failed'),
   );
 })();
 const games = options.games ?? new PrismaGameService(database, Math.random, toastNotifier);
+const trashCleaner = options.startRoomTrashCleaner === true
+  ? startRoomTrashCleaner({
+      purgeExpiredRooms: () => accounts.purgeExpiredRooms(),
+      intervalMs: options.trashCleanupIntervalMs,
+      onError: (error) => app.log.error({ err: error }, 'Room trash scan failed'),
+    })
+  : null;
+app.addHook('onClose', () => {
+  trashCleaner?.stop();
+});
 
 function cookieToken(header?: string) {
   const cookie = header?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${sessionCookieName}=`));

@@ -1953,6 +1953,167 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(purgeLogs).toHaveLength(1);
   });
 
+  it('purges only rooms whose retention deadline has passed at the supplied time', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const beforeDeadline = await createRoom(creator.account.id, 'ENDED');
+    const atDeadline = await createRoom(creator.account.id, 'ENDED');
+    const purgeAfter = new Date('2000-01-02T00:00:00.000Z');
+    await db.room.updateMany({
+      where: { id: { in: [beforeDeadline.id, atDeadline.id] } },
+      data: {
+        deletedAt: new Date('2000-01-01T00:00:00.000Z'),
+        purgeAfter,
+        deletedByAccountId: admin.account.id,
+      },
+    });
+    const service = new AccountRoomService(db);
+
+    await expect(service.purgeExpiredRooms(new Date('2000-01-01T23:59:59.999Z')))
+      .resolves.toEqual([]);
+    expect(await db.room.count({ where: { id: { in: [beforeDeadline.id, atDeadline.id] } } })).toBe(2);
+
+    const results = await service.purgeExpiredRooms(purgeAfter);
+    expect(results).toEqual([
+      { id: [beforeDeadline.id, atDeadline.id].sort()[0], deleted: true },
+      { id: [beforeDeadline.id, atDeadline.id].sort()[1], deleted: true },
+    ]);
+    expect(await db.room.count({ where: { id: { in: [beforeDeadline.id, atDeadline.id] } } })).toBe(0);
+  });
+
+  it('never purges more than 20 rooms in one batch', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const rooms = await Promise.all(Array.from({ length: 21 }, () => createRoom(creator.account.id, 'ENDED')));
+    const now = new Date('2000-02-02T00:00:00.000Z');
+    await db.room.updateMany({
+      where: { id: { in: rooms.map((room) => room.id) } },
+      data: {
+        deletedAt: new Date('2000-02-01T00:00:00.000Z'),
+        purgeAfter: now,
+        deletedByAccountId: admin.account.id,
+      },
+    });
+    const service = new AccountRoomService(db);
+
+    try {
+      await expect(service.purgeExpiredRooms(now, 100)).resolves.toHaveLength(20);
+      expect(await db.room.count({ where: { id: { in: rooms.map((room) => room.id) } } })).toBe(1);
+    } finally {
+      await db.room.deleteMany({ where: { id: { in: rooms.map((room) => room.id) } } });
+    }
+  });
+
+  it('purges rooms that expired while the API was stopped on the first restart scan', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const room = await createRoom(creator.account.id, 'ENDED');
+    await db.room.update({ where: { id: room.id }, data: {
+      deletedAt: new Date(Date.now() - 86_400_000),
+      purgeAfter: new Date(Date.now() - 1_000),
+      deletedByAccountId: admin.account.id,
+    } });
+    const service = new AccountRoomService(db);
+    const restartedApp = await buildApiApp({
+      database: db,
+      accounts: service,
+      logger: false,
+      startRoomTrashCleaner: true,
+      trashCleanupIntervalMs: 60_000,
+    });
+
+    try {
+      await expect.poll(() => db.room.count({ where: { id: room.id } })).toBe(0);
+    } finally {
+      await restartedApp.close();
+    }
+  });
+
+  it('claims expired rooms once across concurrent purge scans', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const rooms = await Promise.all(Array.from({ length: 4 }, () => createRoom(creator.account.id, 'ENDED')));
+    const now = new Date('2001-01-02T00:00:00.000Z');
+    await db.room.updateMany({
+      where: { id: { in: rooms.map((room) => room.id) } },
+      data: {
+        deletedAt: new Date('2001-01-01T00:00:00.000Z'),
+        purgeAfter: now,
+        deletedByAccountId: admin.account.id,
+      },
+    });
+    const service = new AccountRoomService(db);
+
+    const batches = await Promise.all([
+      service.purgeExpiredRooms(now),
+      service.purgeExpiredRooms(now),
+    ]);
+    const deletedIds = batches.flat().filter((result) => result.deleted).map((result) => result.id).sort();
+
+    expect(deletedIds).toEqual(rooms.map((room) => room.id).sort());
+    expect(new Set(deletedIds).size).toBe(rooms.length);
+  });
+
+  it('records one room failure and continues with other rooms without retrying it in the same batch', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const creator = await createAccount();
+    const failedRoom = await createRoom(creator.account.id, 'ENDED');
+    const successfulRoom = await createRoom(creator.account.id, 'ENDED');
+    const now = new Date('2002-01-03T00:00:00.000Z');
+    await db.room.update({ where: { id: failedRoom.id }, data: {
+      deletedAt: new Date('2002-01-01T00:00:00.000Z'),
+      purgeAfter: new Date('2002-01-02T00:00:00.000Z'),
+      deletedByAccountId: admin.account.id,
+    } });
+    await db.room.update({ where: { id: successfulRoom.id }, data: {
+      deletedAt: new Date('2002-01-01T00:00:00.001Z'),
+      purgeAfter: new Date('2002-01-02T00:00:00.001Z'),
+      deletedByAccountId: admin.account.id,
+    } });
+    const failures: Array<{ roomId: string; error: unknown }> = [];
+    const service = new AccountRoomService(
+      db,
+      undefined,
+      undefined,
+      undefined,
+      (error, roomId) => failures.push({ roomId, error }),
+    );
+    const suffix = randomUUID().replaceAll('-', '');
+    const failureFunction = `expired_room_failure_function_${suffix}`;
+    const failureTrigger = `expired_room_failure_trigger_${suffix}`;
+
+    try {
+      await db.$executeRawUnsafe(`
+        CREATE FUNCTION "${failureFunction}"() RETURNS TRIGGER AS $$
+        BEGIN
+          IF OLD."id" = '${failedRoom.id}' THEN
+            RAISE EXCEPTION 'INJECTED_EXPIRED_ROOM_FAILURE';
+          END IF;
+          RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql
+      `);
+      await db.$executeRawUnsafe(`
+        CREATE TRIGGER "${failureTrigger}"
+        BEFORE DELETE ON "Room"
+        FOR EACH ROW EXECUTE FUNCTION "${failureFunction}"()
+      `);
+
+      await expect(service.purgeExpiredRooms(now)).resolves.toEqual([
+        { id: successfulRoom.id, deleted: true },
+      ]);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.roomId).toBe(failedRoom.id);
+      expect(String(failures[0]?.error)).toContain('INJECTED_EXPIRED_ROOM_FAILURE');
+      expect(await db.room.findUnique({ where: { id: failedRoom.id } })).not.toBeNull();
+      expect(await db.room.findUnique({ where: { id: successfulRoom.id } })).toBeNull();
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${failureTrigger}" ON "Room"`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${failureFunction}"()`);
+      await db.room.deleteMany({ where: { id: failedRoom.id } });
+    }
+  });
+
   it('serializes restore against permanent delete so exactly one outcome wins', async () => {
     const admin = await createAccount({ superAdmin: true });
     const creator = await createAccount();

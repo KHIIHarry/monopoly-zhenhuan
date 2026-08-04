@@ -306,6 +306,9 @@ export class AccountRoomService {
     private readonly isConfiguredSuperAdmin: (username: string) => boolean = () => false,
     private readonly toastNotifier?: PostCommitToastNotifier,
     private readonly roomPurgeLogger: (details: RoomPurgeLog) => void = () => undefined,
+    private readonly roomPurgeErrorLogger: (error: unknown, roomId: string) => void = (error, roomId) => {
+      console.error('Automatic room purge failed', { roomId, error });
+    },
   ) {}
 
   private async serializable<T>(task: (tx: Prisma.TransactionClient) => Promise<T>) {
@@ -1070,6 +1073,61 @@ export class AccountRoomService {
     });
     if (result.log) this.roomPurgeLogger(result.log);
     return result.value;
+  }
+
+  async purgeExpiredRooms(now = new Date(), limit = 20): Promise<Array<{ id: string; deleted: boolean }>> {
+    const results: Array<{ id: string; deleted: boolean }> = [];
+    const failedRoomIds = new Set<string>();
+    const batchLimit = Number.isFinite(limit) ? Math.min(20, Math.max(0, Math.floor(limit))) : 20;
+    let processed = 0;
+    let serializationConflicts = 0;
+
+    while (processed < batchLimit) {
+      let claimedRoomId: string | undefined;
+      try {
+        const result = await this.serializable(async (tx) => {
+          const exclusion = failedRoomIds.size
+            ? Prisma.sql`AND "id" NOT IN (${Prisma.join([...failedRoomIds])})`
+            : Prisma.empty;
+          const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT "id"
+            FROM "Room"
+            WHERE "deletedAt" IS NOT NULL
+              AND "purgeAfter" <= ${now}
+              ${exclusion}
+            ORDER BY "purgeAfter" ASC, "id" ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+          `);
+          claimedRoomId = rows[0]?.id;
+          if (!claimedRoomId) return null;
+          const room = await tx.room.findUnique({
+            where: { id: claimedRoomId },
+            select: { id: true, name: true, deletedAt: true, purgeAfter: true },
+          });
+          if (!room?.deletedAt || !room.purgeAfter || room.purgeAfter > now) return null;
+          const log = await this.deleteLockedRoom(tx, room, { kind: 'AUTO' });
+          return { value: { id: room.id, deleted: true }, log };
+        });
+        if (!result) break;
+        serializationConflicts = 0;
+        processed += 1;
+        this.roomPurgeLogger(result.log);
+        results.push(result.value);
+      } catch (error) {
+        if (isSerializationConflict(error) && serializationConflicts < 2) {
+          serializationConflicts += 1;
+          await new Promise((resolve) => setTimeout(resolve, serializationConflicts * 10));
+          continue;
+        }
+        if (!claimedRoomId) throw error;
+        processed += 1;
+        failedRoomIds.add(claimedRoomId);
+        this.roomPurgeErrorLogger(error, claimedRoomId);
+      }
+    }
+
+    return results;
   }
 
   async permanentlyDeleteRoom(
