@@ -165,6 +165,7 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
     }
     if (path === '/api/admin/accounts') return route.fulfill({ json: url.searchParams.get('cursor') === 'accounts-page-2' ? { items: [pagedAccount], nextCursor: null } : { items: adminAccounts, nextCursor: 'accounts-page-2' } });
     if (path.endsWith('/sessions')) return route.fulfill({ json: { items: [{ id: 'target-session', deviceName: '目标 Mac', browser: 'Chrome', operatingSystem: 'macOS', loginIp: '10.***.***.8', lastIp: '10.***.***.9', createdAt: now, lastActiveAt: now, expiresAt: now, active: true, revokedAt: null, revokeReason: null }], nextCursor: null } });
+    if (path === '/api/admin/rooms/trash') return route.fulfill({ json: { items: [], nextCursor: null } });
     if (path === '/api/admin/rooms') return route.fulfill({ json: { items: adminRooms, nextCursor: null } });
     if (path === '/api/admin/rooms/room-1') { roomDetailReads += 1; return route.fulfill({ json: detail }); }
     if (path.endsWith('/audit-logs')) return route.fulfill({ json: { items: [{ id: 'audit-1', action: 'ADMIN_ROOM_UPDATED', actorRole: 'ADMIN', reason: null, createdAt: now }], nextCursor: null } });
@@ -218,11 +219,11 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   await expect(bankDialog).toHaveCount(0);
   await expect(bankSelect).toHaveValue('membership-1');
   await page.getByLabel('强制结束原因').fill('现场提前结束'); await expect(page.getByRole('button', { name: '强制结束' })).toBeEnabled(); await page.getByRole('button', { name: '强制结束' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
-  await page.getByRole('button', { name: '归档房间' }).click();
-  await expect(page.getByRole('button', { name: '确认归档' })).toBeDisabled();
-  await page.getByLabel('确认归档房间').fill(room.name);
-  await expect(page.getByRole('button', { name: '确认归档' })).toBeEnabled();
-  await page.getByRole('button', { name: '确认归档' }).click();
+  await page.getByRole('button', { name: '删除房间', exact: true }).click();
+  await expect(page.getByRole('button', { name: '移入垃圾桶' })).toBeDisabled();
+  await page.getByLabel('确认删除房间').fill(room.name);
+  await expect(page.getByRole('button', { name: '移入垃圾桶' })).toBeEnabled();
+  await page.getByRole('button', { name: '移入垃圾桶' }).click();
   await page.getByRole('tab', { name: '安全日志' }).click(); await expect(page.getByText('LOGIN_SUCCEEDED')).toBeVisible();
 
   const paths = writes.map((item) => `${item.method} ${item.path}`);
@@ -264,6 +265,7 @@ test('管理员房间配置在回读后确认保存', async ({ page }) => {
     }
     if (path === '/api/admin/rooms/room-1') return route.fulfill({ json: detail() });
     if (path.endsWith('/audit-logs')) return route.fulfill({ json: { items: [], nextCursor: null } });
+    if (path === '/api/admin/rooms/trash') return route.fulfill({ json: { items: [], nextCursor: null } });
     if (path === '/api/admin/rooms') return route.fulfill({ json: { items: adminRooms, nextCursor: null } });
     if (path === '/api/admin/accounts') return route.fulfill({ json: { items: [], nextCursor: null } });
     if (path === '/api/admin/security-logs') return route.fulfill({ json: { items: [], nextCursor: null } });
@@ -290,6 +292,153 @@ test('管理员房间配置在回读后确认保存', async ({ page }) => {
   await page.getByRole('button', { name: '管理' }).click();
   await expect(page.getByLabel('赎回手续费')).toHaveValue('0');
   await expect(page.getByLabel('赎回手续费')).toBeDisabled();
+  await expect(page.getByRole('button', { name: '删除房间', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '删除房间', exact: true })).toHaveAttribute('title', '请先结束对局后删除');
+});
+
+test('room trash entry, responsive panel, confirmations, busy state, and refreshes', async ({ page }) => {
+  await lobbyRoutes(page);
+  const deletedAt = '2026-08-04T08:00:00.000Z';
+  const purgeAfter = '2099-08-05T08:00:00.000Z';
+  let trashRooms = [
+    { id: 'trash-restore', name: '碎玉轩旧局', code: 'SYX-OLD', status: 'FINISHED', deletedAt, purgeAfter, deletedBy: { id: account.id, displayName: account.displayName } },
+    { id: 'trash-delete', name: '翊坤宫终局', code: 'YKG-END', status: 'CLOSED', deletedAt, purgeAfter, deletedBy: null },
+  ];
+  let trashReads = 0;
+  let adminRoomReads = 0;
+  let restoreWrites = 0;
+  let permanentWrites = 0;
+  const refreshEvents: Array<'trash' | 'admin'> = [];
+  let releaseRestore!: () => void;
+  let releasePermanent!: () => void;
+  const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+  const permanentGate = new Promise<void>((resolve) => { releasePermanent = resolve; });
+  const dashboard = { accounts: { total: 1, active: 1 }, sessions: { valid: 1 }, rooms: { lobby: 0, playing: 0, finished: 0 }, games: { settledTotal: 0, averageDurationSeconds: 0 }, characterSelections: [], characterWins: [], recentGames: [] };
+
+  await page.route('**/api/admin/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    if (path === '/api/admin/rooms/trash') {
+      trashReads += 1;
+      refreshEvents.push('trash');
+      return route.fulfill({ json: { items: trashRooms, nextCursor: null } });
+    }
+    if (path === '/api/admin/rooms/trash-restore/restore' && method === 'POST') {
+      restoreWrites += 1;
+      await restoreGate;
+      trashRooms = trashRooms.filter((item) => item.id !== 'trash-restore');
+      return route.fulfill({ json: { restored: true, id: 'trash-restore' } });
+    }
+    if (path === '/api/admin/rooms/trash-delete/permanent' && method === 'DELETE') {
+      permanentWrites += 1;
+      await permanentGate;
+      trashRooms = trashRooms.filter((item) => item.id !== 'trash-delete');
+      return route.fulfill({ json: { deleted: true, id: 'trash-delete' } });
+    }
+    if (path === '/api/admin/rooms') {
+      adminRoomReads += 1;
+      refreshEvents.push('admin');
+      return route.fulfill({ json: { items: [], nextCursor: null } });
+    }
+    if (path === '/api/admin/accounts') return route.fulfill({ json: { items: [], nextCursor: null } });
+    if (path === '/api/admin/security-logs') return route.fulfill({ json: { items: [], nextCursor: null } });
+    if (path === '/api/admin/dashboard') return route.fulfill({ json: dashboard });
+    return route.fulfill({ status: 404, json: { error: 'NOT_FOUND' } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: '超管后台' }).click();
+  const trigger = page.locator('.room-trash-trigger');
+  await expect(trigger).toHaveCount(0);
+  await page.getByRole('tab', { name: '账号' }).click();
+  await expect(trigger).toHaveCount(0);
+  await page.getByRole('tab', { name: '房间' }).click();
+  await expect(trigger).toBeVisible();
+  await expect(trigger.locator('.room-trash-count')).toHaveText('2');
+
+  await trigger.click();
+  const panel = page.getByRole('dialog', { name: '待删除房间' });
+  await expect(panel).toBeVisible();
+  const closeTrash = panel.getByRole('button', { name: '关闭垃圾桶' });
+  await expect(closeTrash).toBeFocused();
+  const backgroundState = await page.locator('.admin-tabs').evaluate((element) => ({
+    inert: (element as HTMLElement).inert,
+    ariaHidden: element.getAttribute('aria-hidden'),
+  }));
+  expect(backgroundState).toEqual({ inert: true, ariaHidden: 'true' });
+  await closeTrash.press('Shift+Tab');
+  await expect(panel.getByRole('button', { name: '立即删除' }).last()).toBeFocused();
+  await panel.press('Escape');
+  await expect(panel).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(page.locator('.admin-tabs')).not.toHaveAttribute('aria-hidden', 'true');
+  await trigger.click();
+  await expect(panel).toBeVisible();
+  const geometry = await panel.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };
+  });
+  if (geometry.viewportWidth >= 900) {
+    expect(geometry.top).toBeCloseTo(0, 0);
+    expect(geometry.right).toBeCloseTo(geometry.viewportWidth, 0);
+    expect(geometry.bottom).toBeCloseTo(geometry.viewportHeight, 0);
+    expect(geometry.width).toBeLessThanOrEqual(420);
+  } else {
+    expect(geometry.left).toBeCloseTo(0, 0);
+    expect(geometry.right).toBeCloseTo(geometry.viewportWidth, 0);
+    expect(geometry.bottom).toBeCloseTo(geometry.viewportHeight, 0);
+    expect(geometry.top).toBeGreaterThan(0);
+  }
+
+  const restoreRow = panel.locator('.room-trash-row').filter({ hasText: '碎玉轩旧局' });
+  await expect(restoreRow).toContainText('SYX-OLD · 已结算');
+  await expect(restoreRow).toContainText(`删除时间：${new Date(deletedAt).toLocaleString('zh-CN')}`);
+  await expect(restoreRow).toContainText(/剩余 \d+ 小时/);
+  await expect(restoreRow).toContainText(/自动删除：.*2099/);
+
+  const trashReadsBeforeRestore = trashReads;
+  const adminReadsBeforeRestore = adminRoomReads;
+  const refreshEventsBeforeRestore = refreshEvents.length;
+  await restoreRow.getByRole('button', { name: '恢复' }).click();
+  const restoreDialog = page.getByRole('dialog', { name: '恢复房间' });
+  const restoreSubmit = restoreDialog.getByRole('button', { name: '确认恢复' });
+  await restoreSubmit.click();
+  await expect(restoreSubmit).toBeDisabled();
+  await expect.poll(() => restoreWrites).toBe(1);
+  releaseRestore();
+  await expect(restoreDialog).toHaveCount(0);
+  await expect(trigger.locator('.room-trash-count')).toHaveText('1');
+  await expect.poll(() => trashReads).toBeGreaterThan(trashReadsBeforeRestore);
+  await expect.poll(() => adminRoomReads).toBeGreaterThan(adminReadsBeforeRestore);
+  expect(refreshEvents.slice(refreshEventsBeforeRestore, refreshEventsBeforeRestore + 2)).toEqual(['trash', 'admin']);
+
+  const deleteRow = panel.locator('.room-trash-row').filter({ hasText: '翊坤宫终局' });
+  await expect(deleteRow).toContainText('YKG-END · 已关闭');
+  await deleteRow.getByRole('button', { name: '立即删除' }).click();
+  const permanentDialog = page.getByRole('dialog', { name: '立即删除房间' });
+  const permanentSubmit = permanentDialog.getByRole('button', { name: '永久删除' });
+  await expect(permanentSubmit).toBeDisabled();
+  await permanentDialog.getByLabel('确认立即删除房间').fill('翊坤宫');
+  await expect(permanentSubmit).toBeDisabled();
+  await permanentDialog.getByLabel('确认立即删除房间').fill('翊坤宫终局');
+  await expect(permanentSubmit).toBeEnabled();
+  const trashReadsBeforePermanent = trashReads;
+  const adminReadsBeforePermanent = adminRoomReads;
+  const refreshEventsBeforePermanent = refreshEvents.length;
+  await permanentSubmit.click();
+  await expect(permanentSubmit).toBeDisabled();
+  await expect.poll(() => permanentWrites).toBe(1);
+  releasePermanent();
+  await expect(permanentDialog).toHaveCount(0);
+  await expect(panel.getByText('垃圾桶为空')).toBeVisible();
+  await expect(trigger.locator('.room-trash-count')).toHaveCount(0);
+  await expect.poll(() => trashReads).toBeGreaterThan(trashReadsBeforePermanent);
+  await expect.poll(() => adminRoomReads).toBeGreaterThan(adminReadsBeforePermanent);
+  expect(refreshEvents.slice(refreshEventsBeforePermanent, refreshEventsBeforePermanent + 2)).toEqual(['trash', 'admin']);
+
+  await panel.getByRole('button', { name: '关闭垃圾桶' }).click();
+  await page.getByRole('tab', { name: '安全日志' }).click();
+  await expect(trigger).toHaveCount(0);
 });
 
 test('admin mutation reuses its key after a lost response', async ({ page }) => {

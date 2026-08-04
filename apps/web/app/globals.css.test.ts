@@ -21,6 +21,30 @@ function extractMediaBlock(stylesheet: string, header: string, occurrence: 'firs
   throw new Error(`Missing closing brace for CSS media block: ${header}`);
 }
 
+function extractRule(source: string, selector: string) {
+  const selectorStart = source.indexOf(selector);
+  if (selectorStart < 0) throw new Error(`Missing CSS selector: ${selector}`);
+  const openingBrace = source.indexOf('{', selectorStart + selector.length);
+  if (openingBrace < 0) throw new Error(`Missing opening brace for CSS selector: ${selector}`);
+  if (source.slice(selectorStart, openingBrace).trim() !== selector)
+    throw new Error(`CSS selector is not an exact rule boundary: ${selector}`);
+  const closingBrace = source.indexOf('}', openingBrace + 1);
+  if (closingBrace < 0) throw new Error(`Missing closing brace for CSS selector: ${selector}`);
+  return source.slice(openingBrace + 1, closingBrace);
+}
+
+function extractMediaBlockContaining(stylesheet: string, header: string, selector: string) {
+  let cursor = 0;
+  while (cursor < stylesheet.length) {
+    const start = stylesheet.indexOf(header, cursor);
+    if (start < 0) break;
+    const block = extractMediaBlock(stylesheet.slice(start), header, 'first');
+    if (block.includes(selector)) return block;
+    cursor = start + block.length;
+  }
+  throw new Error(`Missing ${selector} inside CSS media block: ${header}`);
+}
+
 describe('profile device controls', () => {
   test('separates the logout-others action from the device list', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
@@ -155,6 +179,54 @@ describe('admin room configuration controls', () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
 
     expect(stylesheet).toMatch(/\.admin-detail \.form-grid :is\(input, select\)\s*\{[^}]*height:\s*48px;[^}]*min-height:\s*48px;[^}]*box-sizing:\s*border-box;/s);
+  });
+});
+
+describe('admin room trash controls', () => {
+  test('fixes a 52px circular trash trigger to the viewport corner', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const triggerRule = extractRule(stylesheet, '.room-trash-trigger');
+
+    expect(triggerRule).toMatch(/position:\s*fixed;/);
+    expect(triggerRule).toMatch(/right:\s*18px;/);
+    expect(triggerRule).toMatch(/bottom:\s*calc\(18px \+ env\(safe-area-inset-bottom\)\);/);
+    expect(triggerRule).toMatch(/width:\s*52px;/);
+    expect(triggerRule).toMatch(/min-width:\s*52px;/);
+    expect(triggerRule).toMatch(/height:\s*52px;/);
+    expect(triggerRule).toMatch(/min-height:\s*52px;/);
+    expect(triggerRule).toMatch(/border-radius:\s*50%;/);
+    expect(triggerRule).not.toMatch(/cursor:\s*(?:grab|grabbing|move);/);
+  });
+
+  test('uses a right drawer on desktop and a bottom panel only inside the mobile media block', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const desktopPanelRule = extractRule(stylesheet, '.room-trash-panel');
+    const mobileStyles = extractMediaBlockContaining(
+      stylesheet,
+      '@media (max-width: 899px)',
+      '.room-trash-panel',
+    );
+    const mobilePanelRule = extractRule(mobileStyles, '.room-trash-panel');
+
+    expect(desktopPanelRule).toMatch(/position:\s*fixed;/);
+    expect(desktopPanelRule).toMatch(/top:\s*0;/);
+    expect(desktopPanelRule).toMatch(/right:\s*0;/);
+    expect(desktopPanelRule).toMatch(/width:\s*min\(420px,\s*100%\);/);
+    expect(desktopPanelRule).toMatch(/height:\s*100dvh;/);
+    expect(desktopPanelRule).not.toMatch(/bottom:\s*0;/);
+    expect(mobilePanelRule).toMatch(/top:\s*auto;/);
+    expect(mobilePanelRule).toMatch(/bottom:\s*0;/);
+    expect(mobilePanelRule).toMatch(/width:\s*100%;/);
+    expect(mobilePanelRule).toMatch(/height:\s*auto;/);
+    expect(mobilePanelRule).toMatch(/max-height:\s*min\(78dvh,\s*680px\);/);
+  });
+
+  test('keeps trash actions touchable and defines no drag cursor', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+    const actionRule = extractRule(stylesheet, '.room-trash-actions button');
+
+    expect(actionRule).toMatch(/min-height:\s*44px;/);
+    expect(stylesheet).not.toMatch(/cursor:\s*(?:grab|grabbing|move);/);
   });
 });
 

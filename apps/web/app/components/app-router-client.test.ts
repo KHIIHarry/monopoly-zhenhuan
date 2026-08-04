@@ -23,12 +23,13 @@ function sourceBetween(source: string, startMarker: string, endMarker: string) {
 }
 
 describe('confirmation dialog', () => {
-  test('describes room removal as archival rather than permanent deletion', async () => {
+  test('describes room removal as a recoverable 24-hour trash action', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
 
-    expect(component).toContain('title: "归档房间"');
-    expect(component).toContain('fieldLabel: "确认归档房间"');
-    expect(component).toContain('房间将停止操作并保留不可删除的账本与审计记录');
+    expect(component).toContain('title: "删除房间"');
+    expect(component).toContain('fieldLabel: "确认删除房间"');
+    expect(component).toContain('进入垃圾桶，24 小时后自动永久删除，期间可恢复');
+    expect(component).toContain('confirmLabel: "移入垃圾桶"');
     expect(component).not.toContain('${selectedRoom.name} 的全部房间数据将被永久清除，且无法恢复。');
   });
 
@@ -107,6 +108,11 @@ describe('admin room trash state', () => {
   test('restores and permanently deletes through the stable writer', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
     const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const refresh = sourceBetween(
+      adminView,
+      'async function refreshAfterTrashWrite()',
+      'async function restoreTrashRoom(roomId: string)',
+    );
     const restore = sourceBetween(
       adminView,
       'async function restoreTrashRoom(roomId: string)',
@@ -115,15 +121,93 @@ describe('admin room trash state', () => {
     const permanent = sourceBetween(
       adminView,
       'async function permanentlyDeleteTrashRoom(roomId: string)',
-      '// Task 7 consumes this state',
+      'function confirmRestore(room: AdminTrashRoom)',
     );
 
+    expect(refresh).toMatch(
+      /const trash = await loadTrashRooms\(\);[\s\S]*?if \(!trash\.ok\) return trash;[\s\S]*?return onReload\(\);/,
+    );
     expect(restore).toContain('path: `/api/admin/rooms/${roomId}/restore`');
     expect(restore).toContain('method: "POST"');
     expect(restore).toContain('completeTrashWrite(');
+    expect(restore).toContain('refreshAfterTrashWrite');
     expect(permanent).toContain('path: `/api/admin/rooms/${roomId}/permanent`');
     expect(permanent).toContain('method: "DELETE"');
     expect(permanent).toContain('completeTrashWrite(');
+    expect(permanent).toContain('refreshAfterTrashWrite');
+  });
+});
+
+describe('admin room trash controls', () => {
+  test('renders the fixed trash entry only for the rooms tab without drag behavior', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+
+    expect(component).toContain('import {');
+    expect(component).toContain('Trash2');
+    expect(adminView).toMatch(/tab === "ROOMS"[\s\S]*?className="room-trash-trigger"/);
+    expect(adminView).toContain('aria-label="待删除房间"');
+    expect(adminView).toContain('className="room-trash-count"');
+    expect(adminView).toContain('className="room-trash-panel"');
+    expect(adminView).not.toContain('draggable');
+    expect(adminView).not.toMatch(/on(?:Mouse|Pointer|Touch)(?:Down|Move|Up)/);
+  });
+
+  test('uses the existing focus trap and background isolation for the modal panel', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const focusHook = sourceBetween(
+      component,
+      'function useDialogFocus(',
+      'function ActionSheet(',
+    );
+
+    expect(adminView).toContain(
+      'const trashDialogRef = useDialogFocus(() => setTrashOpen(false), trashOpen)',
+    );
+    expect(adminView).toMatch(
+      /<aside[\s\S]*?ref=\{trashDialogRef\}[\s\S]*?className="room-trash-panel"/,
+    );
+    expect(focusHook).toContain(
+      'dialog.closest(".modal-backdrop, .room-trash-backdrop")',
+    );
+  });
+
+  test('shows trash metadata and creates restore and permanent-delete confirmations', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const restore = sourceBetween(
+      adminView,
+      'function confirmRestore(room: AdminTrashRoom)',
+      'function confirmPermanentDelete(room: AdminTrashRoom)',
+    );
+    const permanent = sourceBetween(
+      adminView,
+      'function confirmPermanentDelete(room: AdminTrashRoom)',
+      'const tabs = [',
+    );
+
+    expect(adminView).toContain('localizedRoomStatus(room.status)');
+    expect(adminView).toContain('formatTrashCountdown(room.purgeAfter, trashNowMs)');
+    expect(adminView).toContain('formatTrashDeadline(room.purgeAfter)');
+    expect(adminView).toContain('删除时间：');
+    expect(adminView).toContain('自动删除：');
+    expect(restore).toContain('title: "恢复房间"');
+    expect(restore).toContain('restoreTrashRoom(room.id)');
+    expect(permanent).toContain('fieldLabel: "确认立即删除房间"');
+    expect(permanent).toContain('expectedValues: [room.name]');
+    expect(permanent).toContain('permanentlyDeleteTrashRoom(room.id)');
+  });
+
+  test('blocks playing-room deletion and maps trash lifecycle API failures', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+
+    expect(component).toContain('ROOM_MUST_END_BEFORE_DELETE: "请先结束对局，再删除房间"');
+    expect(component).toContain('ROOM_NOT_IN_TRASH: "该房间不在垃圾桶中，请刷新后重试"');
+    expect(adminView).toMatch(
+      /title=\{selectedRoom\.status === "PLAYING" \? "请先结束对局后删除" : undefined\}[\s\S]*?disabled=\{busy \|\| selectedRoom\.status === "PLAYING"\}[\s\S]*?删除房间/,
+    );
   });
 });
 

@@ -23,6 +23,8 @@ import { selectCurrentLanding } from "./landing-lifecycle";
 import {
   completeTrashWrite,
   createTrashRoomLoader,
+  formatTrashCountdown,
+  formatTrashDeadline,
   reloadAdminWithTrash,
   type AdminTrashRoom,
 } from "./room-trash";
@@ -73,6 +75,7 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldCheck,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -388,6 +391,8 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   UNAUTHORIZED: "当前账号无权执行此操作",
   ROOM_NOT_FOUND: "没有找到该房间，请返回房间列表刷新",
   ROOM_NOT_IN_LOBBY: "房间已经开局，不能再执行此操作",
+  ROOM_MUST_END_BEFORE_DELETE: "请先结束对局，再删除房间",
+  ROOM_NOT_IN_TRASH: "该房间不在垃圾桶中，请刷新后重试",
   ROOM_NOT_PLAYING: "房间当前不在游戏中",
   ROOM_ENDED: "房间已经结束，不能继续操作",
   MINIMUM_PLAYERS: "至少需要两位玩家才能开局",
@@ -3499,9 +3504,16 @@ function AdminView({
   const [roomLifecycleNotice, setRoomLifecycleNotice] = useState("");
   const accountSaveTimer = useRef<number | null>(null);
   const roomSaveTimer = useRef<number | null>(null);
+  const trashDialogRef = useDialogFocus(() => setTrashOpen(false), trashOpen);
 
   async function loadTrashRooms() {
     return trashLoader.load();
+  }
+
+  async function refreshAfterTrashWrite() {
+    const trash = await loadTrashRooms();
+    if (!trash.ok) return trash;
+    return onReload();
   }
 
   async function reloadAdmin() {
@@ -3789,7 +3801,7 @@ function AdminView({
           path: `/api/admin/rooms/${roomId}/restore`,
           method: "POST",
         }),
-      reloadAdmin,
+      refreshAfterTrashWrite,
     );
   }
 
@@ -3800,18 +3812,36 @@ function AdminView({
           path: `/api/admin/rooms/${roomId}/permanent`,
           method: "DELETE",
         }),
-      reloadAdmin,
+      refreshAfterTrashWrite,
     );
   }
 
-  // Task 7 consumes this state and these actions when it renders the trash panel.
-  void [
-    trashRooms,
-    trashOpen,
-    trashNowMs,
-    restoreTrashRoom,
-    permanentlyDeleteTrashRoom,
-  ];
+  function confirmRestore(room: AdminTrashRoom) {
+    setConfirmName("");
+    setConfirm({
+      title: "恢复房间",
+      confirmLabel: "确认恢复",
+      copy: `${room.name} 将恢复到房间管理列表，原有成员、结算与审计记录保持不变。`,
+      run: () => restoreTrashRoom(room.id),
+    });
+  }
+
+  function confirmPermanentDelete(room: AdminTrashRoom) {
+    setConfirmName("");
+    setConfirm({
+      title: "立即删除房间",
+      fieldLabel: "确认立即删除房间",
+      confirmLabel: "永久删除",
+      expectedValues: [room.name],
+      confirmationHint: `请输入完整房间名称：${room.name}`,
+      copy: `${room.name} 的全部房间数据将立即永久删除，且无法恢复。`,
+      run: async () => {
+        const deleted = await permanentlyDeleteTrashRoom(room.id);
+        if (deleted) setConfirmName("");
+        return deleted;
+      },
+    });
+  }
 
   const tabs = [
     { id: "DASHBOARD", label: "数据看板" },
@@ -4684,15 +4714,17 @@ function AdminView({
                     </button>
                     <button
                       className="danger-button"
+                      title={selectedRoom.status === "PLAYING" ? "请先结束对局后删除" : undefined}
+                      disabled={busy || selectedRoom.status === "PLAYING"}
                       onClick={() => {
                         setConfirmName("");
                         setConfirm({
-                          title: "归档房间",
-                          fieldLabel: "确认归档房间",
-                          confirmLabel: "确认归档",
+                          title: "删除房间",
+                          fieldLabel: "确认删除房间",
+                          confirmLabel: "移入垃圾桶",
                           expectedValues: [selectedRoom.name],
-                          confirmationHint: `请输入要归档的房间名称：${selectedRoom.name}`,
-                          copy: `${selectedRoom.name} 房间将停止操作并保留不可删除的账本与审计记录。`,
+                          confirmationHint: `请输入完整房间名称：${selectedRoom.name}`,
+                          copy: `${selectedRoom.name} 将进入垃圾桶，24 小时后自动永久删除，期间可恢复。`,
                           run: async () => {
                             const deleted = await mutateAndReload(
                               `/api/admin/rooms/${selectedRoom.id}`,
@@ -4708,7 +4740,7 @@ function AdminView({
                         });
                       }}
                     >
-                      归档房间
+                      删除房间
                     </button>
                     <h3>房间审计日志</h3>
                     {roomLogs.map((log) => (
@@ -4748,6 +4780,98 @@ function AdminView({
             </section>
           )}
         </div>
+      )}
+      {tab === "ROOMS" && (
+        <>
+          <button
+            type="button"
+            className="room-trash-trigger"
+            aria-label="待删除房间"
+            title="待删除房间"
+            disabled={busy}
+            onClick={(event) => {
+              event.currentTarget.focus();
+              setTrashOpen(true);
+            }}
+          >
+            <Trash2 aria-hidden="true" />
+            {trashRooms.length > 0 && (
+              <span className="room-trash-count">{trashRooms.length}</span>
+            )}
+          </button>
+          {trashOpen && (
+            <div
+              className="room-trash-backdrop"
+              onClick={() => setTrashOpen(false)}
+            >
+              <aside
+                ref={trashDialogRef}
+                className="room-trash-panel"
+                role="dialog"
+                aria-modal="true"
+                aria-label="待删除房间"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <header>
+                  <h2>待删除房间</h2>
+                  <button
+                    type="button"
+                    className="icon subtle"
+                    aria-label="关闭垃圾桶"
+                    title="关闭垃圾桶"
+                    disabled={busy}
+                    onClick={() => setTrashOpen(false)}
+                  >
+                    <X />
+                  </button>
+                </header>
+                <div className="room-trash-list">
+                  {trashRooms.length === 0 ? (
+                    <p className="room-trash-empty">垃圾桶为空</p>
+                  ) : (
+                    trashRooms.map((room) => (
+                      <article className="room-trash-row" key={room.id}>
+                        <div>
+                          <strong>{room.name}</strong>
+                          <span>
+                            {room.code} · {localizedRoomStatus(room.status)}
+                          </span>
+                          <small>
+                            删除时间：
+                            {new Date(room.deletedAt).toLocaleString("zh-CN")}
+                          </small>
+                          <small>
+                            {formatTrashCountdown(room.purgeAfter, trashNowMs)}
+                          </small>
+                          <small>
+                            自动删除：{formatTrashDeadline(room.purgeAfter)}
+                          </small>
+                        </div>
+                        <div className="room-trash-actions">
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => confirmRestore(room)}
+                          >
+                            恢复
+                          </button>
+                          <button
+                            type="button"
+                            className="danger-button"
+                            disabled={busy}
+                            onClick={() => confirmPermanentDelete(room)}
+                          >
+                            立即删除
+                          </button>
+                        </div>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </aside>
+            </div>
+          )}
+        </>
       )}
       {confirm && (
         <ConfirmDialog
@@ -8413,7 +8537,7 @@ function useDialogFocus(onClose: () => void, enabled: boolean) {
         : null;
     const previous =
       active && !dialog.contains(active) ? active : lastFocusOutsideDialog;
-    const backdrop = dialog.closest(".modal-backdrop");
+    const backdrop = dialog.closest(".modal-backdrop, .room-trash-backdrop");
     const siblings = backdrop?.parentElement
       ? ([...backdrop.parentElement.children].filter(
           (item) => item !== backdrop,
