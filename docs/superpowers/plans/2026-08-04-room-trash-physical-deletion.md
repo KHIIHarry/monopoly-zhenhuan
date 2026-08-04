@@ -452,7 +452,7 @@ git commit -m "fix(api): isolate trashed rooms"
 
 **Interfaces:**
 - Produces: `permanentlyDeleteRoom(auth, roomId, key): Promise<{ deleted: true; id: string }>`。
-- Produces: `purgeRoom(roomId, source, hooks?): Promise<{ deleted: boolean; id: string }>`，并由它与 Task 5 共用私有 `deleteLockedRoom(tx, room, source, hooks?)` 删除步骤；`hooks` 仅供集成测试注入事务中途故障。
+- Produces: `purgeRoom(roomId, source): Promise<{ deleted: boolean; id: string }>`，并由它与 Task 5 共用私有 `deleteLockedRoom(tx, room, source)` 删除步骤。
 - Produces: `DELETE /api/admin/rooms/:id/permanent`。
 
 - [ ] **Step 1: 写删除范围、回滚、幂等与竞态失败测试。**
@@ -484,11 +484,22 @@ expect((await permanentDelete(trashed.id, 'first-delete')).json())
 expect((await permanentDelete(trashed.id, 'new-delete-key')).json())
   .toEqual({ deleted: true, id: trashed.id });
 
-await expect(service.purgeRoom(rollbackRoom.id, { kind: 'AUTO' }, {
-  afterSettlementsDeleted: () => { throw new Error('INJECTED_PURGE_FAILURE'); },
-})).rejects.toThrow('INJECTED_PURGE_FAILURE');
+await db.$executeRawUnsafe(`
+  CREATE FUNCTION "${failureFunction}"() RETURNS TRIGGER AS $$
+  BEGIN RAISE EXCEPTION 'INJECTED_PURGE_FAILURE'; END;
+  $$ LANGUAGE plpgsql
+`);
+await db.$executeRawUnsafe(`
+  CREATE TRIGGER "${failureTrigger}"
+  BEFORE DELETE ON "GameTransaction"
+  FOR EACH ROW EXECUTE FUNCTION "${failureFunction}"()
+`);
+await expect(service.purgeRoom(rollbackRoom.id, { kind: 'AUTO' }))
+  .rejects.toThrow('INJECTED_PURGE_FAILURE');
 expect(await db.room.findUnique({ where: { id: rollbackRoom.id } })).not.toBeNull();
 expect(await db.gameSettlement.findUnique({ where: { roomId: rollbackRoom.id } })).not.toBeNull();
+await db.$executeRawUnsafe(`DROP TRIGGER "${failureTrigger}" ON "GameTransaction"`);
+await db.$executeRawUnsafe(`DROP FUNCTION "${failureFunction}"()`);
 
 const race = await Promise.allSettled([
   restore(trashedForRace.id, 'race-restore'),
@@ -499,7 +510,7 @@ const roomAfterRace = await db.room.findUnique({ where: { id: trashedForRace.id 
 if (roomAfterRace) expect(roomAfterRace.deletedAt).toBeNull();
 ```
 
-测试专用 `afterSettlementsDeleted` fault hook 只能通过构造参数注入且生产默认不存在，避免在运行时 API 暴露故障注入入口。五张不可变表的普通事务断言沿用 Task 1 的真实 PostgreSQL 测试，并在此处额外确认 purge 成功后目标行全部为 0。
+`failureFunction` 和 `failureTrigger` 使用 `randomUUID()` 生成只含字母数字下划线的隔离 schema 名称，并放在 `try/finally` 中确保测试失败时也删除 trigger/function。生产服务不增加任何测试专用接口。五张不可变表的普通事务断言沿用 Task 1 的真实 PostgreSQL 测试，并在此处额外确认 purge 成功后目标行全部为 0。
 
 - [ ] **Step 2: 运行集成测试确认失败。**
 
