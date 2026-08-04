@@ -4,6 +4,7 @@ import { Server as SocketServer } from 'socket.io';
 import type { BrowserRoomStatus, BrowserRoomSummary, BrowserSeatSnapshot, BrowserSnapshot } from './browser-fixture-types';
 
 const now = '2026-07-27T08:00:00.000Z';
+const externalStack = process.env.PLAYWRIGHT_EXTERNAL_STACK === '1';
 const account = { id: 'account-1', username: 'zhenhuan', displayName: '甄嬛', isSuperAdmin: true, canCreateRoom: true, lastLoginAt: now };
 type RoomSummary = BrowserRoomSummary;
 const baseRoom: RoomSummary = { id: 'room-1', name: '碎玉轩夜局', status: 'PLAYING', creator: '甄嬛', memberCount: 2, playerCount: 1, playerLimit: 5, hasPassword: false, mine: true, canJoin: true, joinBlockedReason: null, availableCharacters: [], characterId: 'zhenhuan', myCharacter: '钮祜禄·甄嬛', isBank: true };
@@ -225,7 +226,8 @@ test('settlement preview blocks, exact confirmation finishes, and immutable deta
   await page.getByRole('button', { name: '事务' }).click();
   await page.getByRole('button', { name: '结束游戏' }).click();
   await expect(page.getByText('待处理角色交换')).toBeVisible();
-  await expect(page.getByRole('button', { name: '确认结束游戏' })).toBeDisabled();
+  await expect(page.getByLabel('输入“确认结束游戏”')).toBeDisabled();
+  await expect(page.getByRole('button', { name: '请先处理阻塞项' })).toBeDisabled();
   blocked = false;
   await page.getByRole('button', { name: '返回银行端' }).click();
   await page.getByRole('button', { name: '事务' }).click();
@@ -233,7 +235,9 @@ test('settlement preview blocks, exact confirmation finishes, and immutable deta
   await page.getByLabel('输入“确认结束游戏”').fill('确认结束游戏');
   await page.getByRole('button', { name: '确认结束游戏' }).click();
   await expect(page.getByText('不可变结算快照')).toBeVisible();
-  await expect(page.getByText('第 1 名 · 获胜')).toHaveCount(2);
+  await expect(page.locator('.settlement-rank').filter({ hasText: '第 1 名' })).toHaveCount(2);
+  await expect(page.locator('.winner-mark').getByText('获胜', { exact: true })).toHaveCount(2);
+  await page.getByRole('button', { name: '甄嬛结算详情' }).click();
   await page.getByText('地产结算明细（1）').click();
   await expect(page.getByText('永寿宫')).toBeVisible();
   expect(finishRequests).toHaveLength(1);
@@ -950,6 +954,10 @@ test('ROOM_CONTROL_LOST routes a freshly finished room to settlement', async ({ 
 });
 
 test.describe.serial('Cookie socket notifications', () => {
+test.skip(
+  externalStack,
+  'Self-managed Socket.IO tests require exclusive fixed port 4000, which belongs to the Docker API under PLAYWRIGHT_EXTERNAL_STACK=1; covered by app-socket.test.ts and task7-real-stack.spec.ts.',
+);
 test.describe.configure({ timeout: 120_000 });
 test('preserve explicit seat routing, filter room payloads, clean subscriptions, recover control, and reconnect', async ({ page }) => {
   const httpServer = createServer();

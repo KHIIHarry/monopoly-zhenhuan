@@ -687,5 +687,7 @@ test('历史房间展示不可变结算明细', async ({ page }) => {
   await page.goto('/'); await page.getByRole('button', { name: /碎玉轩夜局/ }).click();
   await expect(page.getByText('不可变结算快照')).toBeVisible();
   await expect(page.getByText('7,300 两')).toBeVisible();
-  await expect(page.getByText('第 1 名 · 获胜')).toBeVisible();
+  const settlementEntry = page.getByRole('button', { name: '甄嬛结算详情' });
+  await expect(settlementEntry.locator('.settlement-rank')).toContainText('第 1 名');
+  await expect(settlementEntry.locator('.winner-mark')).toContainText('获胜');
 });
