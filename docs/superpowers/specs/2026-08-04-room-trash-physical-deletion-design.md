@@ -56,7 +56,7 @@
 
 账本、审计、安全日志和结算数据在房间正常生命周期内继续保持不可更新、不可删除。用户对本功能的授权仅覆盖“房间已进入垃圾桶后的整房物理清理”，不是取消不可变规则。
 
-现有 `allowPhysicalHistoryDelete()` 通过事务级 `zhenhuan.physical_delete_txid` 标记授权物理删除。新迁移需要让 `GameSettlement` 与 `SettlementPlayer` 的 immutable delete trigger 同样仅在该事务标记与当前事务 ID 匹配时放行 `DELETE`；普通事务、`UPDATE` 和 `TRUNCATE` 仍然拒绝。`LedgerEntry`、`AuditLog`、`SecurityLog` 继续沿用同一能力边界。授权必须使用事务局部设置，不能泄漏到连接池后续事务。
+现有 `allowPhysicalHistoryDelete()` 会写入事务级 `zhenhuan.physical_delete_txid`，但最新迁移 `202608010019_restore_room_history_immutability` 已撤掉 `LedgerEntry` 和 `AuditLog` 的物理删除例外；`GameSettlement` 与 `SettlementPlayer` 也从未开放该例外。新前向迁移必须统一定义 `LedgerEntry`、`AuditLog`、`SecurityLog`、`GameSettlement` 与 `SettlementPlayer` 的删除边界：仅当事务标记与当前事务 ID 匹配时放行 `DELETE`，普通事务的 `DELETE`、所有 `UPDATE` 和所有 `TRUNCATE` 仍然拒绝。授权必须使用事务局部设置，不能泄漏到连接池后续事务。
 
 物理删除服务必须先确认房间处于垃圾桶，再启用事务级删除能力，并仅按已锁定的 `roomId` 删除。不得提供绕过垃圾桶直接物理删除活动房间的公共服务方法。
 
