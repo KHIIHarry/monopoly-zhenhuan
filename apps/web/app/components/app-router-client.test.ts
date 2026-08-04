@@ -44,6 +44,44 @@ describe('confirmation dialog', () => {
   });
 });
 
+describe('admin room trash state', () => {
+  test('loads trash on the rooms tab and after an admin reload', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('const [trashRooms, setTrashRooms] = useState<AdminTrashRoom[]>([])');
+    expect(component).toContain('async function loadTrashRooms()');
+    expect(component).toContain('loadAllPages<AdminTrashRoom>("/api/admin/rooms/trash")');
+    expect(component).toMatch(/const reloaded = await onReload\(\);[\s\S]*?await loadTrashRooms\(\);/);
+  });
+
+  test('closes trash and stops its clock immediately outside the rooms tab', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('const [trashOpen, setTrashOpen] = useState(false)');
+    expect(component).toContain('const [trashNowMs, setTrashNowMs] = useState(() => Date.now())');
+    expect(component).toMatch(/if \(tab !== "ROOMS"\) \{[\s\S]*?setTrashOpen\(false\);[\s\S]*?return;/);
+    expect(component).toMatch(
+      /window\.setInterval\(\s*\(\) => setTrashNowMs\(Date\.now\(\)\),\s*60_000,?\s*\)/,
+    );
+    expect(component).toContain('window.clearInterval(trashTimer)');
+  });
+
+  test('restores and permanently deletes through the stable writer', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(/async function restoreTrashRoom\(roomId: string\)[\s\S]*?writeAction\(\{[\s\S]*?path: `\/api\/admin\/rooms\/\$\{roomId\}\/restore`,[\s\S]*?method: "POST"/);
+    expect(component).toMatch(/async function permanentlyDeleteTrashRoom\(roomId: string\)[\s\S]*?writeAction\(\{[\s\S]*?path: `\/api\/admin\/rooms\/\$\{roomId\}\/permanent`,[\s\S]*?method: "DELETE"/);
+  });
+
+  test('invalidates stale trash responses when leaving the tab or unmounting', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain('const trashRequestGeneration = useRef(0)');
+    expect(component).toMatch(/generation !== trashRequestGeneration\.current[\s\S]*?return false/);
+    expect(component).toMatch(/return \(\) => \{[\s\S]*?trashRequestGeneration\.current \+= 1;[\s\S]*?window\.clearInterval\(trashTimer\)/);
+  });
+});
+
 describe('workbench headers', () => {
   test('uses the same mobile header structure for bank and player workbenches', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');

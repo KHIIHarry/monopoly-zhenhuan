@@ -20,6 +20,7 @@ import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
 import { PlayerAssetAccordion } from "./player-asset-overview";
 import { selectCurrentLanding } from "./landing-lifecycle";
+import type { AdminTrashRoom } from "./room-trash";
 import {
   approvalAmountDelta,
   formatApprovalSubmittedAt,
@@ -3398,6 +3399,11 @@ function AdminView({
   const [selectedRoom, setSelectedRoom] = useState<AdminRoomDetail | null>(
     null,
   );
+  const [trashRooms, setTrashRooms] = useState<AdminTrashRoom[]>([]);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashNowMs, setTrashNowMs] = useState(() => Date.now());
+  const trashRequestGeneration = useRef(0);
+  const trashTabActive = useRef(false);
   const [roomLogs, setRoomLogs] = useState<
     Array<{
       id: string;
@@ -3474,6 +3480,50 @@ function AdminView({
   const [roomLifecycleNotice, setRoomLifecycleNotice] = useState("");
   const accountSaveTimer = useRef<number | null>(null);
   const roomSaveTimer = useRef<number | null>(null);
+
+  async function loadTrashRooms() {
+    const generation = ++trashRequestGeneration.current;
+    const result = await runAction(() =>
+      loadAllPages<AdminTrashRoom>("/api/admin/rooms/trash"),
+    );
+    if (
+      !result.ok ||
+      !trashTabActive.current ||
+      generation !== trashRequestGeneration.current
+    )
+      return false;
+    setTrashRooms(result.value);
+    return true;
+  }
+
+  async function reloadAdmin() {
+    const reloaded = await onReload();
+    if (reloaded.ok && trashTabActive.current) await loadTrashRooms();
+    return reloaded;
+  }
+
+  useEffect(() => {
+    if (tab !== "ROOMS") {
+      trashTabActive.current = false;
+      trashRequestGeneration.current += 1;
+      setTrashOpen(false);
+      return;
+    }
+
+    trashTabActive.current = true;
+    setTrashNowMs(Date.now());
+    void loadTrashRooms();
+    const trashTimer = window.setInterval(
+      () => setTrashNowMs(Date.now()),
+      60_000,
+    );
+    return () => {
+      trashTabActive.current = false;
+      trashRequestGeneration.current += 1;
+      window.clearInterval(trashTimer);
+    };
+  }, [tab]);
+
   async function refreshAccount(account: AdminAccount) {
     const devices = await loadAllPages<AdminDevice>(
       `/api/admin/accounts/${account.id}/sessions?state=recent&limit=100`,
@@ -3516,7 +3566,7 @@ function AdminView({
       setAccountSaveState("ERROR");
       return;
     }
-    const reloaded = await onReload();
+    const reloaded = await reloadAdmin();
     if (!reloaded.ok) {
       setAccountSaveState("ERROR");
       return;
@@ -3623,7 +3673,7 @@ function AdminView({
       setRoomSaveState("ERROR");
       return;
     }
-    const reloaded = await onReload();
+    const reloaded = await reloadAdmin();
     if (!reloaded.ok) {
       setRoomSaveState("ERROR");
       return;
@@ -3700,7 +3750,7 @@ function AdminView({
         : undefined);
     const result = await writeAction({ path, body, method });
     if (!result.ok) return false;
-    const reloaded = await onReload();
+    const reloaded = await reloadAdmin();
     if (!reloaded.ok) return false;
     if (roomId) {
       const detail = await runAction(() => refreshRoom(roomId));
@@ -3721,6 +3771,39 @@ function AdminView({
     result.confirm();
     return true;
   }
+
+  async function restoreTrashRoom(roomId: string) {
+    const result = await writeAction({
+      path: `/api/admin/rooms/${roomId}/restore`,
+      method: "POST",
+    });
+    if (!result.ok) return false;
+    const reloaded = await reloadAdmin();
+    if (!reloaded.ok) return false;
+    result.confirm();
+    return true;
+  }
+
+  async function permanentlyDeleteTrashRoom(roomId: string) {
+    const result = await writeAction({
+      path: `/api/admin/rooms/${roomId}/permanent`,
+      method: "DELETE",
+    });
+    if (!result.ok) return false;
+    const reloaded = await reloadAdmin();
+    if (!reloaded.ok) return false;
+    result.confirm();
+    return true;
+  }
+
+  // Task 7 consumes this state and these actions when it renders the trash panel.
+  void [
+    trashRooms,
+    trashOpen,
+    trashNowMs,
+    restoreTrashRoom,
+    permanentlyDeleteTrashRoom,
+  ];
 
   const tabs = [
     { id: "DASHBOARD", label: "数据看板" },
@@ -3758,7 +3841,7 @@ function AdminView({
         </div>
         <RefreshButton
           label="刷新后台"
-          refresh={async () => (await onReload()).ok}
+          refresh={async () => (await reloadAdmin()).ok}
           notice="后台数据已刷新"
           showNotice={showNotice}
           disabled={busy}
