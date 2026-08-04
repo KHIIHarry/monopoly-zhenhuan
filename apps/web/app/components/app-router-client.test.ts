@@ -14,6 +14,14 @@ import {
 const componentUrl = new URL('./app-router-client.tsx', import.meta.url);
 const seatsPageUrl = new URL('../rooms/[roomId]/seats/page.tsx', import.meta.url);
 
+function sourceBetween(source: string, startMarker: string, endMarker: string) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  expect(start, startMarker).toBeGreaterThanOrEqual(0);
+  expect(end, endMarker).toBeGreaterThan(start);
+  return source.slice(start, end);
+}
+
 describe('confirmation dialog', () => {
   test('describes room removal as archival rather than permanent deletion', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
@@ -47,38 +55,71 @@ describe('confirmation dialog', () => {
 describe('admin room trash state', () => {
   test('loads trash on the rooms tab and after an admin reload', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const loadTrashRooms = sourceBetween(
+      adminView,
+      'async function loadTrashRooms()',
+      'async function reloadAdmin()',
+    );
+    const reloadAdmin = sourceBetween(
+      adminView,
+      'async function reloadAdmin()',
+      'useEffect(() => {\n    if (tab !== "ROOMS")',
+    );
 
-    expect(component).toContain('const [trashRooms, setTrashRooms] = useState<AdminTrashRoom[]>([])');
-    expect(component).toContain('async function loadTrashRooms()');
-    expect(component).toContain('loadAllPages<AdminTrashRoom>("/api/admin/rooms/trash")');
-    expect(component).toMatch(/const reloaded = await onReload\(\);[\s\S]*?await loadTrashRooms\(\);/);
+    expect(adminView).toContain('const [trashRooms, setTrashRooms] = useState<AdminTrashRoom[]>([])');
+    expect(adminView).toContain('loadAllPages<AdminTrashRoom>("/api/admin/rooms/trash")');
+    expect(loadTrashRooms).toContain('trashLoader.load()');
+    expect(loadTrashRooms).not.toContain('runAction');
+    expect(reloadAdmin).toMatch(
+      /return reloadAdminWithTrash\(\s*onReload,\s*loadTrashRooms,\s*\(\) => tab === "ROOMS",?\s*\)/,
+    );
   });
 
   test('closes trash and stops its clock immediately outside the rooms tab', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const roomsEffect = sourceBetween(
+      adminView,
+      'useEffect(() => {\n    if (tab !== "ROOMS")',
+      '  }, [tab]);',
+    );
 
-    expect(component).toContain('const [trashOpen, setTrashOpen] = useState(false)');
-    expect(component).toContain('const [trashNowMs, setTrashNowMs] = useState(() => Date.now())');
-    expect(component).toMatch(/if \(tab !== "ROOMS"\) \{[\s\S]*?setTrashOpen\(false\);[\s\S]*?return;/);
-    expect(component).toMatch(
+    expect(adminView).toContain('const [trashOpen, setTrashOpen] = useState(false)');
+    expect(adminView).toContain('const [trashNowMs, setTrashNowMs] = useState(() => Date.now())');
+    expect(roomsEffect).toMatch(/if \(tab !== "ROOMS"\) \{[\s\S]*?setTrashOpen\(false\);[\s\S]*?trashLoader\.invalidate\(\);[\s\S]*?return;/);
+    expect(roomsEffect).toMatch(
       /window\.setInterval\(\s*\(\) => setTrashNowMs\(Date\.now\(\)\),\s*60_000,?\s*\)/,
     );
-    expect(component).toContain('window.clearInterval(trashTimer)');
+    const cleanup = sourceBetween(
+      roomsEffect,
+      'return () => {',
+      '    };',
+    );
+    expect(cleanup).toContain('trashLoader.invalidate()');
+    expect(cleanup).toContain('window.clearInterval(trashTimer)');
   });
 
   test('restores and permanently deletes through the stable writer', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const restore = sourceBetween(
+      adminView,
+      'async function restoreTrashRoom(roomId: string)',
+      'async function permanentlyDeleteTrashRoom(roomId: string)',
+    );
+    const permanent = sourceBetween(
+      adminView,
+      'async function permanentlyDeleteTrashRoom(roomId: string)',
+      '// Task 7 consumes this state',
+    );
 
-    expect(component).toMatch(/async function restoreTrashRoom\(roomId: string\)[\s\S]*?writeAction\(\{[\s\S]*?path: `\/api\/admin\/rooms\/\$\{roomId\}\/restore`,[\s\S]*?method: "POST"/);
-    expect(component).toMatch(/async function permanentlyDeleteTrashRoom\(roomId: string\)[\s\S]*?writeAction\(\{[\s\S]*?path: `\/api\/admin\/rooms\/\$\{roomId\}\/permanent`,[\s\S]*?method: "DELETE"/);
-  });
-
-  test('invalidates stale trash responses when leaving the tab or unmounting', async () => {
-    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
-
-    expect(component).toContain('const trashRequestGeneration = useRef(0)');
-    expect(component).toMatch(/generation !== trashRequestGeneration\.current[\s\S]*?return false/);
-    expect(component).toMatch(/return \(\) => \{[\s\S]*?trashRequestGeneration\.current \+= 1;[\s\S]*?window\.clearInterval\(trashTimer\)/);
+    expect(restore).toContain('path: `/api/admin/rooms/${roomId}/restore`');
+    expect(restore).toContain('method: "POST"');
+    expect(restore).toContain('completeTrashWrite(');
+    expect(permanent).toContain('path: `/api/admin/rooms/${roomId}/permanent`');
+    expect(permanent).toContain('method: "DELETE"');
+    expect(permanent).toContain('completeTrashWrite(');
   });
 });
 
