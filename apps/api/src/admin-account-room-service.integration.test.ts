@@ -150,17 +150,64 @@ integration('Task 6 real-Cookie admin routes', () => {
     const admin = await createAccount({ superAdmin: true });
     const creator = await createAccount();
     const cookie = await loginCookie(admin.account, admin.password);
+    await loginCookie(creator.account, creator.password);
+    const creatorSession = await db.accountSession.findFirstOrThrow({
+      where: { accountId: creator.account.id, revokedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
     const adminHeaders = { cookie: cookie.header };
     const moveToTrash = (roomId: string, key: string) => app.inject({
       method: 'DELETE', url: `/api/admin/rooms/${roomId}`,
       headers: { ...adminHeaders, 'idempotency-key': key },
     });
     const playing = await createRoom(creator.account.id, 'PLAYING');
+    const playingMember = await db.roomMembership.create({ data: {
+      roomId: playing.id,
+      accountId: creator.account.id,
+      displayNameSnapshot: creator.account.displayName,
+      activeSessionId: creatorSession.id,
+      controlClaimedAt: new Date('2026-08-04T00:00:00.000Z'),
+    } });
+    const playingPlayer = await db.player.create({ data: {
+      roomId: playing.id, memberId: playingMember.id, pawnColor: 'playing-trash-boundary', balance: 6_000, turnOrder: 1,
+    } });
+    const playingTurn = await db.turn.create({ data: {
+      roomId: playing.id, turnNumber: 1, playerId: playingPlayer.id, status: 'ACTIVE',
+    } });
+    const playingRequest = await db.gameRequest.create({ data: {
+      roomId: playing.id, type: 'TRASH_BOUNDARY', status: 'PENDING', actorPlayerId: playingPlayer.id, turnId: playingTurn.id,
+      idempotencyKey: 'playing-trash-boundary-request',
+    } });
+    await db.room.update({ where: { id: playing.id }, data: { currentTurnPlayerId: playingPlayer.id, turnNumber: 1 } });
+    const playingBefore = await db.room.findUniqueOrThrow({
+      where: { id: playing.id },
+      select: { status: true, currentTurnPlayerId: true, turnNumber: true, stateVersion: true, deletedAt: true, purgeAfter: true, deletedByAccountId: true },
+    });
+    const playingMemberBefore = await db.roomMembership.findUniqueOrThrow({ where: { id: playingMember.id } });
+    const playingTurnBefore = await db.turn.findUniqueOrThrow({ where: { id: playingTurn.id } });
+    const playingRequestBefore = await db.gameRequest.findUniqueOrThrow({ where: { id: playingRequest.id } });
+    const playingTrashLogWhere = { action: 'ADMIN_ROOM_MOVED_TO_TRASH', detailsJson: { path: ['roomId'], equals: playing.id } };
+    const playingIdempotencyWhere = { scope: `account:${admin.account.id}:admin:room:delete:${playing.id}`, key: 'playing-delete' };
+    const [playingLogCountBefore, playingIdempotencyCountBefore] = await Promise.all([
+      db.securityLog.count({ where: playingTrashLogWhere }),
+      db.idempotencyRecord.count({ where: playingIdempotencyWhere }),
+    ]);
 
-    expect((await moveToTrash(playing.id, 'playing-delete')).json())
+    const playingDelete = await moveToTrash(playing.id, 'playing-delete');
+    expect(playingDelete.statusCode).toBe(409);
+    expect(playingDelete.json())
       .toEqual({ error: 'ROOM_MUST_END_BEFORE_DELETE' });
-    expect(await db.room.findUnique({ where: { id: playing.id } }))
-      .toMatchObject({ status: 'PLAYING', deletedAt: null, purgeAfter: null });
+    expect(await db.room.findUniqueOrThrow({
+      where: { id: playing.id },
+      select: { status: true, currentTurnPlayerId: true, turnNumber: true, stateVersion: true, deletedAt: true, purgeAfter: true, deletedByAccountId: true },
+    })).toEqual(playingBefore);
+    expect(await db.roomMembership.findUniqueOrThrow({ where: { id: playingMember.id } })).toEqual(playingMemberBefore);
+    expect(await db.turn.findUniqueOrThrow({ where: { id: playingTurn.id } })).toEqual(playingTurnBefore);
+    expect(await db.gameRequest.findUniqueOrThrow({ where: { id: playingRequest.id } })).toEqual(playingRequestBefore);
+    await expect(Promise.all([
+      db.securityLog.count({ where: playingTrashLogWhere }),
+      db.idempotencyRecord.count({ where: playingIdempotencyWhere }),
+    ])).resolves.toEqual([playingLogCountBefore, playingIdempotencyCountBefore]);
 
     for (const status of ['LOBBY', 'ENDED', 'FINISHED', 'CLOSED'] as const) {
       const target = await createRoom(creator.account.id, status);
@@ -172,19 +219,79 @@ integration('Task 6 real-Cookie admin routes', () => {
     }
 
     const lobby = await createRoom(creator.account.id, 'LOBBY');
+    const lobbyMember = await db.roomMembership.create({ data: {
+      roomId: lobby.id,
+      accountId: creator.account.id,
+      displayNameSnapshot: creator.account.displayName,
+      activeSessionId: creatorSession.id,
+      controlClaimedAt: new Date('2026-08-04T00:00:00.000Z'),
+    } });
+    const lobbyPlayer = await db.player.create({ data: {
+      roomId: lobby.id, memberId: lobbyMember.id, pawnColor: 'lobby-trash-boundary', balance: 6_000, turnOrder: 1,
+    } });
+    const lobbyTurn = await db.turn.create({ data: {
+      roomId: lobby.id, turnNumber: 1, playerId: lobbyPlayer.id, status: 'ACTIVE',
+    } });
+    const lobbyRequest = await db.gameRequest.create({ data: {
+      roomId: lobby.id, type: 'TRASH_BOUNDARY', status: 'PENDING', actorPlayerId: lobbyPlayer.id, turnId: lobbyTurn.id,
+      idempotencyKey: 'lobby-trash-boundary-request',
+    } });
+    const lobbyTransaction = await db.gameTransaction.create({ data: {
+      roomId: lobby.id, type: 'TRASH_BOUNDARY', metadata: {},
+    } });
+    const lobbyLedger = await db.ledgerEntry.create({ data: {
+      roomId: lobby.id, transactionId: lobbyTransaction.id, playerId: lobbyPlayer.id,
+      amount: 0, balanceBefore: 6_000, balanceAfter: 6_000, type: 'TRASH_BOUNDARY', description: 'trash boundary',
+    } });
+    const lobbyAudit = await db.auditLog.create({ data: {
+      roomId: lobby.id, actorMemberId: lobbyMember.id, actorRole: 'ADMIN', action: 'TRASH_BOUNDARY', entityType: 'Room', entityId: lobby.id,
+    } });
+    await db.room.update({ where: { id: lobby.id }, data: { currentTurnPlayerId: lobbyPlayer.id, turnNumber: 1 } });
+    const lobbyBefore = await db.room.findUniqueOrThrow({
+      where: { id: lobby.id },
+      select: { status: true, currentTurnPlayerId: true, turnNumber: true, stateVersion: true, deletedAt: true, purgeAfter: true, deletedByAccountId: true },
+    });
+    const [lobbyMemberBefore, lobbyTurnBefore, lobbyRequestBefore, lobbyTransactionBefore, lobbyLedgerBefore, lobbyAuditBefore] = await Promise.all([
+      db.roomMembership.findUniqueOrThrow({ where: { id: lobbyMember.id } }),
+      db.turn.findUniqueOrThrow({ where: { id: lobbyTurn.id } }),
+      db.gameRequest.findUniqueOrThrow({ where: { id: lobbyRequest.id } }),
+      db.gameTransaction.findUniqueOrThrow({ where: { id: lobbyTransaction.id } }),
+      db.ledgerEntry.findUniqueOrThrow({ where: { id: lobbyLedger.id } }),
+      db.auditLog.findUniqueOrThrow({ where: { id: lobbyAudit.id } }),
+    ]);
     const first = await moveToTrash(lobby.id, 'trash-lobby');
     expect(first.statusCode).toBe(200);
     const firstStored = await db.room.findUniqueOrThrow({ where: { id: lobby.id } });
+    expect(firstStored.stateVersion).toBe(lobbyBefore.stateVersion + 1);
+    expect(first.json()).toMatchObject({ stateVersion: firstStored.stateVersion });
+    expect(firstStored).toMatchObject({
+      status: lobbyBefore.status,
+      currentTurnPlayerId: lobbyBefore.currentTurnPlayerId,
+      turnNumber: lobbyBefore.turnNumber,
+      deletedByAccountId: admin.account.id,
+    });
+    await expect(Promise.all([
+      db.roomMembership.findUniqueOrThrow({ where: { id: lobbyMember.id } }),
+      db.turn.findUniqueOrThrow({ where: { id: lobbyTurn.id } }),
+      db.gameRequest.findUniqueOrThrow({ where: { id: lobbyRequest.id } }),
+      db.gameTransaction.findUniqueOrThrow({ where: { id: lobbyTransaction.id } }),
+      db.ledgerEntry.findUniqueOrThrow({ where: { id: lobbyLedger.id } }),
+      db.auditLog.findUniqueOrThrow({ where: { id: lobbyAudit.id } }),
+    ])).resolves.toEqual([lobbyMemberBefore, lobbyTurnBefore, lobbyRequestBefore, lobbyTransactionBefore, lobbyLedgerBefore, lobbyAuditBefore]);
     await moveToTrash(lobby.id, 'trash-lobby');
     await moveToTrash(lobby.id, 'trash-lobby-new-key');
     const repeatedStored = await db.room.findUniqueOrThrow({ where: { id: lobby.id } });
     expect(repeatedStored.deletedAt).toEqual(firstStored.deletedAt);
     expect(repeatedStored.purgeAfter).toEqual(firstStored.purgeAfter);
+    expect(repeatedStored.stateVersion).toBe(firstStored.stateVersion);
 
     const trash = await app.inject({ method: 'GET', url: '/api/admin/rooms/trash', headers: adminHeaders });
     expect(trash.statusCode).toBe(200);
     expect(trash.json().items.map((item: { purgeAfter: string }) => item.purgeAfter))
       .toEqual([...trash.json().items.map((item: { purgeAfter: string }) => item.purgeAfter)].sort());
+    expect(trash.json().items.find((item: { id: string }) => item.id === lobby.id)).toMatchObject({
+      deletedBy: { id: admin.account.id, displayName: admin.account.displayName },
+    });
 
     const restored = await app.inject({
       method: 'POST', url: `/api/admin/rooms/${lobby.id}/restore`,
@@ -193,6 +300,14 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(restored.statusCode).toBe(200);
     const restoredRoom = await db.room.findUniqueOrThrow({ where: { id: lobby.id } });
     expect(restoredRoom).toMatchObject({ status: 'LOBBY', deletedAt: null, purgeAfter: null, deletedByAccountId: null });
+    expect(restoredRoom.stateVersion).toBe(firstStored.stateVersion + 1);
+    expect(restored.json()).toMatchObject({ stateVersion: restoredRoom.stateVersion });
+    const restoreReplay = await app.inject({
+      method: 'POST', url: `/api/admin/rooms/${lobby.id}/restore`,
+      headers: { ...adminHeaders, 'idempotency-key': 'restore-lobby' },
+    });
+    expect(restoreReplay.statusCode).toBe(200);
+    expect((await db.room.findUniqueOrThrow({ where: { id: lobby.id } })).stateVersion).toBe(restoredRoom.stateVersion);
     const restoredAgain = await app.inject({
       method: 'POST', url: `/api/admin/rooms/${lobby.id}/restore`,
       headers: { ...adminHeaders, 'idempotency-key': 'restore-lobby-new-key' },
