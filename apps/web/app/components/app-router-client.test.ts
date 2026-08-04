@@ -51,6 +51,25 @@ describe('confirmation dialog', () => {
     expect(component).toMatch(/title=\{selectedAccount\.isSuperAdmin \? "超级管理员账号不能禁用" : undefined\}[\s\S]*?disabled=\{busy \|\| selectedAccount\.isSuperAdmin\}[\s\S]*?禁用账号/);
     expect(component).toMatch(/title=\{selectedAccount\.isSuperAdmin \? "超级管理员账号不能删除" : undefined\}[\s\S]*?disabled=\{busy \|\| selectedAccount\.isSuperAdmin\}[\s\S]*?删除账号/);
   });
+
+  test('keeps a busy confirmation open for escape and cancel requests', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const dialog = sourceBetween(
+      component,
+      'function ConfirmDialog(',
+      'function SectionTitle(',
+    );
+
+    expect(dialog).toMatch(
+      /const requestCancel = \(\) => \{[\s\S]*?if \(!busy\) onCancel\(\);[\s\S]*?\};/,
+    );
+    expect(dialog).toContain(
+      'useDialogFocus(requestCancel, Boolean(portalHost), restoreFocusFallbackRef)',
+    );
+    expect(dialog).toMatch(
+      /<button disabled=\{busy\} onClick=\{requestCancel\}>[\s\S]*?取消/,
+    );
+  });
 });
 
 describe('admin room trash state', () => {
@@ -105,12 +124,17 @@ describe('admin room trash state', () => {
     expect(cleanup).toContain('window.clearInterval(trashTimer)');
   });
 
-  test('restores and permanently deletes through the stable writer', async () => {
+  test('locks restore and permanent delete through the complete trash-first write', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
     const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
     const refresh = sourceBetween(
       adminView,
       'async function refreshAfterTrashWrite()',
+      'async function writeTrashRoom(',
+    );
+    const write = sourceBetween(
+      adminView,
+      'async function writeTrashRoom(',
       'async function restoreTrashRoom(roomId: string)',
     );
     const restore = sourceBetween(
@@ -127,14 +151,47 @@ describe('admin room trash state', () => {
     expect(refresh).toMatch(
       /const trash = await loadTrashRooms\(\);[\s\S]*?if \(!trash\.ok\) return trash;[\s\S]*?return onReload\(\);/,
     );
-    expect(restore).toContain('path: `/api/admin/rooms/${roomId}/restore`');
-    expect(restore).toContain('method: "POST"');
-    expect(restore).toContain('completeTrashWrite(');
-    expect(restore).toContain('refreshAfterTrashWrite');
-    expect(permanent).toContain('path: `/api/admin/rooms/${roomId}/permanent`');
-    expect(permanent).toContain('method: "DELETE"');
-    expect(permanent).toContain('completeTrashWrite(');
-    expect(permanent).toContain('refreshAfterTrashWrite');
+    expect(adminView).toContain(
+      'const [trashMutationBusy, setTrashMutationBusy] = useState(false)',
+    );
+    expect(adminView).toContain('const trashMutationBusyRef = useRef(false)');
+    expect(adminView).toContain('const trashBusy = busy || trashMutationBusy');
+    expect(write).toMatch(
+      /if \(trashMutationBusyRef\.current\) return false;[\s\S]*?trashMutationBusyRef\.current = true;[\s\S]*?setTrashMutationBusy\(true\);/,
+    );
+    expect(write).toMatch(
+      /try \{[\s\S]*?return await completeTrashWrite\([\s\S]*?writeAction\(\{ path, method \}\)[\s\S]*?refreshAfterTrashWrite[\s\S]*?finally \{[\s\S]*?trashMutationBusyRef\.current = false;[\s\S]*?setTrashMutationBusy\(false\);/,
+    );
+    expect(restore).toContain(
+      'writeTrashRoom(`/api/admin/rooms/${roomId}/restore`, "POST")',
+    );
+    expect(permanent).toContain(
+      'writeTrashRoom(`/api/admin/rooms/${roomId}/permanent`, "DELETE")',
+    );
+  });
+
+  test('moves room details to trash through the same trash-first writer', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+    const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
+    const move = sourceBetween(
+      adminView,
+      'async function moveRoomToTrash(roomId: string)',
+      'function confirmRestore(room: AdminTrashRoom)',
+    );
+    const detailDelete = sourceBetween(
+      adminView,
+      'title={selectedRoom.status === "PLAYING"',
+      '<h3>房间审计日志</h3>',
+    );
+
+    expect(move).toContain(
+      'writeTrashRoom(`/api/admin/rooms/${roomId}`, "DELETE")',
+    );
+    expect(detailDelete).toContain('moveRoomToTrash(selectedRoom.id)');
+    expect(detailDelete).not.toContain('mutateAndReload(');
+    expect(detailDelete).toContain(
+      'disabled={trashBusy || selectedRoom.status === "PLAYING"}',
+    );
   });
 });
 
@@ -153,7 +210,7 @@ describe('admin room trash controls', () => {
     expect(adminView).not.toMatch(/on(?:Mouse|Pointer|Touch)(?:Down|Move|Up)/);
   });
 
-  test('uses the existing focus trap and background isolation for the modal panel', async () => {
+  test('uses the existing focus trap with a panel fallback after an opener is removed', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');
     const adminView = sourceBetween(component, 'function AdminView(', 'function BankView(');
     const focusHook = sourceBetween(
@@ -166,10 +223,18 @@ describe('admin room trash controls', () => {
       'const trashDialogRef = useDialogFocus(() => setTrashOpen(false), trashOpen)',
     );
     expect(adminView).toMatch(
-      /<aside[\s\S]*?ref=\{trashDialogRef\}[\s\S]*?className="room-trash-panel"/,
+      /<aside[\s\S]*?ref=\{trashDialogRef\}[\s\S]*?tabIndex=\{-1\}[\s\S]*?className="room-trash-panel"/,
     );
+    expect(adminView).toContain('restoreFocusFallbackRef={trashDialogRef}');
     expect(focusHook).toContain(
       'dialog.closest(".modal-backdrop, .room-trash-backdrop")',
+    );
+    expect(focusHook).toContain('restoreFocusFallbackRef?');
+    expect(focusHook).toMatch(
+      /previous\?\.isConnected[\s\S]*?!previous\.matches\(":disabled"\)/,
+    );
+    expect(focusHook).toMatch(
+      /fallbackRoot\.querySelector<HTMLElement>\(focusableSelector\)[\s\S]*?fallbackRoot/,
     );
   });
 
@@ -206,7 +271,7 @@ describe('admin room trash controls', () => {
     expect(component).toContain('ROOM_MUST_END_BEFORE_DELETE: "请先结束对局，再删除房间"');
     expect(component).toContain('ROOM_NOT_IN_TRASH: "该房间不在垃圾桶中，请刷新后重试"');
     expect(adminView).toMatch(
-      /title=\{selectedRoom\.status === "PLAYING" \? "请先结束对局后删除" : undefined\}[\s\S]*?disabled=\{busy \|\| selectedRoom\.status === "PLAYING"\}[\s\S]*?删除房间/,
+      /title=\{selectedRoom\.status === "PLAYING" \? "请先结束对局后删除" : undefined\}[\s\S]*?disabled=\{trashBusy \|\| selectedRoom\.status === "PLAYING"\}[\s\S]*?删除房间/,
     );
   });
 });

@@ -154,19 +154,47 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   const dashboard = { accounts: { total: 3, active: 2 }, sessions: { valid: 2 }, rooms: { lobby: 1, playing: 0, finished: 1 }, games: { settledTotal: 1, averageDurationSeconds: 3600 }, characterSelections: [{ characterId: 'zhenhuan', characterNameSnapshot: '钮祜禄·甄嬛', count: 2 }], characterWins: [{ characterNameSnapshot: '钮祜禄·甄嬛', count: 1 }], recentGames: [{ roomId: 'history-1', roomNameSnapshot: '永寿宫旧局', endedAt: now, durationSeconds: 3600, forced: false, winners: [{ displayNameSnapshot: '甄嬛', characterNameSnapshot: '钮祜禄·甄嬛' }] }] };
   const writes: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
   let roomDetailReads = 0;
+  let detailDeleteStarted = false;
+  let detailDeleteWrites = 0;
+  const detailDeleteRefreshEvents: Array<'trash' | 'admin'> = [];
+  let releaseDetailTrashRefresh!: () => void;
+  let releaseDetailAdminRefresh!: () => void;
+  const detailTrashRefreshGate = new Promise<void>((resolve) => {
+    releaseDetailTrashRefresh = resolve;
+  });
+  const detailAdminRefreshGate = new Promise<void>((resolve) => {
+    releaseDetailAdminRefresh = resolve;
+  });
   await page.route('**/api/admin/**', async (route) => {
     const url = new URL(route.request().url()); const path = url.pathname; const method = route.request().method();
     if (method !== 'GET') {
       const requestBody = (await body(route)) ?? {};
       writes.push({ method, path, body: requestBody });
+      if (method === 'DELETE' && path === '/api/admin/rooms/room-1') {
+        detailDeleteStarted = true;
+        detailDeleteWrites += 1;
+      }
       if (method === 'PATCH' && path === '/api/admin/accounts/account-active')
         Object.assign(adminAccounts[0], requestBody);
       return route.fulfill({ json: { ok: true, account: adminAccounts[0], revokedSessions: 1 } });
     }
     if (path === '/api/admin/accounts') return route.fulfill({ json: url.searchParams.get('cursor') === 'accounts-page-2' ? { items: [pagedAccount], nextCursor: null } : { items: adminAccounts, nextCursor: 'accounts-page-2' } });
     if (path.endsWith('/sessions')) return route.fulfill({ json: { items: [{ id: 'target-session', deviceName: '目标 Mac', browser: 'Chrome', operatingSystem: 'macOS', loginIp: '10.***.***.8', lastIp: '10.***.***.9', createdAt: now, lastActiveAt: now, expiresAt: now, active: true, revokedAt: null, revokeReason: null }], nextCursor: null } });
-    if (path === '/api/admin/rooms/trash') return route.fulfill({ json: { items: [], nextCursor: null } });
-    if (path === '/api/admin/rooms') return route.fulfill({ json: { items: adminRooms, nextCursor: null } });
+    if (path === '/api/admin/rooms/trash') {
+      if (detailDeleteStarted) {
+        detailDeleteRefreshEvents.push('trash');
+        await detailTrashRefreshGate;
+      }
+      return route.fulfill({ json: { items: [], nextCursor: null } });
+    }
+    if (path === '/api/admin/rooms') {
+      if (detailDeleteStarted) {
+        detailDeleteRefreshEvents.push('admin');
+        await detailAdminRefreshGate;
+        detailDeleteStarted = false;
+      }
+      return route.fulfill({ json: { items: adminRooms, nextCursor: null } });
+    }
     if (path === '/api/admin/rooms/room-1') { roomDetailReads += 1; return route.fulfill({ json: detail }); }
     if (path.endsWith('/audit-logs')) return route.fulfill({ json: { items: [{ id: 'audit-1', action: 'ADMIN_ROOM_UPDATED', actorRole: 'ADMIN', reason: null, createdAt: now }], nextCursor: null } });
     if (path === '/api/admin/security-logs') return route.fulfill({ json: { items: [{ id: 'log-1', action: 'LOGIN_SUCCEEDED', accountId: 'account-active', actorAccountId: null, ip: '120.***.***.36', createdAt: now }], nextCursor: null } });
@@ -219,11 +247,36 @@ test('super-admin exposes and calls complete Task 6 account, device, room, log, 
   await expect(bankDialog).toHaveCount(0);
   await expect(bankSelect).toHaveValue('membership-1');
   await page.getByLabel('强制结束原因').fill('现场提前结束'); await expect(page.getByRole('button', { name: '强制结束' })).toBeEnabled(); await page.getByRole('button', { name: '强制结束' }).click(); await page.getByRole('button', { name: '确认执行' }).click();
-  await page.getByRole('button', { name: '删除房间', exact: true }).click();
-  await expect(page.getByRole('button', { name: '移入垃圾桶' })).toBeDisabled();
-  await page.getByLabel('确认删除房间').fill(room.name);
-  await expect(page.getByRole('button', { name: '移入垃圾桶' })).toBeEnabled();
-  await page.getByRole('button', { name: '移入垃圾桶' }).click();
+  const detailDeleteButton = page.getByRole('button', { name: '删除房间', exact: true });
+  await detailDeleteButton.click();
+  let detailDeleteDialog = page.getByRole('dialog', { name: '删除房间' });
+  await detailDeleteDialog.getByRole('button', { name: '取消' }).click();
+  await expect(detailDeleteButton).toBeFocused();
+  await detailDeleteButton.click();
+  detailDeleteDialog = page.getByRole('dialog', { name: '删除房间' });
+  const moveToTrash = detailDeleteDialog.getByRole('button', { name: '移入垃圾桶' });
+  const cancelDetailDelete = detailDeleteDialog.getByRole('button', { name: '取消' });
+  await expect(moveToTrash).toBeDisabled();
+  await detailDeleteDialog.getByLabel('确认删除房间').fill(room.name);
+  await expect(moveToTrash).toBeEnabled();
+  await moveToTrash.click();
+  await expect.poll(() => detailDeleteWrites).toBe(1);
+  await expect.poll(() => detailDeleteRefreshEvents).toEqual(['trash']);
+  await expect(moveToTrash).toBeDisabled();
+  await expect(cancelDetailDelete).toBeDisabled();
+  await detailDeleteDialog.press('Escape');
+  await expect(detailDeleteDialog).toBeVisible();
+  await moveToTrash.evaluate((button: HTMLButtonElement) => button.click());
+  expect(detailDeleteWrites).toBe(1);
+  releaseDetailTrashRefresh();
+  await expect.poll(() => detailDeleteRefreshEvents).toEqual(['trash', 'admin']);
+  await expect(moveToTrash).toBeDisabled();
+  await detailDeleteDialog.press('Escape');
+  await expect(detailDeleteDialog).toBeVisible();
+  releaseDetailAdminRefresh();
+  await expect(detailDeleteDialog).toHaveCount(0);
+  expect(detailDeleteRefreshEvents).toEqual(['trash', 'admin']);
+  await expect(page.getByRole('dialog', { name: '待删除房间' })).toHaveCount(0);
   await page.getByRole('tab', { name: '安全日志' }).click(); await expect(page.getByText('LOGIN_SUCCEEDED')).toBeVisible();
 
   const paths = writes.map((item) => `${item.method} ${item.path}`);
@@ -309,10 +362,23 @@ test('room trash entry, responsive panel, confirmations, busy state, and refresh
   let restoreWrites = 0;
   let permanentWrites = 0;
   const refreshEvents: Array<'trash' | 'admin'> = [];
-  let releaseRestore!: () => void;
-  let releasePermanent!: () => void;
-  const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
-  const permanentGate = new Promise<void>((resolve) => { releasePermanent = resolve; });
+  let trashMutation: 'restore' | 'permanent' | null = null;
+  let releaseRestoreTrashRefresh!: () => void;
+  let releaseRestoreAdminRefresh!: () => void;
+  let releasePermanentTrashRefresh!: () => void;
+  let releasePermanentAdminRefresh!: () => void;
+  const restoreTrashRefreshGate = new Promise<void>((resolve) => {
+    releaseRestoreTrashRefresh = resolve;
+  });
+  const restoreAdminRefreshGate = new Promise<void>((resolve) => {
+    releaseRestoreAdminRefresh = resolve;
+  });
+  const permanentTrashRefreshGate = new Promise<void>((resolve) => {
+    releasePermanentTrashRefresh = resolve;
+  });
+  const permanentAdminRefreshGate = new Promise<void>((resolve) => {
+    releasePermanentAdminRefresh = resolve;
+  });
   const dashboard = { accounts: { total: 1, active: 1 }, sessions: { valid: 1 }, rooms: { lobby: 0, playing: 0, finished: 0 }, games: { settledTotal: 0, averageDurationSeconds: 0 }, characterSelections: [], characterWins: [], recentGames: [] };
 
   await page.route('**/api/admin/**', async (route) => {
@@ -321,23 +387,28 @@ test('room trash entry, responsive panel, confirmations, busy state, and refresh
     if (path === '/api/admin/rooms/trash') {
       trashReads += 1;
       refreshEvents.push('trash');
+      if (trashMutation === 'restore') await restoreTrashRefreshGate;
+      if (trashMutation === 'permanent') await permanentTrashRefreshGate;
       return route.fulfill({ json: { items: trashRooms, nextCursor: null } });
     }
     if (path === '/api/admin/rooms/trash-restore/restore' && method === 'POST') {
       restoreWrites += 1;
-      await restoreGate;
+      trashMutation = 'restore';
       trashRooms = trashRooms.filter((item) => item.id !== 'trash-restore');
       return route.fulfill({ json: { restored: true, id: 'trash-restore' } });
     }
     if (path === '/api/admin/rooms/trash-delete/permanent' && method === 'DELETE') {
       permanentWrites += 1;
-      await permanentGate;
+      trashMutation = 'permanent';
       trashRooms = trashRooms.filter((item) => item.id !== 'trash-delete');
       return route.fulfill({ json: { deleted: true, id: 'trash-delete' } });
     }
     if (path === '/api/admin/rooms') {
       adminRoomReads += 1;
       refreshEvents.push('admin');
+      if (trashMutation === 'restore') await restoreAdminRefreshGate;
+      if (trashMutation === 'permanent') await permanentAdminRefreshGate;
+      trashMutation = null;
       return route.fulfill({ json: { items: [], nextCursor: null } });
     }
     if (path === '/api/admin/accounts') return route.fulfill({ json: { items: [], nextCursor: null } });
@@ -396,27 +467,47 @@ test('room trash entry, responsive panel, confirmations, busy state, and refresh
   await expect(restoreRow).toContainText(/剩余 \d+ 小时/);
   await expect(restoreRow).toContainText(/自动删除：.*2099/);
 
+  const restoreButton = restoreRow.getByRole('button', { name: '恢复' });
+  await restoreButton.click();
+  let restoreDialog = page.getByRole('dialog', { name: '恢复房间' });
+  await restoreDialog.getByRole('button', { name: '取消' }).click();
+  await expect(restoreButton).toBeFocused();
+
   const trashReadsBeforeRestore = trashReads;
   const adminReadsBeforeRestore = adminRoomReads;
   const refreshEventsBeforeRestore = refreshEvents.length;
-  await restoreRow.getByRole('button', { name: '恢复' }).click();
-  const restoreDialog = page.getByRole('dialog', { name: '恢复房间' });
+  await restoreButton.click();
+  restoreDialog = page.getByRole('dialog', { name: '恢复房间' });
   const restoreSubmit = restoreDialog.getByRole('button', { name: '确认恢复' });
+  const restoreCancel = restoreDialog.getByRole('button', { name: '取消' });
   await restoreSubmit.click();
-  await expect(restoreSubmit).toBeDisabled();
   await expect.poll(() => restoreWrites).toBe(1);
-  releaseRestore();
+  await expect.poll(() => trashReads).toBeGreaterThan(trashReadsBeforeRestore);
+  await expect(restoreSubmit).toBeDisabled();
+  await expect(restoreCancel).toBeDisabled();
+  await restoreDialog.press('Escape');
+  await expect(restoreDialog).toBeVisible();
+  await restoreSubmit.evaluate((button: HTMLButtonElement) => button.click());
+  expect(restoreWrites).toBe(1);
+  releaseRestoreTrashRefresh();
+  await expect.poll(() => adminRoomReads).toBeGreaterThan(adminReadsBeforeRestore);
+  await expect(restoreSubmit).toBeDisabled();
+  await restoreDialog.press('Escape');
+  await expect(restoreDialog).toBeVisible();
+  expect(restoreWrites).toBe(1);
+  releaseRestoreAdminRefresh();
   await expect(restoreDialog).toHaveCount(0);
   await expect(trigger.locator('.room-trash-count')).toHaveText('1');
-  await expect.poll(() => trashReads).toBeGreaterThan(trashReadsBeforeRestore);
-  await expect.poll(() => adminRoomReads).toBeGreaterThan(adminReadsBeforeRestore);
+  await expect(closeTrash).toBeFocused();
   expect(refreshEvents.slice(refreshEventsBeforeRestore, refreshEventsBeforeRestore + 2)).toEqual(['trash', 'admin']);
 
   const deleteRow = panel.locator('.room-trash-row').filter({ hasText: '翊坤宫终局' });
   await expect(deleteRow).toContainText('YKG-END · 已关闭');
-  await deleteRow.getByRole('button', { name: '立即删除' }).click();
+  const permanentButton = deleteRow.getByRole('button', { name: '立即删除' });
+  await permanentButton.click();
   const permanentDialog = page.getByRole('dialog', { name: '立即删除房间' });
   const permanentSubmit = permanentDialog.getByRole('button', { name: '永久删除' });
+  const permanentCancel = permanentDialog.getByRole('button', { name: '取消' });
   await expect(permanentSubmit).toBeDisabled();
   await permanentDialog.getByLabel('确认立即删除房间').fill('翊坤宫');
   await expect(permanentSubmit).toBeDisabled();
@@ -426,14 +517,25 @@ test('room trash entry, responsive panel, confirmations, busy state, and refresh
   const adminReadsBeforePermanent = adminRoomReads;
   const refreshEventsBeforePermanent = refreshEvents.length;
   await permanentSubmit.click();
-  await expect(permanentSubmit).toBeDisabled();
   await expect.poll(() => permanentWrites).toBe(1);
-  releasePermanent();
+  await expect.poll(() => trashReads).toBeGreaterThan(trashReadsBeforePermanent);
+  await expect(permanentSubmit).toBeDisabled();
+  await expect(permanentCancel).toBeDisabled();
+  await permanentDialog.press('Escape');
+  await expect(permanentDialog).toBeVisible();
+  await permanentSubmit.evaluate((button: HTMLButtonElement) => button.click());
+  expect(permanentWrites).toBe(1);
+  releasePermanentTrashRefresh();
+  await expect.poll(() => adminRoomReads).toBeGreaterThan(adminReadsBeforePermanent);
+  await expect(permanentSubmit).toBeDisabled();
+  await permanentDialog.press('Escape');
+  await expect(permanentDialog).toBeVisible();
+  expect(permanentWrites).toBe(1);
+  releasePermanentAdminRefresh();
   await expect(permanentDialog).toHaveCount(0);
   await expect(panel.getByText('垃圾桶为空')).toBeVisible();
   await expect(trigger.locator('.room-trash-count')).toHaveCount(0);
-  await expect.poll(() => trashReads).toBeGreaterThan(trashReadsBeforePermanent);
-  await expect.poll(() => adminRoomReads).toBeGreaterThan(adminReadsBeforePermanent);
+  await expect(closeTrash).toBeFocused();
   expect(refreshEvents.slice(refreshEventsBeforePermanent, refreshEventsBeforePermanent + 2)).toEqual(['trash', 'admin']);
 
   await panel.getByRole('button', { name: '关闭垃圾桶' }).click();

@@ -3415,6 +3415,9 @@ function AdminView({
   const [trashRooms, setTrashRooms] = useState<AdminTrashRoom[]>([]);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trashNowMs, setTrashNowMs] = useState(() => Date.now());
+  const [trashMutationBusy, setTrashMutationBusy] = useState(false);
+  const trashMutationBusyRef = useRef(false);
+  const trashBusy = busy || trashMutationBusy;
   const trashTabActive = useRef(false);
   const onLoadErrorRef = useRef(onLoadError);
   onLoadErrorRef.current = onLoadError;
@@ -3514,6 +3517,21 @@ function AdminView({
     const trash = await loadTrashRooms();
     if (!trash.ok) return trash;
     return onReload();
+  }
+
+  async function writeTrashRoom(path: string, method: "POST" | "DELETE") {
+    if (trashMutationBusyRef.current) return false;
+    trashMutationBusyRef.current = true;
+    setTrashMutationBusy(true);
+    try {
+      return await completeTrashWrite(
+        () => writeAction({ path, method }),
+        refreshAfterTrashWrite,
+      );
+    } finally {
+      trashMutationBusyRef.current = false;
+      setTrashMutationBusy(false);
+    }
   }
 
   async function reloadAdmin() {
@@ -3795,25 +3813,15 @@ function AdminView({
   }
 
   async function restoreTrashRoom(roomId: string) {
-    return completeTrashWrite(
-      () =>
-        writeAction({
-          path: `/api/admin/rooms/${roomId}/restore`,
-          method: "POST",
-        }),
-      refreshAfterTrashWrite,
-    );
+    return writeTrashRoom(`/api/admin/rooms/${roomId}/restore`, "POST");
   }
 
   async function permanentlyDeleteTrashRoom(roomId: string) {
-    return completeTrashWrite(
-      () =>
-        writeAction({
-          path: `/api/admin/rooms/${roomId}/permanent`,
-          method: "DELETE",
-        }),
-      refreshAfterTrashWrite,
-    );
+    return writeTrashRoom(`/api/admin/rooms/${roomId}/permanent`, "DELETE");
+  }
+
+  async function moveRoomToTrash(roomId: string) {
+    return writeTrashRoom(`/api/admin/rooms/${roomId}`, "DELETE");
   }
 
   function confirmRestore(room: AdminTrashRoom) {
@@ -4715,8 +4723,9 @@ function AdminView({
                     <button
                       className="danger-button"
                       title={selectedRoom.status === "PLAYING" ? "请先结束对局后删除" : undefined}
-                      disabled={busy || selectedRoom.status === "PLAYING"}
-                      onClick={() => {
+                      disabled={trashBusy || selectedRoom.status === "PLAYING"}
+                      onClick={(event) => {
+                        event.currentTarget.focus();
                         setConfirmName("");
                         setConfirm({
                           title: "删除房间",
@@ -4726,11 +4735,7 @@ function AdminView({
                           confirmationHint: `请输入完整房间名称：${selectedRoom.name}`,
                           copy: `${selectedRoom.name} 将进入垃圾桶，24 小时后自动永久删除，期间可恢复。`,
                           run: async () => {
-                            const deleted = await mutateAndReload(
-                              `/api/admin/rooms/${selectedRoom.id}`,
-                              {},
-                              "DELETE",
-                            );
+                            const deleted = await moveRoomToTrash(selectedRoom.id);
                             if (deleted) {
                               setSelectedRoom(null);
                               setRoomLogs([]);
@@ -4788,7 +4793,7 @@ function AdminView({
             className="room-trash-trigger"
             aria-label="待删除房间"
             title="待删除房间"
-            disabled={busy}
+            disabled={trashBusy}
             onClick={(event) => {
               event.currentTarget.focus();
               setTrashOpen(true);
@@ -4806,6 +4811,7 @@ function AdminView({
             >
               <aside
                 ref={trashDialogRef}
+                tabIndex={-1}
                 className="room-trash-panel"
                 role="dialog"
                 aria-modal="true"
@@ -4819,7 +4825,7 @@ function AdminView({
                     className="icon subtle"
                     aria-label="关闭垃圾桶"
                     title="关闭垃圾桶"
-                    disabled={busy}
+                    disabled={trashBusy}
                     onClick={() => setTrashOpen(false)}
                   >
                     <X />
@@ -4850,16 +4856,22 @@ function AdminView({
                         <div className="room-trash-actions">
                           <button
                             type="button"
-                            disabled={busy}
-                            onClick={() => confirmRestore(room)}
+                            disabled={trashBusy}
+                            onClick={(event) => {
+                              event.currentTarget.focus();
+                              confirmRestore(room);
+                            }}
                           >
                             恢复
                           </button>
                           <button
                             type="button"
                             className="danger-button"
-                            disabled={busy}
-                            onClick={() => confirmPermanentDelete(room)}
+                            disabled={trashBusy}
+                            onClick={(event) => {
+                              event.currentTarget.focus();
+                              confirmPermanentDelete(room);
+                            }}
                           >
                             立即删除
                           </button>
@@ -4880,7 +4892,8 @@ function AdminView({
             confirm.confirmLabel ??
             (confirm.expectedValues ? "确认删除" : "确认执行")
           }
-          busy={busy}
+          busy={trashBusy}
+          restoreFocusFallbackRef={trashDialogRef}
           disabled={Boolean(
             confirm.expectedValues &&
             !confirm.expectedValues.includes(confirmName.trim()),
@@ -8523,7 +8536,13 @@ function useBodyPortalHost() {
   return portalHost;
 }
 
-function useDialogFocus(onClose: () => void, enabled: boolean) {
+type DialogFocusFallbackRef = { readonly current: HTMLElement | null };
+
+function useDialogFocus(
+  onClose: () => void,
+  enabled: boolean,
+  restoreFocusFallbackRef?: DialogFocusFallbackRef,
+) {
   const ref = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -8544,10 +8563,10 @@ function useDialogFocus(onClose: () => void, enabled: boolean) {
         ) as HTMLElement[])
       : [];
     const restoreBackground = isolateDialogBackground(siblings);
+    const focusableSelector =
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
     const focusable = () => [
-      ...dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-      ),
+      ...dialog.querySelectorAll<HTMLElement>(focusableSelector),
     ];
     const focusFrame = window.requestAnimationFrame(() =>
       (
@@ -8585,7 +8604,18 @@ function useDialogFocus(onClose: () => void, enabled: boolean) {
       window.cancelAnimationFrame(focusFrame);
       dialog.removeEventListener("keydown", onKeyDown);
       restoreBackground();
-      previous?.focus();
+      const fallbackRoot = restoreFocusFallbackRef?.current;
+      const fallbackTarget = fallbackRoot
+        ? (fallbackRoot.querySelector<HTMLElement>(focusableSelector) ??
+          fallbackRoot)
+        : null;
+      const restoreTarget =
+        previous?.isConnected && !previous.matches(":disabled")
+          ? previous
+          : fallbackTarget?.isConnected && !fallbackTarget.matches(":disabled")
+            ? fallbackTarget
+            : null;
+      restoreTarget?.focus();
     };
   }, [enabled]);
   return ref;
@@ -8650,6 +8680,7 @@ function ConfirmDialog({
   confirmLabel,
   busy,
   disabled,
+  restoreFocusFallbackRef,
   onCancel,
   onConfirm,
 }: {
@@ -8658,13 +8689,17 @@ function ConfirmDialog({
   confirmLabel: string;
   busy: boolean;
   disabled?: boolean;
+  restoreFocusFallbackRef?: DialogFocusFallbackRef;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const titleId = useId();
   const descriptionId = useId();
   const portalHost = useBodyPortalHost();
-  const dialogRef = useDialogFocus(onCancel, Boolean(portalHost));
+  const requestCancel = () => {
+    if (!busy) onCancel();
+  };
+  const dialogRef = useDialogFocus(requestCancel, Boolean(portalHost), restoreFocusFallbackRef);
   return portalHost
     ? createPortal(
         <div className="modal-backdrop centered">
@@ -8685,7 +8720,7 @@ function ConfirmDialog({
               {children}
             </div>
             <div className="dialog-actions">
-              <button disabled={busy} onClick={onCancel}>
+              <button disabled={busy} onClick={requestCancel}>
                 取消
               </button>
               <button
