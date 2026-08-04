@@ -275,6 +275,31 @@ describe('database delivery contract', () => {
     expect(migration).not.toContain('physical_delete_txid');
   });
 
+  it('defines the room trash lifecycle and transaction-bound physical deletion', async () => {
+    const schema = await readDatabaseFile('prisma/schema.prisma');
+    const migration = await readDatabaseFile(
+      'prisma/migrations/202608040021_room_trash_lifecycle/migration.sql',
+    ).catch(() => '');
+
+    expect(schema).toMatch(/model Room \{[\s\S]*?deletedAt\s+DateTime\?[\s\S]*?purgeAfter\s+DateTime\?[\s\S]*?deletedByAccountId\s+String\?/);
+    expect(schema).toContain('@@index([deletedAt, purgeAfter])');
+    expect(schema).toMatch(/deletedByAccount\s+Account\?[\s\S]*?onDelete: SetNull/);
+    expect(schema).toMatch(/model Account \{[\s\S]*?deletedRooms\s+Room\[\]/);
+    for (const functionName of [
+      'reject_ledger_entry_mutation',
+      'reject_audit_log_mutation',
+      'reject_security_log_mutation',
+      'zhenhuan_reject_settlement_mutation',
+    ]) {
+      expect(migration).toContain(`CREATE OR REPLACE FUNCTION ${functionName}`);
+    }
+    expect(migration).toContain("current_setting('zhenhuan.physical_delete_txid', true)");
+    expect(migration).toContain('pg_current_xact_id()::text');
+    expect(migration).toMatch(/IF TG_OP = 'DELETE'[\s\S]*?RETURN OLD/);
+    expect(migration).not.toMatch(/TG_OP = 'UPDATE'[\s\S]*?RETURN OLD/);
+    expect(migration).not.toMatch(/TG_OP = 'TRUNCATE'[\s\S]*?RETURN OLD/);
+  });
+
   it('makes SecurityLog append-only and indexed for actor cursor queries in a forward migration', async () => {
     const schema = await readDatabaseFile('prisma/schema.prisma');
     const migration = await readDatabaseFile('prisma/migrations/202607270011_security_log_append_only/migration.sql');

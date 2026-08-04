@@ -39,6 +39,14 @@ const migrationsBeforeElectronicStartRewardGuard = [
   '202608010017_physical_landing_lifecycle',
 ];
 
+const migrationsThroughRoomTrashLifecycle = [
+  ...migrationsBeforeElectronicStartRewardGuard,
+  '202608010018_electronic_start_reward_turn_guard',
+  '202608010019_restore_room_history_immutability',
+  '202608020020_electronic_start_reward_history_safe_guard',
+  '202608040021_room_trash_lifecycle',
+];
+
 function configuredTestDatabaseUrl() {
   const rawUrl = process.env.TEST_DATABASE_URL;
   if (!rawUrl) return undefined;
@@ -95,6 +103,19 @@ function executeMigration(databaseUrl: string, directory: string) {
       { cause: error },
     );
   }
+}
+
+function legacyMigrationClient(databaseUrl: string) {
+  return new PrismaClient({
+    datasources: { db: { url: databaseUrl } },
+    omit: {
+      room: {
+        deletedAt: true,
+        purgeAfter: true,
+        deletedByAccountId: true,
+      },
+    },
+  });
 }
 
 const legacyFixture = `
@@ -183,7 +204,7 @@ integration('V2.1 populated legacy migration', () => {
       executeMigration(isolatedUrl.toString(), '202607270011_security_log_append_only');
       executeMigration(isolatedUrl.toString(), '202607280012_room_state_version');
 
-      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      db = legacyMigrationClient(isolatedUrl.toString());
 
       const playerMembership = await db.roomMembership.findUniqueOrThrow({
         where: { id: 'legacy-player-member' },
@@ -425,7 +446,7 @@ integration('V2.1 populated legacy migration', () => {
       for (const migration of migrationsBeforeBankRoleSwaps) {
         executeMigration(isolatedUrl.toString(), migration);
       }
-      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      db = legacyMigrationClient(isolatedUrl.toString());
       const creator = await db.account.create({ data: {
         username: `bank-swap-creator-${randomUUID()}`,
         passwordHash: 'migration-test-password-hash',
@@ -488,7 +509,7 @@ integration('V2.1 populated legacy migration', () => {
       db = undefined;
 
       executeMigration(isolatedUrl.toString(), '202608010016_bank_role_swaps');
-      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      db = legacyMigrationClient(isolatedUrl.toString());
 
       await expect(db.roleSwapRequest.findUniqueOrThrow({
         where: { id: 'legacy-pending-bank-swap' },
@@ -523,7 +544,7 @@ integration('V2.1 populated legacy migration', () => {
         executeMigration(isolatedUrl.toString(), migration);
       }
 
-      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      db = legacyMigrationClient(isolatedUrl.toString());
       const creator = await db.account.create({ data: {
         username: `start-reward-creator-${randomUUID()}`,
         passwordHash: 'migration-test-password-hash',
@@ -595,7 +616,7 @@ integration('V2.1 populated legacy migration', () => {
       db = undefined;
 
       executeMigration(isolatedUrl.toString(), '202608010018_electronic_start_reward_turn_guard');
-      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      db = legacyMigrationClient(isolatedUrl.toString());
 
       expect(await db.gameRequest.count({ where: { turnId: turn.id, type: 'START_REWARD' } })).toBe(2);
       await expect(db.gameRequest.create({ data: {
@@ -640,7 +661,7 @@ integration('V2.1 populated legacy migration', () => {
         isolatedUrl.toString(),
         '202608020020_electronic_start_reward_history_safe_guard',
       );
-      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      db = legacyMigrationClient(isolatedUrl.toString());
 
       const indexes = await db.$queryRaw<Array<{ indexname: string }>>`
         SELECT indexname
@@ -660,6 +681,144 @@ integration('V2.1 populated legacy migration', () => {
       `;
       expect(indexes).toEqual([]);
       expect(triggers).toEqual([{ trigger_name: 'GameRequest_one_start_reward_per_turn' }]);
+    } finally {
+      await db?.$disconnect();
+      if (schemaCreated) {
+        executeSql(testDatabaseUrl!, `DROP SCHEMA "${schemaName}" CASCADE;`);
+      }
+    }
+  }, 120_000);
+
+  it('limits physical deletion of immutable history to its configuring transaction', async () => {
+    const schemaName = `room_trash_lifecycle_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+    const isolatedUrl = new URL(testDatabaseUrl);
+    isolatedUrl.searchParams.set('schema', schemaName);
+    isolatedUrl.searchParams.set('connection_limit', '1');
+    let schemaCreated = false;
+    let db: PrismaClient | undefined;
+
+    try {
+      executeSql(testDatabaseUrl!, `CREATE SCHEMA "${schemaName}";`);
+      schemaCreated = true;
+      for (const migration of migrationsThroughRoomTrashLifecycle) {
+        executeMigration(isolatedUrl.toString(), migration);
+      }
+
+      db = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      const account = await db.account.create({ data: {
+        username: `room-trash-${randomUUID()}`,
+        passwordHash: 'migration-test-password-hash',
+        displayName: 'Room trash lifecycle actor',
+      } });
+      const room = await db.room.create({ data: {
+        code: randomUUID().slice(0, 8).toUpperCase(),
+        name: 'Room trash immutable history',
+        status: 'ENDED',
+        ruleProfile: 'CUSTOM',
+        difficulty: 'CUSTOM',
+        participantCount: 2,
+        playerLimit: 5,
+        bankMode: 'DEDICATED_MODERATOR',
+        characterAssignmentMode: 'PLAYER_SELECT',
+        initialBalance: 5_000,
+        diceMode: 'ELECTRONIC',
+        skillEnabled: true,
+        storyMoneyCounterpartyMode: 'TREASURY',
+        transferApprovalRequired: false,
+        startReward: 1_000,
+        victoryMode: 'LAST_SOLVENT',
+        createdBy: account.username,
+        createdByAccountId: account.id,
+        visibility: 'PRIVATE',
+        allowMidgameJoin: false,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      } });
+      const membership = await db.roomMembership.create({ data: {
+        roomId: room.id,
+        accountId: account.id,
+        displayNameSnapshot: account.displayName,
+      } });
+      const player = await db.player.create({ data: {
+        roomId: room.id,
+        memberId: membership.id,
+        pawnColor: '#ffffff',
+        balance: 5_000,
+      } });
+      const transaction = await db.gameTransaction.create({ data: {
+        roomId: room.id,
+        type: 'ROOM_TRASH_TEST',
+        metadata: {},
+      } });
+      const ledger = await db.ledgerEntry.create({ data: {
+        roomId: room.id,
+        transactionId: transaction.id,
+        playerId: player.id,
+        amount: 0,
+        balanceBefore: 5_000,
+        balanceAfter: 5_000,
+        type: 'ROOM_TRASH_TEST',
+        description: 'Room trash lifecycle test',
+      } });
+      const audit = await db.auditLog.create({ data: {
+        roomId: room.id,
+        actorMemberId: membership.id,
+        actorRole: 'ADMIN',
+        action: 'ROOM_TRASH_TEST',
+        entityType: 'Room',
+        entityId: room.id,
+      } });
+      const settlement = await db.gameSettlement.create({ data: {
+        roomId: room.id,
+        endedByAccountId: account.id,
+        totalTurns: 1,
+        durationSeconds: 1,
+        winnersJson: [account.id],
+        rankingJson: [{ accountId: account.id, rank: 1 }],
+      } });
+      const settlementPlayer = await db.settlementPlayer.create({ data: {
+        settlementId: settlement.id,
+        accountId: account.id,
+        displayNameSnapshot: account.displayName,
+        cash: 5_000,
+        unmortgagedPropertyValue: 0,
+        mortgagedPropertyNetValue: 0,
+        buildingSellValue: 0,
+        totalWealth: 5_000,
+        rank: 1,
+        isWinner: true,
+        propertyDetailsJson: [],
+      } });
+      const security = await db.securityLog.create({ data: {
+        accountId: account.id,
+        actorAccountId: account.id,
+        action: 'ROOM_TRASH_TEST',
+      } });
+
+      await expect(db.ledgerEntry.delete({ where: { id: ledger.id } })).rejects.toThrow(/LedgerEntry is append-only/);
+      await expect(db.auditLog.delete({ where: { id: audit.id } })).rejects.toThrow(/AuditLog is append-only/);
+      await expect(db.gameSettlement.delete({ where: { id: settlement.id } })).rejects.toThrow(/settlement history is immutable/);
+      await expect(db.settlementPlayer.delete({ where: { id: settlementPlayer.id } })).rejects.toThrow(/settlement history is immutable/);
+      await expect(db.securityLog.delete({ where: { id: security.id } })).rejects.toThrow(/SecurityLog is append-only/);
+
+      await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          "SELECT set_config('zhenhuan.physical_delete_txid', pg_current_xact_id()::text, true)",
+        );
+        expect(await tx.$executeRaw`DELETE FROM "LedgerEntry" WHERE "id" = ${ledger.id}`).toBe(1);
+        expect(await tx.$executeRaw`DELETE FROM "AuditLog" WHERE "id" = ${audit.id}`).toBe(1);
+        expect(await tx.$executeRaw`DELETE FROM "SecurityLog" WHERE "id" = ${security.id}`).toBe(1);
+        expect(await tx.$executeRaw`DELETE FROM "SettlementPlayer" WHERE "id" = ${settlementPlayer.id}`).toBe(1);
+        expect(await tx.$executeRaw`DELETE FROM "GameSettlement" WHERE "id" = ${settlement.id}`).toBe(1);
+      });
+
+      const laterSecurity = await db.securityLog.create({ data: {
+        accountId: account.id,
+        actorAccountId: account.id,
+        action: 'ROOM_TRASH_TEST_LATER',
+      } });
+      await expect(db.$transaction((tx) => tx.securityLog.delete({
+        where: { id: laterSecurity.id },
+      }))).rejects.toThrow(/SecurityLog is append-only/);
     } finally {
       await db?.$disconnect();
       if (schemaCreated) {

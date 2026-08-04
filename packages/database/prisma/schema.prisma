@@ -176,9 +176,13 @@ model Room {
   turnNumber                     Int?
   createdBy                      String
   createdByAccountId             String
+  deletedAt                      DateTime?
+  purgeAfter                     DateTime?
+  deletedByAccountId             String?
   passwordHash                   String?
   visibility                     String                     @default("PUBLIC")
   createdByAccount               Account                    @relation("RoomCreator", fields: [createdByAccountId], references: [id], onDelete: Restrict)
+  deletedByAccount               Account?                   @relation("RoomDeletedBy", fields: [deletedByAccountId], references: [id], onDelete: SetNull)
   createdAt                      DateTime                   @default(now())
   startedAt                      DateTime?
   updatedAt                      DateTime                   @updatedAt
@@ -201,6 +205,7 @@ model Room {
   settlement                     GameSettlement?
 
   @@index([status, expiresAt])
+  @@index([deletedAt, purgeAfter])
 }
 
 model Account {
@@ -218,6 +223,7 @@ model Account {
   sessions         AccountSession[]
   memberships      RoomMembership[]
   createdRooms     Room[]             @relation("RoomCreator")
+  deletedRooms     Room[]             @relation("RoomDeletedBy")
   endedSettlements GameSettlement[]   @relation("SettlementEnder")
   settlementRows   SettlementPlayer[]
   securityLogs     SecurityLog[]      @relation("SecurityLogAccount")
