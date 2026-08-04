@@ -718,6 +718,69 @@ describe('Socket.IO room subscription ownership', () => {
     expect(rejectionCount).toBe(1);
   });
 
+  it('rejects a trashed room subscription without emitting a snapshot', async () => {
+    const { client } = await socketHarness(async () => {
+      throw new Error('ROOM_NOT_FOUND');
+    });
+    const snapshots: Array<{ roomId: string }> = [];
+    client.on('room.snapshot-required', (payload) => snapshots.push(payload));
+
+    const rejected = event<{ roomId: string }>(client, 'room.subscription-rejected');
+    client.emit('room.subscribe', { roomId: 'room-trash' });
+
+    await expect(rejected).resolves.toEqual({ roomId: 'room-trash' });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(snapshots).toEqual([]);
+  });
+
+  it('evicts room subscribers only when moving a room to trash commits', async () => {
+    const serverSockets = new Set<ServerSocket>();
+    const originalJoin = ServerSocket.prototype.join;
+    vi.spyOn(ServerSocket.prototype, 'join').mockImplementation(function (this: ServerSocket, rooms) {
+      serverSockets.add(this);
+      return originalJoin.call(this, rooms);
+    });
+    let deleteCalls = 0;
+    const accounts = {
+      authenticate: vi.fn(async () => auth),
+      authorizeRoomSession: vi.fn(async () => ({ room: { stateVersion: 1 } })),
+      deleteRoom: vi.fn(async () => ({
+        deleted: true as const,
+        id: 'room-a',
+        status: 'LOBBY' as const,
+        deletedAt: new Date(),
+        purgeAfter: new Date(),
+        stateVersion: 2,
+        created: ++deleteCalls === 1,
+      })),
+    };
+    const app = await appModule.buildApiApp({ accounts: accounts as unknown as AccountRoomService, games: {} as PrismaGameService, logger: false });
+    openApps.push(app);
+    const address = await app.listen({ host: '127.0.0.1', port: 0 });
+    const client = createSocketClient(address, { extraHeaders: { Cookie: `${sessionCookieName}=cookie-token` }, forceNew: true, reconnection: false, transports: ['websocket'] });
+    openClients.push(client);
+    if (!client.connected) await event(client, 'connect');
+    const initialSnapshot = event(client, 'room.snapshot-required');
+    client.emit('room.subscribe', { roomId: 'room-a' });
+    await initialSnapshot;
+
+    let rejectionCount = 0;
+    client.on('room.subscription-rejected', () => { rejectionCount += 1; });
+    const rejected = event<{ roomId: string; reason: string }>(client, 'room.subscription-rejected');
+    const first = await app.inject({ method: 'DELETE', url: '/api/admin/rooms/room-a', headers: { cookie: `${sessionCookieName}=cookie-token`, 'idempotency-key': 'trash-room' } });
+
+    await expect(rejected).resolves.toEqual({ roomId: 'room-a', reason: 'ROOM_MOVED_TO_TRASH' });
+    const serverSocket = serverSockets.values().next().value;
+    expect(serverSocket?.rooms.has('room:room-a')).toBe(false);
+    expect(serverSocket?.data.subscribedRoomId).toBeUndefined();
+    expect(first.statusCode).toBe(200);
+
+    const replay = await app.inject({ method: 'DELETE', url: '/api/admin/rooms/room-a', headers: { cookie: `${sessionCookieName}=cookie-token`, 'idempotency-key': 'trash-room' } });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(replay.statusCode).toBe(200);
+    expect(rejectionCount).toBe(1);
+  });
+
   it('delivers one versioned invalidation only to authorized room sockets and disconnects a revoked Session', async () => {
     const sessions = new Map([
       ['cookie-1', { ...auth, session: { id: 'session-1', accountId: auth.account.id } }],

@@ -198,6 +198,14 @@ const revokeSocketSession = (sessionId: string, reason: string) => {
   io.to(channel).emit('account.session.revoked', { reason });
   io.in(channel).disconnectSockets(true);
 };
+const evictRoomSubscriptions = (roomId: string, reason: string) => {
+  const channel = roomChannel(roomId);
+  io.to(channel).emit('room.subscription-rejected', { roomId, reason });
+  io.in(channel).socketsLeave(channel);
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.data.subscribedRoomId === roomId) delete socket.data.subscribedRoomId;
+  }
+};
 const removeSessionFromRoom = (sessionId: string, roomId: string, reason?: string) => {
   const sessionRoom = sessionChannel(sessionId);
   io.to(sessionRoom).emit('room.subscription-rejected', {
@@ -427,7 +435,10 @@ app.post('/api/admin/rooms/:id/finish', async (request) => { const auth = await 
 app.delete('/api/admin/rooms/:id', async (request) => {
   const auth = await authenticate(request); const { id } = z.object({ id: z.string() }).parse(request.params);
   const result = await accounts.deleteRoom(auth, id, idempotencyKey(request.headers['idempotency-key']));
-  if (result.created) notifyVersion(id, result);
+  if (result.created) {
+    evictRoomSubscriptions(id, 'ROOM_MOVED_TO_TRASH');
+    notifyVersion(id, result);
+  }
   return result;
 });
 app.post('/api/admin/rooms/:id/restore', async (request) => {

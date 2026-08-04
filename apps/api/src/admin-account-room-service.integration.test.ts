@@ -316,6 +316,96 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect((await db.room.findUniqueOrThrow({ where: { id: lobby.id } })).stateVersion).toBe(restoredRoom.stateVersion);
   });
 
+  it('isolates trashed rooms from listings, protected reads, and dashboard aggregates', async () => {
+    const admin = await createAccount({ superAdmin: true });
+    const player = await createAccount();
+    const adminCookie = await loginCookie(admin.account, admin.password);
+    const playerCookie = await loginCookie(player.account, player.password);
+    const adminHeaders = { cookie: adminCookie.header };
+    const playerHeaders = { cookie: playerCookie.header, 'idempotency-key': 'trash-isolation-read' };
+    const before = (await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: adminHeaders })).json();
+    const deletedAt = new Date('2026-08-04T00:00:00.000Z');
+    const purgeAfter = new Date('2026-08-05T00:00:00.000Z');
+
+    const trashedLobby = await createRoom(player.account.id, 'LOBBY');
+    const trashedPlaying = await createRoom(player.account.id, 'PLAYING');
+    await db.room.updateMany({
+      where: { id: { in: [trashedLobby.id, trashedPlaying.id] } },
+      data: { deletedAt, purgeAfter, deletedByAccountId: admin.account.id },
+    });
+    const trashed = await createRoom(player.account.id, 'PLAYING');
+    const playerSession = await db.accountSession.findFirstOrThrow({ where: { accountId: player.account.id, revokedAt: null } });
+    await db.roomMembership.create({ data: {
+      roomId: trashed.id,
+      accountId: player.account.id,
+      displayNameSnapshot: player.account.displayName,
+      activeSessionId: playerSession.id,
+      controlClaimedAt: new Date(),
+    } });
+    await db.securityLog.create({ data: {
+      accountId: player.account.id,
+      action: 'CHARACTER_SELECTED',
+      detailsJson: { roomId: trashed.id, characterId: `trashed-character-${randomUUID()}`, characterNameSnapshot: 'Trashed Character' },
+    } });
+    await db.gameSettlement.create({ data: {
+      roomId: trashed.id,
+      endedByAccountId: admin.account.id,
+      endedAt: new Date('2026-08-04T01:00:00.000Z'),
+      totalTurns: 1,
+      durationSeconds: 60,
+      forced: false,
+      winnersJson: [player.account.id],
+      rankingJson: [{ accountId: player.account.id, rank: 1 }],
+      players: { create: [{
+        accountId: player.account.id,
+        displayNameSnapshot: player.account.displayName,
+        characterNameSnapshot: 'Trashed Character',
+        cash: 6_000,
+        unmortgagedPropertyValue: 0,
+        mortgagedPropertyNetValue: 0,
+        buildingSellValue: 0,
+        totalWealth: 6_000,
+        rank: 1,
+        isWinner: true,
+        propertyDetailsJson: [],
+      }] },
+    } });
+    await db.room.update({ where: { id: trashed.id }, data: { status: 'FINISHED' } });
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/admin/rooms/${trashed.id}`,
+      headers: { ...adminHeaders, 'idempotency-key': 'trash-isolation' },
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json()).toMatchObject({ id: trashed.id, created: true });
+
+    expect((await app.inject({ method: 'GET', url: '/api/rooms', headers: playerHeaders })).json())
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: trashed.id })]));
+    expect((await app.inject({ method: 'GET', url: '/api/admin/rooms', headers: adminHeaders })).json().items)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: trashed.id })]));
+    expect((await app.inject({ method: 'GET', url: `/api/admin/rooms/${trashed.id}`, headers: adminHeaders })).statusCode).toBe(404);
+
+    for (const request of [
+      { method: 'GET', url: `/api/rooms/${trashed.id}/seats` },
+      { method: 'GET', url: `/api/rooms/${trashed.id}/snapshot?view=PLAYER` },
+      { method: 'GET', url: `/api/rooms/${trashed.id}/settlement` },
+      { method: 'POST', url: `/api/rooms/${trashed.id}/join`, payload: {} },
+    ] as const) {
+      const response = await app.inject({ ...request, headers: playerHeaders });
+      expect([403, 404]).toContain(response.statusCode);
+    }
+
+    const dashboard = (await app.inject({ method: 'GET', url: '/api/admin/dashboard', headers: adminHeaders })).json();
+    expect(dashboard.rooms).toEqual(before.rooms);
+    expect(dashboard.games).toEqual(before.games);
+    expect(dashboard.characterSelections).not.toContainEqual({
+      characterId: expect.stringMatching(/^trashed-character-/), characterNameSnapshot: 'Trashed Character', count: 1,
+    });
+    expect(dashboard.characterWins).not.toContainEqual({ characterNameSnapshot: 'Trashed Character', count: 1 });
+    expect(dashboard.recentGames).not.toEqual(expect.arrayContaining([expect.objectContaining({ roomId: trashed.id })]));
+  });
+
   it('excludes character selections from deleted rooms', async () => {
     const admin = await createAccount({ superAdmin: true });
     const creator = await createAccount();

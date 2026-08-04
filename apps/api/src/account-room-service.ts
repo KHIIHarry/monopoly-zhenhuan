@@ -510,7 +510,7 @@ export class AccountRoomService {
 
   private async lockRoom(tx: Prisma.TransactionClient, roomId: string) {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT "id" FROM "Room" WHERE "id" = ${roomId} FOR UPDATE
+      SELECT "id" FROM "Room" WHERE "id" = ${roomId} AND "deletedAt" IS NULL FOR UPDATE
     `;
     if (!rows.length) fail('ROOM_NOT_FOUND');
   }
@@ -877,6 +877,7 @@ export class AccountRoomService {
     const [rooms, enabledCharacters] = await Promise.all([
       this.db.room.findMany({
         where: {
+          deletedAt: null,
           OR: [
             { visibility: 'PUBLIC' },
             { members: { some: { accountId: auth.account.id } } },
@@ -1057,7 +1058,7 @@ export class AccountRoomService {
     await this.requireCurrentAdmin(auth);
     const limit = pageLimit(input.limit);
     const cursor = decodeCursor(input.cursor);
-    const filters: Prisma.RoomWhereInput[] = [];
+    const filters: Prisma.RoomWhereInput[] = [{ deletedAt: null }];
     if (input.query) filters.push({ OR: [
       { name: { contains: input.query, mode: 'insensitive' } },
       { code: { contains: input.query, mode: 'insensitive' } },
@@ -1099,8 +1100,8 @@ export class AccountRoomService {
 
   async getAdminRoom(auth: AuthenticatedSession, roomId: string) {
     await this.requireCurrentAdmin(auth);
-    const room = required(await this.db.room.findUnique({
-      where: { id: roomId },
+    const room = required(await this.db.room.findFirst({
+      where: { id: roomId, deletedAt: null },
       include: {
         createdByAccount: { select: { id: true, displayName: true, username: true } },
         members: {
@@ -1502,7 +1503,7 @@ export class AccountRoomService {
   }
 
   async seats(auth: AuthenticatedSession, roomId: string) {
-    const room = required(await this.db.room.findUnique({ where: { id: roomId }, include: { members: { where: { status: 'ACTIVE' }, include: { player: true } } } }), 'ROOM_NOT_FOUND');
+    const room = required(await this.db.room.findFirst({ where: { id: roomId, deletedAt: null }, include: { members: { where: { status: 'ACTIVE' }, include: { player: true } } } }), 'ROOM_NOT_FOUND');
     const characters = await this.db.character.findMany({ where: { enabled: true }, include: { initialProperty: true }, orderBy: { name: 'asc' } });
     const memberships = new Map(room.members.filter((member) => member.characterId).map((member) => [member.characterId, member]));
     const mine = room.members.find((member) => member.accountId === auth.account.id);
@@ -1565,6 +1566,7 @@ export class AccountRoomService {
   private async ensureMembership(tx: Prisma.TransactionClient, auth: AuthenticatedSession, roomId: string, requireControl = false) {
     await this.ensureActiveSession(tx, auth);
     const membership = required(await tx.roomMembership.findUnique({ where: { roomId_accountId: { roomId, accountId: auth.account.id } }, include: { player: true, room: true } }), 'ROOM_MEMBERSHIP_REQUIRED');
+    if (membership.room.deletedAt) fail('ROOM_NOT_FOUND');
     if (membership.status === 'LEFT') fail('ROOM_MEMBERSHIP_REMOVED');
     if (membership.status !== 'ACTIVE') fail('ROOM_MEMBERSHIP_REQUIRED');
     if (membership.room.status === 'ENDED' || membership.room.status === 'FINISHED' || membership.room.status === 'CLOSED') fail('ROOM_FINISHED');
@@ -1688,6 +1690,7 @@ export class AccountRoomService {
 
   async authorizeRoomSession(auth: AuthenticatedSession, roomId: string, expectedRole?: 'PLAYER' | 'BANK') {
     const membership = required(await this.db.roomMembership.findUnique({ where: { roomId_accountId: { roomId, accountId: auth.account.id } }, include: { player: true, room: true } }), 'ROOM_MEMBERSHIP_REQUIRED');
+    if (membership.room.deletedAt) fail('ROOM_NOT_FOUND');
     if (membership.status !== 'ACTIVE') fail('ROOM_MEMBERSHIP_REQUIRED');
     if (membership.activeSessionId !== auth.session.id) fail('ROOM_CONTROL_LOST');
     if (expectedRole === 'BANK' && !membership.isBank) fail('BANK_REQUIRED');
@@ -2052,7 +2055,7 @@ export class AccountRoomService {
   }
 
   private async settlementState(tx: Prisma.TransactionClient, roomId: string) {
-    const room = required(await tx.room.findUnique({ where: { id: roomId } }), 'ROOM_NOT_FOUND');
+    const room = required(await tx.room.findFirst({ where: { id: roomId, deletedAt: null } }), 'ROOM_NOT_FOUND');
     const settlement = await tx.gameSettlement.findUnique({ where: { roomId }, include: { players: { orderBy: [{ rank: 'asc' }, { accountId: 'asc' }] } } });
     return { room, settlement };
   }
@@ -2410,7 +2413,7 @@ export class AccountRoomService {
 
   async listRoomAuditLogs(auth: AuthenticatedSession, roomId: string, input: { action?: string; actorMemberId?: string; from?: Date; to?: Date; cursor?: string; limit?: number }) {
     await this.requireCurrentAdmin(auth);
-    required(await this.db.room.findUnique({ where: { id: roomId }, select: { id: true } }), 'ROOM_NOT_FOUND');
+    required(await this.db.room.findFirst({ where: { id: roomId, deletedAt: null }, select: { id: true } }), 'ROOM_NOT_FOUND');
     if (input.from && input.to && input.from > input.to) fail('INVALID_TIME_RANGE');
     const limit = pageLimit(input.limit);
     const cursor = decodeCursor(input.cursor);
@@ -2458,10 +2461,10 @@ export class AccountRoomService {
       this.db.account.count(),
       this.db.account.count({ where: { status: 'ACTIVE' } }),
       this.db.accountSession.count({ where: { ...activeSessionWhere(now), account: { status: 'ACTIVE' } } }),
-      this.db.room.count({ where: { status: 'LOBBY' } }),
-      this.db.room.count({ where: { status: 'PLAYING' } }),
-      this.db.room.count({ where: { status: 'FINISHED' } }),
-      this.db.gameSettlement.aggregate({ _count: { _all: true }, _avg: { durationSeconds: true } }),
+      this.db.room.count({ where: { status: 'LOBBY', deletedAt: null } }),
+      this.db.room.count({ where: { status: 'PLAYING', deletedAt: null } }),
+      this.db.room.count({ where: { status: 'FINISHED', deletedAt: null } }),
+      this.db.gameSettlement.aggregate({ where: { room: { deletedAt: null } }, _count: { _all: true }, _avg: { durationSeconds: true } }),
       this.db.$queryRaw<Array<{ characterId: string; characterNameSnapshot: string; count: bigint }>>`
         SELECT
           log."detailsJson"->>'characterId' AS "characterId",
@@ -2471,13 +2474,15 @@ export class AccountRoomService {
         INNER JOIN "Room" AS room ON room."id" = log."detailsJson"->>'roomId'
         LEFT JOIN "Character" AS character ON character."id" = log."detailsJson"->>'characterId'
         WHERE log."action" = 'CHARACTER_SELECTED'
+          AND room."deletedAt" IS NULL
           AND log."detailsJson"->>'roomId' IS NOT NULL
           AND log."detailsJson"->>'characterId' IS NOT NULL
         GROUP BY log."detailsJson"->>'characterId', COALESCE(NULLIF(log."detailsJson"->>'characterNameSnapshot', ''), character."name")
         ORDER BY COUNT(*) DESC, log."detailsJson"->>'characterId' ASC
       `,
-      this.db.settlementPlayer.groupBy({ by: ['characterNameSnapshot'], where: { isWinner: true, characterNameSnapshot: { not: null } }, _count: { _all: true }, orderBy: { characterNameSnapshot: 'asc' } }),
+      this.db.settlementPlayer.groupBy({ by: ['characterNameSnapshot'], where: { isWinner: true, characterNameSnapshot: { not: null }, settlement: { room: { deletedAt: null } } }, _count: { _all: true }, orderBy: { characterNameSnapshot: 'asc' } }),
       this.db.gameSettlement.findMany({
+        where: { room: { deletedAt: null } },
         include: { room: { select: { name: true } }, players: { where: { isWinner: true }, select: { accountId: true, displayNameSnapshot: true, characterNameSnapshot: true }, orderBy: { accountId: 'asc' } } },
         orderBy: [{ endedAt: 'desc' }, { id: 'desc' }],
         take: 10,
