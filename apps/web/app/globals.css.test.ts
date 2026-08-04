@@ -140,6 +140,16 @@ describe('settlement header return action', () => {
   });
 });
 
+describe('finish settlement content width', () => {
+  test('keeps the settlement operation card aligned with the ranking and checks', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(
+      /\.finish-intro,\s*\.finish-ranking,\s*\.finish-blockers,\s*\.finish-confirm\s*\{[^}]*width:\s*min\(100%,\s*760px\);/s,
+    );
+  });
+});
+
 describe('admin room configuration controls', () => {
   test('aligns select controls with text inputs', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');

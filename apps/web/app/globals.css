@@ -297,13 +297,192 @@
 .account-list { max-width: 760px; margin: 0 auto; display: grid; gap: 8px; }
 .settlement-list { width: min(100%, 760px); margin: 0 auto; display: grid; gap: 12px; }
 .settlement-list article { border-left: 4px solid #938470; background: #fffdf8; padding: 16px; }
-.settlement-list article.winner { border-color: #b58a2f; background: #fff8df; }
+.settlement-list:not(.settlement-accordion) article.winner { border-color: #b58a2f; background: #fff8df; }
 .settlement-list h2 { margin: 8px 0 2px; letter-spacing: 0; }
 .settlement-list p { margin: 0 0 12px; color: #75615b; }
 .settlement-list dl { margin: 0; display: grid; gap: 6px; }
 .settlement-list dl div { display: flex; justify-content: space-between; gap: 12px; }
 .settlement-list dt, .settlement-list dd { margin: 0; }
 .settlement-list .total { border-top: 1px solid #d8c9ad; padding-top: 8px; font-weight: 800; color: #812936; }
+
+/* Settlement ledger */
+.settlement-ledger-page {
+  --settlement-ink: #282b28;
+  --settlement-muted: #776d66;
+  --settlement-line: #d8cfbd;
+  --settlement-gold: #b8892f;
+  --settlement-red: #8d2833;
+  --settlement-paper: #fffaf0;
+  padding-top: 24px;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  background: #f4f6f3;
+  color: var(--settlement-ink);
+}
+.settlement-page-header,
+.finish-intro,
+.finish-ranking,
+.finish-blockers,
+.finish-confirm,
+.settlement-overview,
+.settlement-list { width: min(100%, 1060px); margin-inline: auto; }
+.settlement-page-header { margin-bottom: 32px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 18px; }
+.settlement-back { min-height: 42px; padding: 0 12px 0 9px; border: 1px solid #cfc7bc; border-radius: 6px; background: #fff; color: var(--settlement-ink); display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; white-space: nowrap; }
+.settlement-back svg { width: 17px; height: 17px; }
+.settlement-page-title { min-width: 0; display: grid; gap: 6px; text-align: right; }
+.settlement-page-title small,
+.settlement-section-heading small,
+.finish-intro small,
+.finish-confirm small { color: var(--settlement-muted); font-size: 12px; font-weight: 700; }
+.settlement-page-title h1 { margin: 0; font: 700 32px/1.1 STSong, SimSun, serif; }
+.settlement-page-title p { margin: 0; color: var(--settlement-muted); font-size: 13px; }
+.finish-intro { margin-bottom: 24px; padding: 18px 20px; border-block: 1px solid var(--settlement-line); border-left: 5px solid var(--settlement-gold); border-right: 1px solid var(--settlement-line); background: var(--settlement-paper); display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.ledger-icon { width: 40px; height: 40px; border: 1px solid #d6bf87; color: var(--settlement-gold); display: grid; place-items: center; }
+.ledger-icon svg { width: 22px; height: 22px; }
+.finish-intro h2,
+.finish-confirm h2 { margin: 3px 0 0; font: 700 21px/1.2 STSong, SimSun, serif; }
+.finish-intro p { margin: 6px 0 0; color: var(--settlement-muted); font-size: 13px; line-height: 1.55; }
+.settlement-state { min-height: 28px; padding: 5px 9px; border: 1px solid currentColor; border-radius: 4px; font-size: 12px; white-space: nowrap; }
+.settlement-state.blocked { color: var(--settlement-red); background: #fff1f1; }
+.settlement-state.ready { color: var(--ok); background: #edf8f0; }
+.finish-ranking,
+.finish-blockers { margin-bottom: 24px; }
+.finish-ranking { padding-bottom: 10px; border-bottom: 1px solid var(--settlement-line); }
+.settlement-section-heading { margin-bottom: 10px; display: flex; align-items: end; justify-content: space-between; gap: 12px; }
+.settlement-section-heading h2 { margin: 2px 0 0; font: 700 21px/1.15 STSong, SimSun, serif; }
+.settlement-section-heading > span { color: var(--settlement-muted); font-size: 12px; }
+.settlement-section-heading > svg { width: 22px; height: 22px; color: var(--settlement-red); }
+.finish-ranking > .settlement-section-heading { grid-template-columns: minmax(0, 1fr) auto; }
+.finish-ranking-meta { display: grid; gap: 2px; justify-items: end; text-align: right; }
+.finish-ranking-meta span { color: var(--settlement-muted); font-size: 12px; }
+.finish-ranking > .finish-ranking-list { display: block; border: 0; border-top: 1px solid var(--settlement-line); }
+.finish-ranking-list article { --settlement-role-color: var(--character-divider, #a29786); min-height: 60px; padding: 12px 8px; border-left: 4px solid var(--settlement-role-color); border-right: 1px solid var(--settlement-line); border-bottom: 1px solid var(--settlement-line); background: #fffdfa; display: grid; grid-template-columns: 82px minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.finish-ranking-list b { color: var(--settlement-muted); font-size: 13px; }
+.finish-ranking-list span { min-width: 0; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+.finish-ranking-list strong { color: var(--settlement-red); font: 700 22px/1 STSong, SimSun, serif; white-space: nowrap; }
+.finish-ranking-list article.leader { background: color-mix(in srgb, var(--settlement-role-color) 10%, transparent); }
+.finish-ranking-list article.leader b { color: var(--settlement-role-color); }
+.finish-blockers .settlement-section-heading { padding-top: 14px; }
+.finish-blockers article { min-height: 72px; padding: 12px 4px; border-bottom: 1px solid var(--settlement-line); display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.finish-blockers article > svg { width: 22px; height: 22px; color: var(--settlement-red); }
+.finish-blockers article strong,
+.finish-blockers article small { display: block; }
+.finish-blockers article strong { font-size: 15px; }
+.finish-blockers article small { margin-top: 4px; color: var(--settlement-muted); font-size: 12px; line-height: 1.45; }
+.finish-blockers article > span { color: var(--settlement-red); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.finish-confirm { padding: 18px 20px 20px; border-top: 3px solid var(--settlement-red); background: #fff; display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 320px); gap: 14px 24px; }
+.finish-confirm > div { align-self: center; }
+.finish-confirm label { margin: 0; grid-column: 2; font-size: 13px; font-weight: 700; }
+.finish-confirm input { margin-top: 7px; border-color: #d8cbc6; border-radius: 4px; }
+.finish-confirm .error { grid-column: 1 / -1; margin: 0; }
+.finish-confirm .danger-button { grid-column: 2; width: 100%; min-height: 48px; margin: 0; border: 1px solid #6d1520; border-radius: 5px; background: var(--settlement-red); color: #fff; font-weight: 700; }
+.finish-confirm .danger-button:disabled { border-color: #cf999d; background: #f3e0e1; color: #8c6b6d; opacity: 1; }
+.settlement-overview { margin-bottom: 24px; border-block: 1px solid var(--settlement-line); display: grid; grid-template-columns: 1.4fr 1fr 1fr; }
+.settlement-overview > div { min-height: 76px; padding: 14px 16px; border-right: 1px solid var(--settlement-line); display: grid; align-content: center; gap: 4px; }
+.settlement-overview > div:last-child { border-right: 0; }
+.settlement-overview svg { width: 19px; height: 19px; color: var(--settlement-gold); }
+.settlement-overview span { color: var(--settlement-muted); font-size: 12px; }
+.settlement-overview strong { font: 700 19px/1.2 STSong, SimSun, serif; }
+.settlement-list { display: grid; gap: 14px; }
+.settlement-list .settlement-entry { padding: 18px 20px 16px; border: 1px solid #e0d8ca; border-left: 5px solid #a29786; background: #fffdfa; }
+.settlement-list .settlement-entry.winner { background: #fff7dc; }
+.settlement-entry > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settlement-entry > header > div { display: flex; align-items: center; gap: 9px; }
+.settlement-entry > header b { color: var(--settlement-muted); font-size: 13px; }
+.settlement-entry > header > strong { color: var(--settlement-red); font: 700 25px/1 STSong, SimSun, serif; white-space: nowrap; }
+.winner-mark { color: #89651e; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; }
+.winner-mark svg { width: 15px; height: 15px; }
+.settlement-person { margin: 16px 0 14px; }
+.settlement-person h2 { margin: 0; font: 700 25px/1.1 STSong, SimSun, serif; }
+.settlement-person p { margin: 5px 0 0; color: var(--settlement-muted); font-size: 14px; }
+.settlement-entry dl { margin: 0; border-top: 1px solid var(--settlement-line); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settlement-entry dl > div { min-height: 52px; padding: 10px 0; border-bottom: 1px solid var(--settlement-line); display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.settlement-entry dl > div:nth-child(odd) { padding-right: 18px; }
+.settlement-entry dl > div:nth-child(even) { padding-left: 18px; }
+.settlement-entry dt { color: var(--settlement-muted); font-size: 13px; }
+.settlement-entry dd { margin: 0; font-size: 16px; font-weight: 700; white-space: nowrap; }
+.settlement-entry dl .total { grid-column: 1 / -1; padding-inline: 0; color: var(--settlement-red); border-bottom: 0; }
+.settlement-entry dl .total dt,
+.settlement-entry dl .total dd { color: var(--settlement-red); font-weight: 800; }
+.settlement-entry dl .total dd { font: 700 24px/1 STSong, SimSun, serif; }
+.settlement-asset-panel .settlement-detail-toggle { margin-top: 12px; border: 0; }
+.settlement-asset-panel .settlement-detail-toggle summary { box-sizing: border-box; width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid #cfc7bc; border-radius: 6px; background: #fff; display: flex; align-items: center; justify-content: space-between; color: var(--settlement-ink); cursor: pointer; font-weight: 700; list-style: none; }
+.settlement-asset-panel .settlement-detail-toggle summary::-webkit-details-marker { display: none; }
+.settlement-asset-panel .settlement-detail-toggle summary::marker { content: ""; }
+.settlement-detail-chevron { width: 18px; flex: 0 0 18px; color: var(--settlement-muted); transition: transform 160ms ease; }
+.settlement-detail-toggle[open] .settlement-detail-chevron { transform: rotate(180deg); }
+.settlement-asset-panel .settlement-detail-toggle summary:hover { background: #faf7f0; }
+.settlement-asset-panel .settlement-detail-toggle summary:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+.settlement-properties { padding: 10px 0 8px; display: grid; gap: 8px; }
+.settlement-properties > div { padding: 10px 12px; border-left: 3px solid var(--settlement-gold); background: #fffdf7; }
+.settlement-properties strong,
+.settlement-properties span { display: block; }
+.settlement-properties span { margin-top: 3px; color: var(--settlement-muted); font-size: 12px; }
+.settlement-accordion { gap: 0; overflow: hidden; border: 1px solid #e0d8ca; background: #fffdfa; }
+.settlement-accordion .settlement-entry { padding: 0; border: 0; border-left: 5px solid #a29786; background: #fffdfa; }
+.settlement-accordion .settlement-entry + .settlement-entry { border-top: 1px solid #e0d8ca; }
+.settlement-accordion .settlement-entry.winner { background: color-mix(in srgb, var(--settlement-role-color) 10%, transparent); }
+.settlement-asset-trigger { width: 100%; min-height: 86px; padding: 14px 16px; border: 0; background: transparent; color: var(--settlement-ink); display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 10px 16px; align-items: center; text-align: left; }
+.settlement-asset-trigger:hover { background: #faf7f0; }
+.settlement-asset-trigger:focus-visible { position: relative; z-index: 1; outline: 3px solid var(--blue); outline-offset: -3px; }
+.settlement-rank { display: flex; align-items: center; gap: 8px; color: var(--settlement-muted); font-size: 13px; font-weight: 700; white-space: nowrap; }
+.settlement-player-heading { min-width: 0; }
+.settlement-player-heading strong,
+.settlement-player-heading small { display: block; }
+.settlement-player-heading strong { font: 700 21px/1.1 STSong, SimSun, serif; overflow-wrap: anywhere; }
+.settlement-player-heading small { margin-top: 4px; color: var(--settlement-muted); font-size: 12px; overflow-wrap: anywhere; }
+.settlement-total-preview { min-width: 0; text-align: right; white-space: nowrap; }
+.settlement-total-preview small,
+.settlement-total-preview strong { display: block; }
+.settlement-total-preview small { color: var(--settlement-muted); font-size: 11px; }
+.settlement-total-preview strong { margin-top: 4px; color: var(--settlement-red); font: 700 22px/1 STSong, SimSun, serif; }
+.settlement-asset-chevron { width: 19px; color: var(--settlement-muted); transition: transform 160ms ease; }
+.settlement-asset-trigger[aria-expanded="true"] .settlement-asset-chevron { transform: rotate(180deg); }
+.settlement-asset-panel { padding: 0 20px 14px; background: #fffdfa; }
+.settlement-accordion .winner .settlement-asset-panel { background: #fff7dc; }
+.settlement-asset-panel dl > div { align-items: center; }
+.settlement-asset-panel .settlement-detail-toggle { margin-top: 0; }
+.settlement-accordion .settlement-entry { --settlement-role-color: var(--character-divider, #a29786); --settlement-role-divider: var(--settlement-role-color); --settlement-role-shadow: none; border-left-color: var(--settlement-role-divider); box-shadow: var(--settlement-role-shadow); }
+.settlement-asset-panel .settlement-properties > div { border-left-color: var(--settlement-role-divider); box-shadow: var(--settlement-role-shadow); }
+
+@media (min-width: 900px) {
+  .finish-page { display: block; }
+  .finish-ranking,
+  .finish-blockers { width: min(100%, 1060px); }
+  .finish-confirm { max-width: 1060px; }
+}
+
+@media (max-width: 699px) {
+  .settlement-ledger-page { padding: 16px 16px calc(76px + env(safe-area-inset-bottom)); }
+  .settlement-page-header { margin-bottom: 22px; grid-template-columns: 1fr; align-items: start; gap: 12px; }
+  .settlement-page-title { text-align: left; }
+  .settlement-page-title h1 { font-size: 29px; }
+  .finish-intro { padding: 14px; grid-template-columns: 36px minmax(0, 1fr); gap: 10px; }
+  .ledger-icon { width: 34px; height: 34px; }
+  .finish-intro .settlement-state { grid-column: 2; justify-self: start; }
+  .finish-ranking-list article { grid-template-columns: 58px minmax(0, 1fr); gap: 6px 10px; }
+  .finish-ranking-list strong { grid-column: 2; font-size: 19px; }
+  .finish-blockers article { grid-template-columns: 24px minmax(0, 1fr); gap: 10px; }
+  .finish-blockers article > span { grid-column: 2; }
+  .finish-confirm { padding: 16px; grid-template-columns: 1fr; }
+  .finish-confirm label,
+  .finish-confirm .danger-button { grid-column: auto; }
+  .settlement-overview { grid-template-columns: 1fr 1fr; }
+  .settlement-overview > div { min-height: 70px; padding: 12px; }
+  .settlement-overview > div:first-child { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--settlement-line); }
+  .settlement-list .settlement-entry { padding: 15px 14px 12px; }
+  .settlement-accordion .settlement-entry { padding: 0; }
+  .settlement-asset-trigger { min-height: 92px; padding: 12px; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "rank rank chevron" "heading wealth chevron"; gap: 8px 10px; }
+  .settlement-rank { grid-area: rank; }
+  .settlement-player-heading { grid-area: heading; }
+  .settlement-total-preview { grid-area: wealth; }
+  .settlement-asset-chevron { grid-area: chevron; }
+  .settlement-asset-panel { padding: 0 14px 12px; }
+  .settlement-entry > header > strong { font-size: 22px; }
+  .settlement-person h2 { font-size: 23px; }
+  .settlement-entry dl { grid-template-columns: 1fr; }
+  .settlement-entry dl > div:nth-child(odd),
+  .settlement-entry dl > div:nth-child(even) { padding-inline: 0; }
+}
 
 @media (max-width: 420px) {
   .seat-grid { grid-template-columns: 1fr; }
@@ -1330,6 +1509,7 @@ nav span { font-size: 10px; white-space: nowrap; }
 .workbench-segment button[aria-pressed="true"] { background: var(--jade); }
 .finish-page,
 .settlement-page { padding-bottom: calc(36px + env(safe-area-inset-bottom)); }
+.finish-intro,
 .finish-ranking,
 .finish-blockers,
 .finish-confirm { width: min(100%, 760px); margin: 0 auto 28px; }

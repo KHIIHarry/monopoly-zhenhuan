@@ -7,6 +7,7 @@ const allowedDevOrigins = process.env.NEXT_ALLOWED_DEV_ORIGINS
 
 const config: NextConfig = {
   devIndicators: false,
+  typedRoutes: true,
   ...(allowedDevOrigins?.length ? { allowedDevOrigins } : {}),
 };
 

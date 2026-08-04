@@ -36,6 +36,7 @@ import {
   type TransferResult,
 } from "./transfer-toast-feedback";
 import { useRouter } from "next/navigation";
+import type { Route } from "next";
 import { io } from "socket.io-client";
 import { createPortal } from "react-dom";
 import {
@@ -46,6 +47,7 @@ import {
   BookOpen,
   Building2,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleX,
   CircleMinus,
@@ -1222,7 +1224,7 @@ export default function AppRouterClient({
     targetRoomId = roomId,
   ) => `/rooms/${targetRoomId}/${target}`;
   const go = (path: string, replace = false) =>
-    replace ? router.replace(path) : router.push(path);
+    replace ? router.replace(path as Route) : router.push(path as Route);
   const loginDestination = () =>
     typeof window === "undefined"
       ? "/rooms"
@@ -4761,6 +4763,21 @@ function blockerLabel(blocker: SettlementBlocker) {
   return labels[blocker.code] ?? blocker.code;
 }
 
+function blockerCopy(blocker: SettlementBlocker) {
+  const copies: Record<string, string> = {
+    PENDING_GAME_REQUEST: "仍有待审批的银行操作，请处理完成后再生成结算。",
+    INCOMPLETE_PROPERTY_TRADE: "仍有一笔地产交易未完成，请先关闭该流程。",
+    PROPERTY_ACTION_LOCKED: "地产操作仍被锁定，请在银行端解除后重试。",
+    PENDING_ROLE_SWAP: "仍有角色交换等待处理。",
+    INVALID_PLAYER_BALANCE: "有玩家余额需要核对，请修正后再结算。",
+    OPEN_DEBT: "仍有未结债务，请完成收款或核销。",
+    UNRESOLVED_LANDING: "仍有角色尚未确认落点，请完成落点结算。",
+    ACTIVE_TURN: "当前回合尚未结束，请完成本回合后再结算。",
+    SETTLEMENT_DATA_INVALID: "结算参与者信息不完整，请刷新房间状态后重试。",
+  };
+  return copies[blocker.code] ?? "该事项需要处理完成后才能生成结算。";
+}
+
 function FinishPreview({
   preview,
   busy,
@@ -4777,41 +4794,74 @@ function FinishPreview({
   const [confirmation, setConfirmation] = useState("");
   const blocked = preview.blockers.length > 0;
   return (
-    <main className="v2-page finish-page">
-      <header className="v2-header">
-        <button onClick={onBack}>返回银行端</button>
-        <div>
+    <main className="v2-page finish-page settlement-ledger-page">
+      <header className="settlement-page-header">
+        <button className="settlement-back" onClick={onBack}>
+          <ArrowLeft />
+          返回银行端
+        </button>
+        <div className="settlement-page-title">
           <small>银行结算预览</small>
           <h1>结束游戏</h1>
         </div>
       </header>
-      <section className="finish-ranking">
-        <h2>当前排名</h2>
-        {preview.players.map((player) => (
-          <div key={player.accountId}>
-            <b>第 {player.rank} 名</b>
-            <span>
-              {player.displayNameSnapshot} · {player.characterNameSnapshot}
-            </span>
-            <strong>{formatMoney(player.totalWealth)} 两</strong>
+
+      <section className="finish-intro" aria-labelledby="finish-intro-title">
+        <div className="ledger-icon"><Landmark /></div>
+        <div>
+          <small>结算操作</small>
+          <h2 id="finish-intro-title">生成不可变对局账册</h2>
+          <p>结算前请核对排名与待处理事项。完成后，对局资产将按当前状态归档。</p>
+        </div>
+        <strong className={blocked ? "settlement-state blocked" : "settlement-state ready"}>
+          {blocked ? `${preview.blockers.length} 项待处理` : "可以结算"}
+        </strong>
+      </section>
+
+      <section className="finish-ranking" aria-labelledby="finish-ranking-title">
+        <div className="settlement-section-heading">
+          <h2 id="finish-ranking-title">当前排名</h2>
+          <div className="finish-ranking-meta">
+            <small>资产序位</small>
+            <span>按总财富排序</span>
           </div>
-        ))}
+        </div>
+        <div className="finish-ranking-list">
+          {preview.players.map((player) => {
+            const theme = settlementCharacterTheme(player.characterNameSnapshot);
+            return (
+              <article
+                key={player.accountId}
+                className={`finish-ranking-entry character-${theme} ${player.rank === 1 ? "leader" : ""}`}
+              >
+                <b>第 {player.rank} 名</b>
+                <span>
+                  {player.displayNameSnapshot}
+                  {player.characterNameSnapshot ? ` · ${player.characterNameSnapshot}` : ""}
+                </span>
+                <strong>{formatMoney(player.totalWealth)} 两</strong>
+              </article>
+            );
+          })}
+        </div>
       </section>
       <section className="finish-blockers">
-        <h2>结束前检查</h2>
+        <div className="settlement-section-heading">
+          <div>
+            <small>结算门槛</small>
+            <h2>结束前检查</h2>
+          </div>
+          {blocked ? <AlertTriangle /> : <Check />}
+        </div>
         {blocked ? (
           preview.blockers.map((blocker, index) => (
             <article key={`${blocker.code}-${index}`}>
               <AlertTriangle />
               <div>
                 <strong>{blockerLabel(blocker)}</strong>
-                <small>
-                  {Object.entries(blocker)
-                    .filter(([key]) => key !== "code")
-                    .map(([key, value]) => `${key}: ${String(value)}`)
-                    .join(" · ")}
-                </small>
+                <small>{blockerCopy(blocker)}</small>
               </div>
+              <span>需处理</span>
             </article>
           ))
         ) : (
@@ -4822,6 +4872,10 @@ function FinishPreview({
         )}
       </section>
       <section className="finish-confirm">
+        <div>
+          <small>危险操作</small>
+          <h2>确认生成最终结算</h2>
+        </div>
         <label>
           输入“确认结束游戏”
           <input
@@ -4840,11 +4894,28 @@ function FinishPreview({
           disabled={busy || blocked || confirmation !== "确认结束游戏"}
           onClick={() => void onConfirm(confirmation)}
         >
-          确认结束游戏
+          {blocked ? "请先处理阻塞项" : "确认结束游戏"}
         </button>
       </section>
     </main>
   );
+}
+
+function formatSettlementEndedAt(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZone: "Asia/Shanghai",
+  }).format(new Date(value));
+}
+
+function settlementCharacterTheme(characterName: string | null) {
+  return characters.find((character) => character.name === characterName)?.id ?? "treasury";
 }
 
 function Settlement({
@@ -4854,82 +4925,142 @@ function Settlement({
   settlement: SettlementView;
   onBack: () => void;
 }) {
+  const [expandedPlayerId, setExpandedPlayerId] = useState<string | null>(null);
+  const accordionId = useId();
+
   return (
-    <main className="v2-page settlement-page">
-      <header className="v2-header">
-        <button onClick={onBack}>房间列表</button>
-        <div>
+    <main className="v2-page settlement-page settlement-ledger-page">
+      <header className="settlement-page-header">
+        <button className="settlement-back" onClick={onBack}>
+          <ArrowLeft />
+          房间列表
+        </button>
+        <div className="settlement-page-title">
           <small>不可变结算快照</small>
           <h1>对局结算</h1>
           <p>
-            {new Date(settlement.endedAt).toLocaleString("zh-CN")} ·{" "}
-            {settlement.totalTurns} 回合
+            {formatSettlementEndedAt(settlement.endedAt)} ·{" "}
+            {Math.round(settlement.durationSeconds / 60)} 分钟
           </p>
         </div>
       </header>
       {settlement.forced && (
         <p className="error banner">强制结束：{settlement.forceReason}</p>
       )}
-      <div className="settlement-list">
-        {settlement.players.map((player) => (
+      <section className="settlement-overview" aria-label="结算概览">
+        <div>
+          <Crown />
+          <span>本局胜者</span>
+          <strong>{settlement.players.find((player) => player.isWinner)?.displayNameSnapshot ?? "待确认"}</strong>
+        </div>
+        <div>
+          <span>结算人数</span>
+          <strong>{settlement.players.length} 位</strong>
+        </div>
+        <div>
+          <span>总回合</span>
+          <strong>{settlement.totalTurns} 回合</strong>
+        </div>
+      </section>
+      <div className="settlement-list settlement-accordion" aria-label="最终财富排名">
+        {settlement.players.map((player) => {
+          const expanded = expandedPlayerId === player.accountId;
+          const theme = settlementCharacterTheme(player.characterNameSnapshot);
+          const triggerId = [accordionId, player.accountId, "trigger"].join("-");
+          const panelId = [accordionId, player.accountId, "panel"].join("-");
+
+          return (
           <article
             key={player.accountId}
-            className={player.isWinner ? "winner" : ""}
+            className={`settlement-entry character-${theme} ${player.rank === 1 ? "winner" : ""}`}
           >
-            <b>
-              第 {player.rank} 名{player.isWinner ? " · 获胜" : ""}
-            </b>
-            <h2>{player.displayNameSnapshot}</h2>
-            {player.characterNameSnapshot && (
-              <p>{player.characterNameSnapshot}</p>
-            )}
-            <dl>
-              <div>
-                <dt>流动资金</dt>
-                <dd>{formatMoney(player.cash)} 两</dd>
-              </div>
-              <div>
-                <dt>未抵押地产</dt>
-                <dd>{formatMoney(player.unmortgagedPropertyValue)} 两</dd>
-              </div>
-              <div>
-                <dt>抵押地产净值</dt>
-                <dd>{formatMoney(player.mortgagedPropertyNetValue)} 两</dd>
-              </div>
-              <div>
-                <dt>建筑出售价值</dt>
-                <dd>{formatMoney(player.buildingSellValue)} 两</dd>
-              </div>
-              <div className="total">
-                <dt>总财富</dt>
-                <dd>{formatMoney(player.totalWealth)} 两</dd>
-              </div>
-            </dl>
-            <details>
-              <summary>地产结算明细（{player.propertyDetails.length}）</summary>
-              <div className="settlement-properties">
-                {player.propertyDetails.map((property) => (
-                  <div key={property.roomPropertyId}>
-                    <strong>{property.nameSnapshot}</strong>
-                    <span>
-                      {property.mortgaged ? "已抵押" : "未抵押"} · 土地{" "}
-                      {formatMoney(property.landSettlementValue)} 两
-                    </span>
-                    <span>
-                      抵押价 {formatMoney(property.mortgagePriceSnapshot)} ·
-                      售价 {formatMoney(property.landSaleValue)}
-                    </span>
-                    <span>
-                      建筑 {property.buildingLevel} · 单价{" "}
-                      {formatMoney(property.buildingSellPriceSnapshot)} · 价值{" "}
-                      {formatMoney(property.buildingSellValue)}
-                    </span>
+            <button
+              id={triggerId}
+              type="button"
+              className="settlement-asset-trigger"
+              aria-label={`${player.displayNameSnapshot}结算详情`}
+              aria-expanded={expanded}
+              aria-controls={panelId}
+              onClick={() =>
+                setExpandedPlayerId((current) =>
+                  current === player.accountId ? null : player.accountId,
+                )
+              }
+            >
+              <span className="settlement-rank">
+                第 {player.rank} 名
+                {player.isWinner && <span className="winner-mark"><Crown /> 获胜</span>}
+              </span>
+              <span className="settlement-player-heading">
+                <strong>{player.displayNameSnapshot}</strong>
+                {player.characterNameSnapshot && <small>{player.characterNameSnapshot}</small>}
+              </span>
+              <span className="settlement-total-preview">
+                <small>总财富</small>
+                <strong>{formatMoney(player.totalWealth)} 两</strong>
+              </span>
+              <ChevronDown className="settlement-asset-chevron" aria-hidden="true" />
+            </button>
+            {expanded && (
+              <div
+                id={panelId}
+                className="settlement-asset-panel"
+                role="region"
+                aria-labelledby={triggerId}
+              >
+                <dl>
+                  <div>
+                    <dt>流动资金</dt>
+                    <dd>{formatMoney(player.cash)} 两</dd>
                   </div>
-                ))}
+                  <div>
+                    <dt>未抵押地产</dt>
+                    <dd>{formatMoney(player.unmortgagedPropertyValue)} 两</dd>
+                  </div>
+                  <div>
+                    <dt>抵押地产净值</dt>
+                    <dd>{formatMoney(player.mortgagedPropertyNetValue)} 两</dd>
+                  </div>
+                  <div>
+                    <dt>建筑出售价值</dt>
+                    <dd>{formatMoney(player.buildingSellValue)} 两</dd>
+                  </div>
+                  <div className="total">
+                    <dt>总财富</dt>
+                    <dd>{formatMoney(player.totalWealth)} 两</dd>
+                  </div>
+                </dl>
+                <details className="settlement-detail-toggle">
+                  <summary>
+                    <span>地产结算明细（{player.propertyDetails.length}）</span>
+                    <ChevronDown className="settlement-detail-chevron" aria-hidden="true" />
+                  </summary>
+                  <div className="settlement-properties">
+                    {player.propertyDetails.map((property) => (
+                      <div key={property.roomPropertyId}>
+                        <strong>{property.nameSnapshot}</strong>
+                        <span>
+                          {property.mortgaged ? "已抵押" : "未抵押"} · 土地{" "}
+                          {formatMoney(property.landSettlementValue)} 两
+                        </span>
+                        <span>
+                          抵押价 {formatMoney(property.mortgagePriceSnapshot)} ·
+                          售价 {formatMoney(property.landSaleValue)}
+                        </span>
+                        <span>
+                          建筑 {property.buildingLevel} · 单价{" "}
+                          {formatMoney(property.buildingSellPriceSnapshot)} · 价值{" "}
+                          {formatMoney(property.buildingSellValue)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
               </div>
-            </details>
+            )}
           </article>
-        ))}
+          );
+        })}
       </div>
     </main>
   );

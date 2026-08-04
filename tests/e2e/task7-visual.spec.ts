@@ -687,7 +687,13 @@ test('player, bank, finish preview, and settlement survive zoom and orientation'
     'GET /settlement',
   ]);
   await assertSurface(page);
-  const propertyDetails = page.getByText('地产结算明细（1）');
+  const playerSettlement = page.getByRole('button', { name: `${longDisplayName}结算详情` });
+  if (keyboardOnly) {
+    await tabTo(page, playerSettlement);
+    await page.keyboard.press('Enter');
+  } else await playerSettlement.click();
+  await expect(playerSettlement).toHaveAttribute('aria-expanded', 'true');
+  const propertyDetails = page.locator('summary').filter({ hasText: '地产结算明细（1）' });
   if (keyboardOnly) {
     await tabTo(page, propertyDetails);
     await page.keyboard.press('Enter');
