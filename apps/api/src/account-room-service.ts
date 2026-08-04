@@ -539,6 +539,28 @@ export class AccountRoomService {
   ): Promise<RoomPurgeLog> {
     const roomId = room.id;
     await this.allowPhysicalHistoryDelete(tx);
+    const [landings, memberships] = await Promise.all([
+      tx.landingEvent.findMany({ where: { roomId }, select: { id: true } }),
+      tx.roomMembership.findMany({ where: { roomId }, select: { id: true } }),
+    ]);
+    const adminResourceSuffixes = [
+      `:${roomId}`,
+      ...memberships.map((membership) => `:${roomId}:${membership.id}`),
+    ];
+    const idempotencyRecords = await tx.idempotencyRecord.findMany({
+      where: { OR: [
+        { scope: { contains: `:room:${roomId}:` } },
+        { scope: { in: [
+          `room:${roomId}:toll`,
+          ...landings.map((landing) => `landing:${landing.id}:toll`),
+        ] } },
+        { AND: [
+          { scope: { contains: ':admin:room:' } },
+          { OR: adminResourceSuffixes.map((suffix) => ({ scope: { endsWith: suffix } })) },
+        ] },
+      ] },
+      select: { id: true },
+    });
     await tx.settlementPlayer.deleteMany({ where: { settlement: { roomId } } });
     await tx.gameSettlement.deleteMany({ where: { roomId } });
     await tx.ledgerEntry.deleteMany({ where: { roomId } });
@@ -560,10 +582,9 @@ export class AccountRoomService {
     await tx.roomProperty.deleteMany({ where: { roomId } });
     await tx.player.deleteMany({ where: { roomId } });
     await tx.roomMembership.deleteMany({ where: { roomId } });
-    await tx.idempotencyRecord.deleteMany({ where: { OR: [
-      { scope: { contains: `:room:${roomId}:` } },
-      { scope: { contains: ':admin:room:', endsWith: `:${roomId}` } },
-    ] } });
+    await tx.idempotencyRecord.deleteMany({
+      where: { id: { in: idempotencyRecords.map((record) => record.id) } },
+    });
     await tx.room.delete({ where: { id: roomId } });
     return {
       roomId,

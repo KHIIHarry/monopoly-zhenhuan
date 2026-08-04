@@ -251,7 +251,7 @@ async function createPurgeFixture(creatorId: string, deletedByAccountId: string)
     originalAmount: 10,
     outstandingAmount: 10,
   } });
-  await db.roleSwapRequest.create({ data: {
+  const roleSwap = await db.roleSwapRequest.create({ data: {
     roomId: room.id,
     requesterMembershipId: member.id,
     targetMembershipId: peerMember.id,
@@ -304,19 +304,6 @@ async function createPurgeFixture(creatorId: string, deletedByAccountId: string)
     isWinner: true,
     propertyDetailsJson: [],
   } });
-  await db.idempotencyRecord.createMany({ data: [
-    {
-      scope: `account:${shared.account.id}:room:${room.id}:request`,
-      key: `purge-room-${randomUUID()}`,
-      response: { roomId: room.id },
-    },
-    {
-      scope: `account:${deletedByAccountId}:admin:room:restore:${room.id}`,
-      key: `purge-admin-${randomUUID()}`,
-      response: { roomId: room.id },
-    },
-  ] });
-
   const otherMember = await db.roomMembership.create({ data: {
     roomId: otherRoom.id,
     accountId: shared.account.id,
@@ -331,28 +318,137 @@ async function createPurgeFixture(creatorId: string, deletedByAccountId: string)
     balance: 100,
     turnOrder: 1,
   } });
-  await db.roomProperty.create({ data: {
+  const otherProperty = await db.roomProperty.create({ data: {
     roomId: otherRoom.id,
     propertyDefinitionId: definition.id,
     ownerPlayerId: otherPlayer.id,
+  } });
+  const otherTurn = await db.turn.create({ data: {
+    roomId: otherRoom.id,
+    turnNumber: 1,
+    playerId: otherPlayer.id,
+    status: 'ENDED',
+  } });
+  const otherLanding = await db.landingEvent.create({ data: {
+    roomId: otherRoom.id,
+    turnId: otherTurn.id,
+    playerId: otherPlayer.id,
+    spaceType: 'PROPERTY',
+    propertyId: otherProperty.id,
+    status: 'CONFIRMED',
+    plotResolved: true,
+    declaredBy: otherMember.id,
+    confirmedBy: otherMember.id,
+  } });
+  const otherRequest = await db.gameRequest.create({ data: {
+    roomId: otherRoom.id,
+    type: 'BUY_PROPERTY',
+    status: 'EXECUTED',
+    actorPlayerId: otherPlayer.id,
+    propertyId: otherProperty.id,
+    landingEventId: otherLanding.id,
+    turnId: otherTurn.id,
+    idempotencyKey: `purge-other-request-${randomUUID()}`,
+    approvedByMemberId: otherMember.id,
+  } });
+  const otherTransaction = await db.gameTransaction.create({ data: {
+    roomId: otherRoom.id,
+    type: 'PURGE_OTHER_FIXTURE',
+    requestId: otherRequest.id,
+    metadata: { roomId: otherRoom.id },
   } });
   await db.securityLog.create({ data: {
     actorAccountId: deletedByAccountId,
     action: 'PURGE_OTHER_ROOM',
     detailsJson: { roomId: otherRoom.id },
   } });
-  await db.idempotencyRecord.create({ data: {
-    scope: `account:${shared.account.id}:room:${otherRoom.id}:request`,
-    key: `purge-other-${randomUUID()}`,
-    response: { roomId: otherRoom.id },
-  } });
+  const tollKey = `purge-toll-${randomUUID()}`;
+  const targetIdempotencyRecords = await Promise.all([
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${shared.account.id}:room:${room.id}:request:${request.id}:approve`,
+      key: `purge-request-${randomUUID()}`,
+      response: { id: request.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${shared.account.id}:room:${room.id}:role-swap:accept:${roleSwap.id}`,
+      key: `purge-role-swap-${randomUUID()}`,
+      response: { id: roleSwap.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${shared.account.id}:room:${room.id}:toll`,
+      key: tollKey,
+      response: { id: transaction.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `landing:${landing.id}:toll`,
+      key: 'settled',
+      response: { requestKey: tollKey, transactionId: transaction.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `room:${room.id}:toll`,
+      key: tollKey,
+      response: { id: transaction.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${deletedByAccountId}:admin:room:restore:${room.id}`,
+      key: `purge-admin-room-${randomUUID()}`,
+      response: { roomId: room.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${deletedByAccountId}:admin:room:member:remove:${room.id}:${member.id}`,
+      key: `purge-admin-member-${randomUUID()}`,
+      response: { id: member.id, roomId: room.id },
+    } }),
+  ]);
+  const otherTollKey = `purge-other-toll-${randomUUID()}`;
+  const otherIdempotencyRecords = await Promise.all([
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${shared.account.id}:room:${otherRoom.id}:request:${otherRequest.id}:approve`,
+      key: `purge-other-request-${randomUUID()}`,
+      response: { id: otherRequest.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${shared.account.id}:room:${otherRoom.id}:role-swap:request`,
+      key: `purge-other-role-swap-${randomUUID()}`,
+      response: { roomId: otherRoom.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `landing:${otherLanding.id}:toll`,
+      key: 'settled',
+      response: { requestKey: otherTollKey, transactionId: otherTransaction.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `room:${otherRoom.id}:toll`,
+      key: otherTollKey,
+      response: { id: otherTransaction.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${deletedByAccountId}:admin:room:member:remove:${otherRoom.id}:${otherMember.id}`,
+      key: `purge-other-admin-member-${randomUUID()}`,
+      response: { id: otherMember.id, roomId: otherRoom.id },
+    } }),
+    db.idempotencyRecord.create({ data: {
+      scope: `account:${shared.account.id}:profile:note:${room.id}`,
+      key: `purge-shared-account-${randomUUID()}`,
+      response: { roomId: room.id, transactionId: transaction.id },
+    } }),
+  ]);
   await db.room.update({ where: { id: room.id }, data: {
     deletedAt: new Date('2026-08-04T00:00:00.000Z'),
     purgeAfter: new Date('2026-08-05T00:00:00.000Z'),
     deletedByAccountId,
   } });
 
-  return { character, definition, otherRoom, room, settlement, shared };
+  return {
+    character,
+    definition,
+    otherIdempotencyRecords,
+    otherRoom,
+    room,
+    settlement,
+    shared,
+    targetIdempotencyRecords,
+  };
 }
 
 function expectNoSecrets(value: unknown) {
@@ -1761,10 +1857,9 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(await db.roomProperty.count({ where: { roomId: fixture.room.id } })).toBe(0);
     expect(await db.player.count({ where: { roomId: fixture.room.id } })).toBe(0);
     expect(await db.roomMembership.count({ where: { roomId: fixture.room.id } })).toBe(0);
-    expect(await db.idempotencyRecord.count({ where: { OR: [
-      { scope: { contains: `:room:${fixture.room.id}:` } },
-      { scope: { contains: ':admin:room:', endsWith: `:${fixture.room.id}` } },
-    ] } })).toBe(0);
+    for (const record of fixture.targetIdempotencyRecords) {
+      expect(await db.idempotencyRecord.findUnique({ where: { id: record.id } }), record.scope).toBeNull();
+    }
     expect(await db.room.count({ where: { id: fixture.room.id } })).toBe(0);
 
     expect(await db.account.findUnique({ where: { id: fixture.shared.account.id } })).not.toBeNull();
@@ -1775,7 +1870,9 @@ integration('Task 6 real-Cookie admin routes', () => {
     expect(await db.player.count({ where: { roomId: fixture.otherRoom.id } })).toBe(1);
     expect(await db.roomProperty.count({ where: { roomId: fixture.otherRoom.id } })).toBe(1);
     expect(await db.securityLog.count({ where: { detailsJson: { path: ['roomId'], equals: fixture.otherRoom.id } } })).toBe(1);
-    expect(await db.idempotencyRecord.count({ where: { scope: { contains: `:room:${fixture.otherRoom.id}:` } } })).toBe(1);
+    for (const record of fixture.otherIdempotencyRecords) {
+      expect(await db.idempotencyRecord.findUnique({ where: { id: record.id } }), record.scope).not.toBeNull();
+    }
   });
 
   it('rejects active rooms and converges every retry after a permanent delete', async () => {
@@ -1820,17 +1917,17 @@ integration('Task 6 real-Cookie admin routes', () => {
     const failureFunction = `purge_failure_function_${suffix}`;
     const failureTrigger = `purge_failure_trigger_${suffix}`;
 
-    await db.$executeRawUnsafe(`
-      CREATE FUNCTION "${failureFunction}"() RETURNS TRIGGER AS $$
-      BEGIN RAISE EXCEPTION 'INJECTED_PURGE_FAILURE'; END;
-      $$ LANGUAGE plpgsql
-    `);
-    await db.$executeRawUnsafe(`
-      CREATE TRIGGER "${failureTrigger}"
-      BEFORE DELETE ON "GameTransaction"
-      FOR EACH ROW EXECUTE FUNCTION "${failureFunction}"()
-    `);
     try {
+      await db.$executeRawUnsafe(`
+        CREATE FUNCTION "${failureFunction}"() RETURNS TRIGGER AS $$
+        BEGIN RAISE EXCEPTION 'INJECTED_PURGE_FAILURE'; END;
+        $$ LANGUAGE plpgsql
+      `);
+      await db.$executeRawUnsafe(`
+        CREATE TRIGGER "${failureTrigger}"
+        BEFORE DELETE ON "GameTransaction"
+        FOR EACH ROW EXECUTE FUNCTION "${failureFunction}"()
+      `);
       await expect(service.purgeRoom(fixture.room.id, { kind: 'AUTO' }))
         .rejects.toThrow('INJECTED_PURGE_FAILURE');
       expect(await db.room.findUnique({ where: { id: fixture.room.id } })).not.toBeNull();
