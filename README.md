@@ -366,6 +366,17 @@ docker compose --env-file /secure/zhenhuan.prod.env -f docker-compose.prod.yml e
 | 结算 | `POST /api/rooms/:id/settlement/preview`、`POST /api/rooms/:id/finish` |
 | 超管 | `/api/admin/accounts`、设备撤销、房间管理、强制结算、看板和安全日志 |
 
+超管房间垃圾桶接口：
+
+| 方法与路由 | 行为 |
+| --- | --- |
+| `DELETE /api/admin/rooms/:id` | 将房间移入垃圾桶；`PLAYING` 房间必须先结束对局 |
+| `GET /api/admin/rooms/trash` | 查询处于固定 24 小时保留期、等待清理的房间 |
+| `POST /api/admin/rooms/:id/restore` | 恢复房间，保留删除前的状态和既有结算数据 |
+| `DELETE /api/admin/rooms/:id/permanent` | 立即彻底删除该房间及其全部房间数据，且不可恢复 |
+
+移入垃圾桶不会改写房间原状态，清理期限固定为移入后的 24 小时。恢复只解除垃圾桶标记并保留原状态、成员、账本和结算，不会重新启动对局、创建运行中的回合或复活其他运行态；由于 `PLAYING` 房间禁止移入垃圾桶，删除前必须先正常结束或由超管强制结算。API 进程启动时会立即补扫到期房间，此后每分钟扫描一次；到期自动清理和显式永久删除都会物理删除全部房间数据，无法撤销或恢复。三个写接口都必须发送稳定的 `Idempotency-Key`。
+
 统一转帐使用 `POST /api/rooms/:id/transfers`。玩家收款请求体为 `{ fromPlayerId, recipientType: "PLAYER", toPlayerId, amount, isPlotFine }`；银行收款请求体为 `{ fromPlayerId, recipientType: "BANK", amount, isPlotFine }`。`amount` 始终是正整数原始金额，服务端返回或在银行快照中提供 `originalAmount`、`reduction` 和 `actualAmount`。
 
 错误统一为 `{ "error": "RULE_CODE" }`。客户端按错误码显示明确提示；未知内部异常不向浏览器泄露堆栈或数据库信息。
