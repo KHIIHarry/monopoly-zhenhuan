@@ -2376,6 +2376,67 @@ integration('PrismaGameService PostgreSQL transactions', () => {
     });
   });
 
+  it('rejects player and bank writes that reached the Room lock before a concurrent trash commit', async () => {
+    const { room, a, bank } = await physicalRoom();
+    await first.snapshot(room.id, { role: 'PLAYER', playerId: a.playerId });
+    await first.authorizeBank(room.id, bank.token);
+
+    const mutationState = async () => JSON.stringify(await Promise.all([
+      firstDb.room.findUniqueOrThrow({ where: { id: room.id }, select: { stateVersion: true } }),
+      firstDb.player.findMany({ where: { roomId: room.id }, select: { id: true, balance: true, remainingSkipTurns: true, version: true }, orderBy: { id: 'asc' } }),
+      firstDb.roomProperty.findMany({ where: { roomId: room.id }, select: { id: true, ownerPlayerId: true, buildingLevel: true, mortgaged: true, lockedByRequestId: true, version: true }, orderBy: { id: 'asc' } }),
+      firstDb.gameRequest.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      firstDb.gameTransaction.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      firstDb.ledgerEntry.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      firstDb.auditLog.findMany({ where: { roomId: room.id }, orderBy: { id: 'asc' } }),
+      firstDb.idempotencyRecord.findMany({ where: { scope: { contains: `:room:${room.id}:` } }, orderBy: [{ scope: 'asc' }, { key: 'asc' }] }),
+    ]));
+    const before = await mutationState();
+    let deletionReady!: () => void;
+    let commitDeletion!: () => void;
+    const deletionHasRoomLock = new Promise<void>((resolve) => { deletionReady = resolve; });
+    const deletionCanCommit = new Promise<void>((resolve) => { commitDeletion = resolve; });
+    const deletedAt = new Date();
+    const deletion = secondDb.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Room" WHERE "id" = ${room.id} FOR UPDATE`;
+      await tx.room.update({ where: { id: room.id }, data: { deletedAt, purgeAfter: new Date(deletedAt.getTime() + 86_400_000) } });
+      deletionReady();
+      await deletionCanCommit;
+    });
+    await deletionHasRoomLock;
+
+    const writes = Promise.allSettled([
+      first.createRequest(room.id, a.playerId, { type: 'BUY_PROPERTY', propertyName: '甘露寺' }, 'trash-race-player-buy'),
+      first.adjustBalance(room.id, a.playerId, 250, bank.token, '垃圾桶竞态后不得写入', 'trash-race-bank-adjust'),
+    ]);
+    let lockWaitError: unknown;
+    try {
+      await vi.waitFor(async () => {
+        const [waiting] = await firstDb.$queryRaw<Array<{ count: number }>>`
+          SELECT COUNT(*)::int AS "count"
+          FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock'
+            AND query LIKE '%SELECT "id" FROM "Room"%'
+        `;
+        expect(waiting?.count ?? 0).toBeGreaterThan(0);
+      }, { timeout: 2_000, interval: 10 });
+    } catch (error) {
+      lockWaitError = error;
+    } finally {
+      commitDeletion();
+    }
+    await deletion;
+
+    const outcomes = await writes;
+    if (lockWaitError) throw lockWaitError;
+    for (const outcome of outcomes) {
+      expect(outcome.status).toBe('rejected');
+      if (outcome.status === 'rejected') expect(outcome.reason).toMatchObject({ code: 'ROOM_NOT_FOUND' });
+    }
+    expect(await mutationState()).toBe(before);
+    expect(await firstDb.room.findUniqueOrThrow({ where: { id: room.id } })).toMatchObject({ deletedAt, purgeAfter: expect.any(Date) });
+  });
+
   it('rejects every game-write family without mutation in ENDED, FINISHED, and CLOSED rooms', async () => {
     for (const status of ['ENDED', 'FINISHED', 'CLOSED'] as const) {
       const { room, a, b, bank } = await physicalRoom();

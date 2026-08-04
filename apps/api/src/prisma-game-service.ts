@@ -1510,7 +1510,7 @@ export class PrismaGameService {
 
   private async lockRoom(tx: Prisma.TransactionClient, roomId: string) {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT "id" FROM "Room" WHERE "id" = ${roomId} FOR UPDATE
+      SELECT "id" FROM "Room" WHERE "id" = ${roomId} AND "deletedAt" IS NULL FOR UPDATE
     `;
     if (!rows.length) fail('ROOM_NOT_FOUND');
   }
@@ -1532,6 +1532,7 @@ export class PrismaGameService {
       include: { player: true, room: true },
     });
     if (!membership || membership.status !== 'ACTIVE') fail('ROOM_MEMBERSHIP_REQUIRED');
+    if (membership.room.deletedAt) fail('ROOM_NOT_FOUND');
     if (membership.activeSessionId !== actor.sessionId) fail('ROOM_CONTROL_LOST');
     if (['ENDED', 'FINISHED', 'CLOSED'].includes(membership.room.status)) fail('ROOM_FINISHED');
     if (capability === 'BANK' && !membership.isBank) fail('BANK_REQUIRED');
