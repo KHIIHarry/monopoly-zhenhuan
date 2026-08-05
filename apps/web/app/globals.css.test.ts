@@ -174,6 +174,16 @@ describe('finish settlement content width', () => {
   });
 });
 
+describe('trash room actions', () => {
+  test('matches the restore button with a rounded permanent-delete action', async () => {
+    const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
+
+    expect(stylesheet).toMatch(
+      /\.room-trash-actions \.danger-button\s*\{[^}]*border-radius:\s*999px;/s,
+    );
+  });
+});
+
 describe('admin room configuration controls', () => {
   test('aligns select controls with text inputs', async () => {
     const stylesheet = await readFile(fileURLToPath(stylesheetUrl), 'utf8');
