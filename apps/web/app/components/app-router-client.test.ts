@@ -22,6 +22,32 @@ function sourceBetween(source: string, startMarker: string, endMarker: string) {
   return source.slice(start, end);
 }
 
+describe('route transition skeleton', () => {
+  test('masks the old route before navigation and waits for protected page data', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toContain(
+      'const [routePending, setRoutePending] = useState(false)',
+    );
+    expect(component).toContain(
+      'const [pageReady, setPageReady] = useState(false)',
+    );
+    expect(component).toMatch(
+      /const go = \(path: string, replace = false\) => \{[\s\S]*?isSameClientRoute\(path, window\.location\)[\s\S]*?setRoutePending\(true\)[\s\S]*?routeWatchdog\.current\?\.arm\(\)[\s\S]*?router\.(?:replace|push)/,
+    );
+    expect(component).toMatch(
+      /if \([\s\S]*?routePending[\s\S]*?!pageReady[\s\S]*?\) return <RouteSkeleton/,
+    );
+    expect(component.indexOf('return <RouteSkeleton')).toBeLessThan(
+      component.indexOf('if (screen === "LOGIN"'),
+    );
+    expect(component).toContain('.finally(finishPageLoad)');
+    expect(component).not.toMatch(
+      /go\(loginDestination\(\), true\);\s*await loadRooms\(\)/,
+    );
+  });
+});
+
 describe('confirmation dialog', () => {
   test('describes room removal as a recoverable 24-hour trash action', async () => {
     const component = await readFile(fileURLToPath(componentUrl), 'utf8');

@@ -2,6 +2,69 @@ import { expect, test } from '@playwright/test';
 
 const account = { id: 'account-1', username: 'zhenhuan', displayName: '甄嬛', isSuperAdmin: false, canCreateRoom: true, lastLoginAt: null };
 
+test('route skeleton hides the login page until the room list is ready', async ({ page }) => {
+  let authChecks = 0;
+  let releaseDestinationAuth!: () => void;
+  const destinationAuth = new Promise<void>((resolve) => {
+    releaseDestinationAuth = resolve;
+  });
+
+  await page.route('**/api/auth/me', async (route) => {
+    authChecks += 1;
+    if (authChecks === 1) {
+      await route.fulfill({ status: 401, json: { error: 'AUTH_REQUIRED' } });
+      return;
+    }
+    await destinationAuth;
+    await route.fulfill({ json: { account, sessions: [] } });
+  });
+  await page.route('**/api/auth/login', (route) => route.fulfill({ json: { account } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [] }));
+
+  await page.goto('/login');
+  await expect.poll(() => authChecks).toBe(1);
+  await page.getByRole('textbox', { name: '用户名' }).fill('zhenhuan');
+  await page.getByRole('textbox', { name: '密码' }).fill('test-password');
+  await page.getByRole('button', { name: '登录' }).click();
+
+  try {
+    await expect(page.getByTestId('route-skeleton')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '账号登录' })).toHaveCount(0);
+  } finally {
+    releaseDestinationAuth();
+  }
+
+  await expect(page).toHaveURL('/rooms');
+  await expect(page.getByRole('button', { name: '创建房间' })).toBeVisible();
+  await expect(page.getByTestId('route-skeleton')).toHaveCount(0);
+});
+
+test('route skeleton covers a direct protected route while auth and page data load', async ({ page }) => {
+  let releaseAuth!: () => void;
+  const authGate = new Promise<void>((resolve) => {
+    releaseAuth = resolve;
+  });
+
+  await page.route('**/api/auth/me', async (route) => {
+    await authGate;
+    await route.fulfill({ json: { account, sessions: [] } });
+  });
+  await page.route('**/api/auth/sessions', (route) => route.fulfill({ json: [] }));
+
+  await page.goto('/profile');
+  try {
+    await expect(page.getByTestId('route-skeleton')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '个人信息' })).toHaveCount(0);
+  } finally {
+    releaseAuth();
+  }
+
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  await expect(page.getByTestId('route-skeleton')).toHaveCount(0);
+});
+
 test('room routes remain addressable and enforce the selected workbench capability', async ({ page }) => {
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
   await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: {

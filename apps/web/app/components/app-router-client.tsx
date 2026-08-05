@@ -19,6 +19,11 @@ import {
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
 import { PlayerAssetAccordion } from "./player-asset-overview";
+import RouteSkeleton from "./route-skeleton";
+import {
+  createRouteTransitionWatchdog,
+  isSameClientRoute,
+} from "./route-transition";
 import { selectCurrentLanding } from "./landing-lifecycle";
 import {
   completeTrashWrite,
@@ -1155,6 +1160,8 @@ export default function AppRouterClient({
   const screen = screenForPage(page);
   const [account, setAccount] = useState<AccountView | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [routePending, setRoutePending] = useState(false);
+  const [pageReady, setPageReady] = useState(false);
   const [loginLimited, setLoginLimited] = useState(false);
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<RoomSummary | null>(null);
@@ -1196,6 +1203,20 @@ export default function AppRouterClient({
       if (toastQueue.current === queue) toastQueue.current = null;
     };
   }, []);
+  const routeWatchdog = useRef<ReturnType<
+    typeof createRouteTransitionWatchdog
+  > | null>(null);
+  useEffect(() => {
+    const watchdog = createRouteTransitionWatchdog(() => {
+      setRoutePending(false);
+      showNotice("页面加载较慢，请重试");
+    });
+    routeWatchdog.current = watchdog;
+    return () => {
+      watchdog.clear();
+      if (routeWatchdog.current === watchdog) routeWatchdog.current = null;
+    };
+  }, [showNotice]);
   const busyRef = useRef(false);
   const roomGeneration = useRef(0);
   const roomTarget = useRef<string | null>(null);
@@ -1234,8 +1255,23 @@ export default function AppRouterClient({
       | "join",
     targetRoomId = roomId,
   ) => `/rooms/${targetRoomId}/${target}`;
-  const go = (path: string, replace = false) =>
-    replace ? router.replace(path as Route) : router.push(path as Route);
+  const go = (path: string, replace = false) => {
+    if (
+      typeof window !== "undefined" &&
+      isSameClientRoute(path, window.location)
+    )
+      return;
+    setRoutePending(true);
+    routeWatchdog.current?.arm();
+    try {
+      if (replace) router.replace(path as Route);
+      else router.push(path as Route);
+    } catch (caught) {
+      routeWatchdog.current?.clear();
+      setRoutePending(false);
+      throw caught;
+    }
+  };
   const loginDestination = () =>
     typeof window === "undefined"
       ? "/rooms"
@@ -1279,30 +1315,52 @@ export default function AppRouterClient({
   }, [page]);
 
   useEffect(() => {
-    if (!authChecked) return;
+    let active = true;
+    const cleanup = () => {
+      active = false;
+    };
+    const finishPageLoad = () => {
+      if (active) setPageReady(true);
+    };
+    const settlePageLoad = (
+      task: Promise<unknown>,
+      reportFailure = false,
+    ) => {
+      const handled = reportFailure
+        ? task.catch((caught) => handleFailure(caught))
+        : task;
+      void handled.finally(finishPageLoad);
+    };
+
+    if (!authChecked) return cleanup;
     const publicPage =
       page === "home" || page === "login" || page === "forbidden";
     if (!account && !publicPage) {
-      if (sessionInvalidating.current) return;
+      if (sessionInvalidating.current) return cleanup;
       go(
         `/login?next=${encodeURIComponent(roomId ? roomPath(page === "player" ? "player" : page === "bank" ? "bank" : page === "settlement" ? "settlement" : page === "finish" ? "finish" : "seats", roomId) : page === "profile" ? "/profile" : page.startsWith("admin") ? "/admin" : "/rooms")}`,
         true,
       );
-      return;
+      return cleanup;
     }
-    if (!account) return;
+    if (!account || publicPage) {
+      finishPageLoad();
+      return cleanup;
+    }
+    setPageReady(false);
     if (page !== "settlement") settlementRouteRequest.current = null;
     if (page === "rooms") {
-      void loadRooms().catch((caught) => void handleFailure(caught));
-      return;
+      settlePageLoad(loadRooms(), true);
+      return cleanup;
     }
     if (page === "join-room" && roomId) {
-      void loadRooms()
-        .then((items) =>
+      settlePageLoad(
+        loadRooms().then((items) =>
           setSelectedRoom(items.find((item) => item.id === roomId) ?? null),
-        )
-        .catch((caught) => void handleFailure(caught));
-      return;
+        ),
+        true,
+      );
+      return cleanup;
     }
     if (
       (page === "seats" ||
@@ -1312,35 +1370,43 @@ export default function AppRouterClient({
         page === "finish") &&
       roomId
     ) {
-      void loadSeats(
-        roomId,
-        page === "player"
-          ? "PLAYER"
-          : page === "bank" || page === "finish"
-            ? "BANK"
-            : undefined,
-        page === "seats" ? "MANAGE" : "AUTO",
+      settlePageLoad(
+        loadSeats(
+          roomId,
+          page === "player"
+            ? "PLAYER"
+            : page === "bank" || page === "finish"
+              ? "BANK"
+              : undefined,
+          page === "seats" ? "MANAGE" : "AUTO",
+        ),
       );
-      return;
+      return cleanup;
     }
     if (page === "settlement" && roomId) {
-      if (settlementRouteRequest.current === roomId) return;
+      if (settlementRouteRequest.current === roomId) {
+        finishPageLoad();
+        return cleanup;
+      }
       settlementRouteRequest.current = roomId;
       const owner = beginRoomTransition(roomId);
-      void runRoomTransition(owner, () => fetchSettlement(owner));
-      return;
+      settlePageLoad(runRoomTransition(owner, () => fetchSettlement(owner)));
+      return cleanup;
     }
     if (page === "profile") {
-      void loadProfile();
-      return;
+      settlePageLoad(loadProfile());
+      return cleanup;
     }
     if (page.startsWith("admin")) {
       if (!account.isSuperAdmin) {
         go("/403", true);
-        return;
+        return cleanup;
       }
-      void loadAdmin();
+      settlePageLoad(loadAdmin());
+      return cleanup;
     }
+    finishPageLoad();
+    return cleanup;
   }, [account, authChecked, page, roomId]);
 
   useEffect(() => {
@@ -1536,7 +1602,6 @@ export default function AppRouterClient({
         clearPassword();
         setAccount(result.account);
         go(loginDestination(), true);
-        await loadRooms();
       } catch (caught) {
         if (
           caught instanceof ApiError &&
@@ -1568,7 +1633,6 @@ export default function AppRouterClient({
       setLoginLimited(false);
       setAccount(result.account);
       go(loginDestination(), true);
-      await loadRooms();
     });
   }
 
@@ -2170,6 +2234,14 @@ export default function AppRouterClient({
     }
   }, [enqueue, workbench]);
 
+  const publicScreen =
+    screen === "LANDING" || screen === "LOGIN" || screen === "FORBIDDEN";
+  if (
+    routePending ||
+    (!publicScreen && (!authChecked || !account || !pageReady))
+  )
+    return <RouteSkeleton />;
+
   if (screen === "LANDING")
     return <LandingPoster onJoin={() => go(account ? "/rooms" : "/login")} />;
 
@@ -2271,12 +2343,7 @@ export default function AppRouterClient({
       </main>
     );
 
-  if (!authChecked || !account)
-    return (
-      <main className="center">
-        <LoaderCircle className="spin" />
-      </main>
-    );
+  if (!authChecked || !account) return <RouteSkeleton />;
 
   if (screen === "LOBBY")
     return (
