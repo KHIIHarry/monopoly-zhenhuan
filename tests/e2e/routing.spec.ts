@@ -31,6 +31,7 @@ test('route skeleton hides the login page until the room list is ready', async (
 
   try {
     await expect(page.getByTestId('route-skeleton')).toBeVisible();
+    await expect(page.getByTestId('route-skeleton')).toHaveAttribute('data-variant', 'rooms');
     await expect(page.getByRole('heading', { name: '账号登录' })).toHaveCount(0);
   } finally {
     releaseDestinationAuth();
@@ -41,7 +42,7 @@ test('route skeleton hides the login page until the room list is ready', async (
   await expect(page.getByTestId('route-skeleton')).toHaveCount(0);
 });
 
-test('route skeleton covers a direct protected route while auth and page data load', async ({ page }) => {
+test('generic loader covers a direct protected route while auth and page data load', async ({ page }) => {
   let releaseAuth!: () => void;
   const authGate = new Promise<void>((resolve) => {
     releaseAuth = resolve;
@@ -55,17 +56,18 @@ test('route skeleton covers a direct protected route while auth and page data lo
 
   await page.goto('/profile');
   try {
-    await expect(page.getByTestId('route-skeleton')).toBeVisible();
+    await expect(page.getByTestId('route-loader')).toBeVisible();
+    await expect(page.getByTestId('route-loader')).toHaveAttribute('data-variant', 'loader');
     await expect(page.getByRole('heading', { name: '个人信息' })).toHaveCount(0);
   } finally {
     releaseAuth();
   }
 
   await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
-  await expect(page.getByTestId('route-skeleton')).toHaveCount(0);
+  await expect(page.getByTestId('route-loader')).toHaveCount(0);
 });
 
-test('fast route data keeps the full-screen skeleton visible for the approved minimum', async ({ page }, testInfo) => {
+test('fast generic route keeps the loader visible for the approved 300ms minimum', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chromium', 'one timing gate is sufficient');
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
   await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
@@ -94,13 +96,35 @@ test('fast route data keeps the full-screen skeleton visible for the approved mi
   });
   const startedAt = await page.evaluate(() => performance.now());
   await page.getByRole('button', { name: '个人信息' }).click();
-  await expect(page.getByTestId('route-skeleton')).toBeVisible();
+  await expect(page.getByTestId('route-loader')).toBeVisible();
+  await expect(page.getByTestId('route-loader')).toHaveAttribute('data-variant', 'loader');
   await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  const elapsed = await page.evaluate((started) => performance.now() - started, startedAt);
+
+  expect(elapsed).toBeGreaterThanOrEqual(250);
+  expect(elapsed).toBeLessThan(1_000);
+  await expect(page.locator('html')).toHaveAttribute('data-route-reveal-observed', 'true');
+});
+
+test('fast room-list route keeps its dedicated skeleton for the approved 600ms minimum', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'one timing gate is sufficient');
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/auth/sessions', (route) => route.fulfill({ json: [] }));
+
+  await page.goto('/profile');
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  const startedAt = await page.evaluate(() => performance.now());
+  await page.getByRole('button', { name: /房间列表/ }).click();
+  await expect(page.getByTestId('route-skeleton')).toBeVisible();
+  await expect(page.getByTestId('route-skeleton')).toHaveAttribute('data-variant', 'rooms');
+  await expect(page.getByRole('button', { name: '创建房间' })).toBeVisible();
   const elapsed = await page.evaluate((started) => performance.now() - started, startedAt);
 
   expect(elapsed).toBeGreaterThanOrEqual(550);
   expect(elapsed).toBeLessThan(1_500);
-  await expect(page.locator('html')).toHaveAttribute('data-route-reveal-observed', 'true');
 });
 
 test('a real load longer than the minimum reveals immediately after data arrives', async ({ page }, testInfo) => {
@@ -120,8 +144,8 @@ test('a real load longer than the minimum reveals immediately after data arrives
 
   await page.goto('/rooms');
   await page.getByRole('button', { name: '个人信息' }).click();
-  await expect(page.getByTestId('route-skeleton')).toBeVisible();
-  await page.waitForTimeout(700);
+  await expect(page.getByTestId('route-loader')).toBeVisible();
+  await page.waitForTimeout(400);
   const releasedAt = await page.evaluate(() => performance.now());
   releaseSessions();
   await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
@@ -169,12 +193,70 @@ test('room routes remain addressable and enforce the selected workbench capabili
   await page.goto('/rooms/room-1/player');
   await expect(page).toHaveURL('/rooms/room-1/player');
   await expect(page.getByRole('heading', { name: '玩家端' })).toBeVisible();
+  await expect(page.locator('.workbench-segment')).toHaveCount(0);
   await page.reload();
   await expect(page).toHaveURL('/rooms/room-1/player');
   await expect(page.getByRole('heading', { name: '玩家端' })).toBeVisible();
 
   await page.goto('/rooms/room-1/bank');
   await expect(page).toHaveURL('/403');
+});
+
+test('ordinary bank identity never renders the dual-identity switch row', async ({ page }) => {
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: {
+    room: { id: 'room-1', name: '碎玉轩夜局', status: 'PLAYING', skillEnabled: true },
+    membership: { id: 'membership-1', characterId: null, playerId: null, isBank: true, activeHere: true },
+    characters: [], bank: { occupiedBy: '甄嬛' }, roleSwapRequests: [],
+  } }));
+  await page.route('**/api/rooms/room-1/snapshot*', (route) => route.fulfill({ json: {
+    id: 'room-1', stateVersion: 1, code: 'SYX', name: '碎玉轩夜局', status: 'PLAYING', diceMode: 'PHYSICAL', redemptionFee: 500, startReward: 1000,
+    currentPlayerId: undefined, turn: null, players: [], properties: [], ledger: [], requests: [], landings: [], audit: [], reversalCandidate: null,
+  } }));
+
+  await page.goto('/rooms/room-1/bank');
+  await expect(page.getByRole('heading', { name: '银行端' })).toBeVisible();
+  await expect(page.locator('.workbench-segment')).toHaveCount(0);
+});
+
+test('player skeleton stays viewport-safe on mobile and desktop', async ({ page }) => {
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: {
+    room: { id: 'room-1', name: '碎玉轩夜局', status: 'PLAYING', skillEnabled: true },
+    membership: { id: 'membership-1', characterId: 'zhenhuan', playerId: 'player-1', isBank: false, activeHere: true },
+    characters: [], bank: { occupiedBy: null }, roleSwapRequests: [],
+  } }));
+
+  for (const viewport of [{ width: 360, height: 800 }, { width: 1440, height: 900 }]) {
+    let releaseSnapshot!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    await page.route('**/api/rooms/room-1/snapshot*', async (route) => {
+      await snapshotGate;
+      await route.fulfill({ json: {
+        id: 'room-1', stateVersion: 1, code: 'SYX', name: '碎玉轩夜局', status: 'PLAYING', diceMode: 'PHYSICAL', redemptionFee: 500, startReward: 1000,
+        currentPlayerId: 'player-1', turn: null, players: [{ id: 'player-1', name: '甄嬛', characterId: 'zhenhuan', balance: 5000, remainingSkipTurns: 0 }],
+        properties: [], ledger: [], requests: [], landings: [], audit: [], reversalCandidate: null,
+      } });
+    });
+    await page.setViewportSize(viewport);
+    await page.goto('/rooms/room-1/player');
+
+    const skeleton = page.getByTestId('route-skeleton');
+    await expect(skeleton).toHaveAttribute('data-variant', 'player');
+    await expect(skeleton).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    if (viewport.width === 360) {
+      await expect(skeleton.locator('[data-region="mobile-nav"]')).toBeVisible();
+      await expect(skeleton.locator('[data-region="mobile-nav"] > *')).toHaveCount(0);
+    }
+
+    releaseSnapshot();
+    await expect(page.getByRole('heading', { name: '玩家端' })).toBeVisible();
+    await page.unroute('**/api/rooms/room-1/snapshot*');
+    await page.goto('about:blank');
+  }
 });
 
 test('lobby navigation uses browser history instead of a component page state', async ({ page }) => {

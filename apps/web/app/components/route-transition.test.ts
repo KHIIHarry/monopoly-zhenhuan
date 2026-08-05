@@ -60,6 +60,21 @@ describe("route transition", () => {
     expect(onRelease).toHaveBeenCalledWith(generation);
   });
 
+  it("accepts a shorter minimum for generic full-screen loaders", () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const onRelease = vi.fn();
+    const gate = createMinimumRouteSkeletonGate({ onRelease, now: () => now });
+
+    const generation = gate.begin(300);
+    now = 100;
+    expect(gate.requestRelease(generation)).toBe(true);
+    vi.advanceTimersByTime(199);
+    expect(onRelease).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onRelease).toHaveBeenCalledWith(generation);
+  });
+
   it("releases immediately when real loading exceeds the minimum", () => {
     let now = 0;
     const onRelease = vi.fn();

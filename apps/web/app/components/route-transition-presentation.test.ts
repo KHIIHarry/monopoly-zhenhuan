@@ -14,6 +14,10 @@ describe("route transition presentation", () => {
     );
     expect(source).toContain("cancelMinimumDelay");
     expect(source).toMatch(/showSkeleton:\s*loading\s*\|\|\s*holding/);
+    expect(source).toMatch(
+      /useRouteTransitionPresentation\(\s*loading:\s*boolean,\s*minimumMs:\s*number,?\s*\)/,
+    );
+    expect(source).toContain("gateRef.current?.begin(minimumMs)");
   });
 
   it("adds one root reveal animation with a reduced-motion override", async () => {

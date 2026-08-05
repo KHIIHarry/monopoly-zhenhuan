@@ -26,6 +26,13 @@ describe('production delivery contract', () => {
     expect(webPackage.scripts.dev).toBe('npm run build -w @zhenhuan/shared -- --force && next dev -p 3000');
   });
 
+  it('generates the Prisma client inside the isolated Web dependency volume', () => {
+    const compose = readFileSync(new URL('../../../docker-compose.yml', import.meta.url), 'utf8');
+    const webService = compose.slice(compose.indexOf('  web:'), compose.indexOf('\nvolumes:'));
+
+    expect(webService).toContain('npm run db:generate');
+  });
+
   it('uses the Docker localhost origin for an external Playwright stack', () => {
     const playwright = readFileSync(new URL('../../../playwright.config.ts', import.meta.url), 'utf8');
 

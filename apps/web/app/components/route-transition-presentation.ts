@@ -12,7 +12,10 @@ import {
   createMinimumRouteSkeletonGate,
 } from "./route-transition";
 
-export function useRouteTransitionPresentation(loading: boolean) {
+export function useRouteTransitionPresentation(
+  loading: boolean,
+  minimumMs: number,
+) {
   const [holding, setHolding] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const loadingRef = useRef(loading);
@@ -71,12 +74,12 @@ export function useRouteTransitionPresentation(loading: boolean) {
     }
     if (loading) {
       clearReveal();
-      gateRef.current?.begin();
+      gateRef.current?.begin(minimumMs);
       setHolding(true);
       return;
     }
     gateRef.current?.requestRelease();
-  }, [clearReveal, loading, reducedMotion]);
+  }, [clearReveal, loading, minimumMs, reducedMotion]);
 
   useEffect(
     () => () => {

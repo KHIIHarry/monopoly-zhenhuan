@@ -19,8 +19,12 @@ import {
 import { LandingPoster } from "./landing/landing-poster";
 import { LandingPropertyCardPicker } from "./landing-property-card-picker";
 import { PlayerAssetAccordion } from "./player-asset-overview";
-import RouteSkeleton from "./route-skeleton";
+import RouteSkeleton, {
+  type RouteSkeletonVariant,
+} from "./route-skeleton";
 import {
+  MIN_ROUTE_LOADER_MS,
+  MIN_ROUTE_SKELETON_MS,
   createRouteTransitionWatchdog,
   isSameClientRoute,
 } from "./route-transition";
@@ -1065,6 +1069,20 @@ export type AppPage =
   | "admin-logs"
   | "forbidden";
 
+const routeSkeletonVariant = (page: AppPage): RouteSkeletonVariant =>
+  page === "rooms"
+    ? "rooms"
+    : page === "player"
+      ? "player"
+      : page === "bank"
+        ? "bank"
+        : page === "workbench"
+          ? "workbench"
+          : "loader";
+
+const routeLoadingMinimumMs = (variant: RouteSkeletonVariant) =>
+  variant === "loader" ? MIN_ROUTE_LOADER_MS : MIN_ROUTE_SKELETON_MS;
+
 const screens: Record<AppPage, Screen> = {
   home: "LANDING",
   login: "LOGIN",
@@ -1201,7 +1219,12 @@ export default function AppRouterClient({
   const routeLoading =
     routePending ||
     (!publicScreen && (!authChecked || !account || !pageReady));
-  const { showSkeleton, cancelMinimumDelay } = useRouteTransitionPresentation(routeLoading);
+  const loadingVariant = routeSkeletonVariant(page);
+  const { showSkeleton, cancelMinimumDelay } =
+    useRouteTransitionPresentation(
+      routeLoading,
+      routeLoadingMinimumMs(loadingVariant),
+    );
   useEffect(() => {
     const queue = createToastQueue(setCurrentToast);
     toastQueue.current = queue;
@@ -2247,7 +2270,7 @@ export default function AppRouterClient({
     }
   }, [enqueue, workbench]);
 
-  if (showSkeleton) return <RouteSkeleton />;
+  if (showSkeleton) return <RouteSkeleton variant={loadingVariant} />;
 
   if (screen === "LANDING")
     return <LandingPoster onJoin={() => go(account ? "/rooms" : "/login")} />;
@@ -2350,7 +2373,8 @@ export default function AppRouterClient({
       </main>
     );
 
-  if (!authChecked || !account) return <RouteSkeleton />;
+  if (!authChecked || !account)
+    return <RouteSkeleton variant={loadingVariant} />;
 
   if (screen === "LOBBY")
     return (

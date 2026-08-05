@@ -1,4 +1,5 @@
 export const MIN_ROUTE_SKELETON_MS = 600;
+export const MIN_ROUTE_LOADER_MS = 300;
 export const ROUTE_CONTENT_REVEAL_MS = 160;
 export const ROUTE_TRANSITION_TIMEOUT_MS = 10_000;
 
@@ -17,8 +18,10 @@ export function createMinimumRouteSkeletonGate({
   schedule = setTimeout,
   cancel = clearTimeout,
 }: MinimumRouteSkeletonGateOptions) {
+  const defaultMinimumMs = minimumMs;
   let generation = 0;
   let startedAt: number | null = null;
+  let activeMinimumMs = defaultMinimumMs;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const clearTimer = () => {
@@ -27,16 +30,17 @@ export function createMinimumRouteSkeletonGate({
   };
 
   return {
-    begin() {
+    begin(nextMinimumMs = defaultMinimumMs) {
       generation += 1;
       clearTimer();
       startedAt = now();
+      activeMinimumMs = nextMinimumMs;
       return generation;
     },
     requestRelease(expectedGeneration = generation) {
       if (startedAt === null || expectedGeneration !== generation) return false;
       clearTimer();
-      const remaining = Math.max(0, minimumMs - (now() - startedAt));
+      const remaining = Math.max(0, activeMinimumMs - (now() - startedAt));
       const finish = () => {
         if (startedAt === null || expectedGeneration !== generation) return;
         timer = null;

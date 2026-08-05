@@ -39,7 +39,10 @@ describe('route transition skeleton', () => {
       /const routeLoading =[\s\S]*?routePending[\s\S]*?!pageReady/,
     );
     expect(component).toContain(
-      'const { showSkeleton, cancelMinimumDelay } = useRouteTransitionPresentation(routeLoading)',
+      'const { showSkeleton, cancelMinimumDelay } =',
+    );
+    expect(component).toMatch(
+      /useRouteTransitionPresentation\(\s*routeLoading,\s*routeLoadingMinimumMs\(loadingVariant\),?\s*\)/,
     );
     expect(component).toContain('cancelMinimumDelay();');
     expect(component).toMatch(
@@ -53,6 +56,24 @@ describe('route transition skeleton', () => {
     expect(component).not.toMatch(
       /go\(loginDestination\(\), true\);\s*await loadRooms\(\)/,
     );
+  });
+
+  test('maps only the four approved routes to dedicated 600ms skeletons', async () => {
+    const component = await readFile(fileURLToPath(componentUrl), 'utf8');
+
+    expect(component).toMatch(
+      /import RouteSkeleton,\s*\{\s*type RouteSkeletonVariant,\s*\}\s*from "\.\/route-skeleton"/,
+    );
+    expect(component).toMatch(
+      /const routeSkeletonVariant = \(page: AppPage\): RouteSkeletonVariant =>[\s\S]*?page === "rooms"[\s\S]*?page === "player"[\s\S]*?page === "bank"[\s\S]*?page === "workbench"[\s\S]*?: "loader"/,
+    );
+    expect(component).toContain(
+      'const routeLoadingMinimumMs = (variant: RouteSkeletonVariant) =>\n  variant === "loader" ? MIN_ROUTE_LOADER_MS : MIN_ROUTE_SKELETON_MS',
+    );
+    expect(component).toMatch(
+      /useRouteTransitionPresentation\(\s*routeLoading,\s*routeLoadingMinimumMs\(loadingVariant\),?\s*\)/,
+    );
+    expect(component).toContain('<RouteSkeleton variant={loadingVariant} />');
   });
 });
 

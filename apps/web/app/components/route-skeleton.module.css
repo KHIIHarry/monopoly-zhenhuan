@@ -1,98 +1,385 @@
-.page {
+.skeleton,
+.loader {
   min-height: 100dvh;
-  padding: max(18px, env(safe-area-inset-top)) 16px calc(88px + env(safe-area-inset-bottom));
   overflow: hidden;
-  background: #f7f2e8;
+  background: #f2f4f1;
 }
 
-.shell {
-  width: min(100%, 760px);
-  margin: 0 auto;
+.skeleton {
+  position: relative;
+  isolation: isolate;
 }
 
-.header,
-.summary,
-.list {
-  border: 1px solid #dfd3bf;
-  border-radius: 8px;
-  background: #fffdf8;
+.skeleton::after {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  transform: translateX(-120%);
+  background: linear-gradient(
+    100deg,
+    transparent 32%,
+    rgb(255 255 255 / 28%) 50%,
+    transparent 68%
+  );
+  animation: shimmer 1.6s ease-in-out infinite;
 }
 
-.header {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 96px;
-  gap: 12px;
-  align-items: center;
-  min-height: 76px;
-  padding: 13px;
-  border-top: 3px solid #8f1d2c;
-}
-
-.summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
-  gap: 18px;
-  align-items: center;
-  min-height: 92px;
-  margin-top: 14px;
-  padding: 18px;
-}
-
-.list {
-  display: grid;
-  gap: 1px;
-  margin-top: 14px;
-  overflow: hidden;
-}
-
-.avatar,
-.title,
-.amount,
-.heading,
-.action,
-.row {
+.block {
   display: block;
-  background: #eadfcd;
-  animation: skeletonPulse 1.15s ease-in-out infinite alternate;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #d7dcd7;
+  border-radius: 3px;
+  background: #dfe4df;
 }
 
-.avatar {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: #d7b96e;
+.redHeader,
+.roomsHeader {
+  background: #741f28;
+  border-bottom: 3px solid #b8892f;
 }
 
-.title {
-  width: min(72%, 240px);
-  height: 17px;
-  border-radius: 4px;
+.redHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 128px;
+  padding-inline: 4.45%;
 }
 
-.amount {
-  width: 96px;
-  height: 28px;
-  border-radius: 4px;
-  background: #e2c989;
+.onRedTitle,
+.onRedTools,
+.roomsAccount,
+.roomsTools {
+  border-color: rgb(255 255 255 / 12%);
+  background: rgb(255 255 255 / 14%);
 }
 
-.heading {
-  width: min(68%, 280px);
-  height: 22px;
-  border-radius: 4px;
+.onRedTitle {
+  width: 43%;
+  height: 60px;
 }
 
-.action {
-  width: 96px;
-  height: 44px;
-  border-radius: 6px;
-  background: #e5c8ca;
+.onRedTools {
+  width: 40.5%;
+  height: 45px;
 }
 
-.row {
+.rooms {
+  position: relative;
+  min-height: 100dvh;
+}
+
+.roomsHeader {
+  position: relative;
+  height: 113px;
+}
+
+.roomsAccount,
+.roomsTools {
+  position: absolute;
+  top: 22px;
+  height: 66px;
+}
+
+.roomsAccount {
+  left: 4.45%;
+  width: 47%;
+}
+
+.roomsTools {
+  right: 4.45%;
+  width: 32%;
+}
+
+.roomList {
+  display: grid;
+  gap: 22px;
+  width: 91.1%;
+  margin: 24px auto 0;
+}
+
+.roomGroup {
+  display: grid;
+  gap: 8px;
+}
+
+.sectionLabel,
+.propertyLabel,
+.overviewLabel,
+.approvalLabel,
+.selectorFoot {
+  display: block;
+  background: #dfe4df;
+}
+
+.sectionLabel {
+  width: 24%;
+  height: 18px;
+}
+
+.roomPrimary {
+  height: 245px;
+}
+
+.roomRow {
+  height: 90px;
+}
+
+.workbench {
+  min-height: 100dvh;
+}
+
+.sideNav {
+  display: none;
+}
+
+.workbenchContent {
+  display: grid;
+  min-width: 0;
+  min-height: 100dvh;
+  grid-template-rows: 128px 107px 55px minmax(0, 1fr) 66px;
+}
+
+.playerIdentity {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  padding: 18px 4.45%;
+  background: #fff;
+  border-bottom: 1px solid #d7dcd7;
+}
+
+.turnStrip {
+  display: grid;
+  padding: 12px 4.45%;
+  background: #eee4d3;
+}
+
+.turnStrip .block {
+  background: #ded4c3;
+}
+
+.playerBody,
+.bankBody {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.diceRegion,
+.playerActions,
+.propertyLabel,
+.propertyRegion,
+.currentTurn,
+.overviewLabel,
+.playerOverview,
+.approvalLabel,
+.approvalRegion {
+  position: absolute;
+  left: 4.45%;
+  width: 91.1%;
+}
+
+.diceRegion {
+  top: 3.6%;
+  height: 16%;
+}
+
+.playerActions {
+  top: 23.2%;
+  height: 52.25%;
+  background-image:
+    linear-gradient(
+      to right,
+      transparent 33.1%,
+      #cfd5cf 33.1%,
+      #cfd5cf 33.45%,
+      transparent 33.45%,
+      transparent 66.55%,
+      #cfd5cf 66.55%,
+      #cfd5cf 66.9%,
+      transparent 66.9%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 33%,
+      #cfd5cf 33%,
+      #cfd5cf 33.5%,
+      transparent 33.5%,
+      transparent 66.5%,
+      #cfd5cf 66.5%,
+      #cfd5cf 67%,
+      transparent 67%
+    );
+}
+
+.propertyLabel {
+  top: 80.9%;
+  width: 40%;
+  height: 4.3%;
+}
+
+.propertyRegion {
+  top: 89%;
+  height: 25%;
+}
+
+.mobileNav {
+  min-height: 66px;
+  background: #fff;
+  border-top: 1px solid #d7dcd7;
+}
+
+.bankSummary {
+  padding: 16px 4.45%;
+  background: #fff;
+  border-bottom: 1px solid #d7dcd7;
+}
+
+.bankSummary .block {
   width: 100%;
-  height: 78px;
-  border-radius: 0;
+  height: 100%;
+}
+
+.threeColumns {
+  background-image: linear-gradient(
+    to right,
+    transparent 33.1%,
+    #cfd5cf 33.1%,
+    #cfd5cf 33.45%,
+    transparent 33.45%,
+    transparent 66.55%,
+    #cfd5cf 66.55%,
+    #cfd5cf 66.9%,
+    transparent 66.9%
+  );
+}
+
+[data-variant="bank"] .workbenchContent {
+  grid-template-rows: 128px 101px minmax(0, 1fr) 66px;
+}
+
+.currentTurn {
+  top: 4%;
+  height: 14.65%;
+}
+
+.overviewLabel {
+  top: 23.3%;
+  width: 38%;
+  height: 3.8%;
+}
+
+.playerOverview {
+  top: 29.3%;
+  height: 61.4%;
+  background-image: linear-gradient(
+    to bottom,
+    transparent 49.7%,
+    #cfd5cf 49.7%,
+    #cfd5cf 50.3%,
+    transparent 50.3%
+  );
+}
+
+.approvalLabel {
+  top: 95%;
+  width: 26%;
+  height: 3.8%;
+}
+
+.approvalRegion {
+  top: 102%;
+  height: 20%;
+}
+
+.selector {
+  position: relative;
+  min-height: 100dvh;
+}
+
+.selectorContent {
+  position: absolute;
+  top: 9.25%;
+  left: 4.45%;
+  display: grid;
+  gap: 14px;
+  width: 91.1%;
+}
+
+.selectorHeading {
+  display: grid;
+  gap: 14px;
+}
+
+.selectorMark {
+  width: 42px;
+  height: 42px;
+}
+
+.selectorTitle {
+  width: 45%;
+  height: 34px;
+}
+
+.selectorCopy {
+  width: 86%;
+  height: 40px;
+}
+
+.identityChoices {
+  width: 100%;
+  height: 154px;
+  background-image: linear-gradient(
+    to bottom,
+    transparent 46.7%,
+    #f2f4f1 46.7%,
+    #f2f4f1 53.3%,
+    transparent 53.3%
+  );
+}
+
+.selectorCommands {
+  display: grid;
+  gap: 14px;
+}
+
+.selectorCommands .block {
+  width: 100%;
+  height: 44px;
+}
+
+.selectorFoot {
+  width: 62%;
+  height: 14px;
+}
+
+.loader {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  color: #741f28;
+}
+
+.loaderIcon {
+  width: 46px;
+  height: 46px;
+  color: #741f28;
+  stroke-width: 3;
+  animation: spin 900ms linear infinite;
+}
+
+.loaderText {
+  color: #741f28;
+  font-family: STSong, SimSun, serif;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0;
 }
 
 .srOnly {
@@ -107,28 +394,209 @@
   border: 0;
 }
 
-@keyframes skeletonPulse {
-  from { opacity: 0.58; }
-  to { opacity: 0.92; }
+@keyframes shimmer {
+  0% {
+    transform: translateX(-120%);
+  }
+  58%,
+  100% {
+    transform: translateX(120%);
+  }
 }
 
-@media (min-width: 760px) {
-  .page {
-    padding: 32px 28px;
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (min-width: 900px) {
+  .roomsHeader {
+    height: 113px;
   }
 
-  .header {
-    padding-inline: 18px;
+  .roomsAccount {
+    left: calc(50% - 380px);
+    width: 230px;
+  }
+
+  .roomsTools {
+    right: calc(50% - 380px);
+    width: 148px;
+  }
+
+  .roomList {
+    gap: 28px;
+    width: min(760px, calc(100% - 48px));
+  }
+
+  .roomPrimary {
+    height: 166px;
+  }
+
+  .workbench {
+    display: grid;
+    grid-template-columns: minmax(248px, 20.8333%) minmax(0, 1fr);
+  }
+
+  .sideNav {
+    position: relative;
+    display: block;
+    min-height: 100dvh;
+    background: #fff;
+    border-right: 1px solid #d7dcd7;
+  }
+
+  .sideIdentity,
+  .sideActions,
+  .sideExit {
+    position: absolute;
+    left: 6%;
+    width: 87.8%;
+  }
+
+  .sideIdentity {
+    top: 4.4%;
+    height: 11.5%;
+    border-bottom: 2px solid #b8892f;
+  }
+
+  .sideActions {
+    top: 16.5%;
+    height: 32%;
+  }
+
+  .sideActionsTall {
+    height: 40%;
+  }
+
+  .sideExit {
+    bottom: 3.1%;
+    height: 7.6%;
+  }
+
+  .workbenchContent {
+    grid-template-rows: 76px 90px 55px minmax(0, 1fr);
+  }
+
+  .redHeader {
+    min-height: 76px;
+    padding-inline: 2.55%;
+  }
+
+  .onRedTitle {
+    width: 24%;
+    height: 45px;
+  }
+
+  .onRedTools {
+    width: 14%;
+    height: 45px;
+  }
+
+  .playerIdentity {
+    padding: 13px 2.55%;
+  }
+
+  .turnStrip {
+    padding: 11px 2.55%;
+  }
+
+  .diceRegion,
+  .playerActions,
+  .propertyLabel,
+  .propertyRegion,
+  .currentTurn,
+  .overviewLabel,
+  .playerOverview,
+  .approvalLabel,
+  .approvalRegion {
+    left: 2.55%;
+    width: 94.9%;
+  }
+
+  .diceRegion {
+    top: 2.35%;
+    height: 10.46%;
+  }
+
+  .playerActions {
+    top: 15.17%;
+    height: 38.59%;
+  }
+
+  .propertyLabel {
+    top: 57.3%;
+    width: 25%;
+    height: 3.2%;
+  }
+
+  .propertyRegion {
+    top: 64.1%;
+    height: 29%;
+  }
+
+  .mobileNav {
+    display: none;
+  }
+
+  [data-variant="bank"] .workbenchContent {
+    grid-template-rows: 76px 101px minmax(0, 1fr);
+  }
+
+  .bankSummary {
+    padding: 13px 2.55%;
+  }
+
+  .currentTurn {
+    top: 2.2%;
+    height: 10.2%;
+  }
+
+  .overviewLabel {
+    top: 15.9%;
+    width: 18%;
+    height: 3%;
+  }
+
+  .playerOverview {
+    top: 19.6%;
+    height: 31.2%;
+  }
+
+  .approvalLabel {
+    top: 54.4%;
+    width: 12%;
+    height: 3%;
+  }
+
+  .approvalRegion {
+    top: 58.2%;
+    height: 12.7%;
+  }
+
+  .selectorContent {
+    top: 9%;
+    left: 50%;
+    width: min(520px, calc(100% - 48px));
+    transform: translateX(-50%);
+  }
+
+  .identityChoices {
+    height: 72px;
+    background-image: linear-gradient(
+      to right,
+      transparent 49.6%,
+      #cfd5cf 49.6%,
+      #cfd5cf 50.4%,
+      transparent 50.4%
+    );
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .avatar,
-  .title,
-  .amount,
-  .heading,
-  .action,
-  .row {
+  .skeleton::after,
+  .loaderIcon {
     animation: none;
   }
 }

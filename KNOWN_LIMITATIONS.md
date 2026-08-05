@@ -17,7 +17,6 @@
 - 玩家离线只表示 Socket 不在线，不释放人物、银行席位或房间成员关系。
 - 生产必须使用 HTTPS/WSS；HTTP 公网部署无法使用始终为 `Secure` 的 Session Cookie。
 - 到期房间的自动清理在 API 进程启动时补扫并每分钟扫描，部署中必须至少有一个 API 实例持续运行；所有 API 实例都停止期间不会执行自动清理，恢复 API 后会补扫。
-- 截至 2026-08-01，`npm audit --omit=dev` 仍报告 Next.js 内置 PostCSS 与可选 Sharp 链上的 3 个 high。当前 H5 不接收用户提供的 CSS、source map 或图片处理输入，也未使用 `next/image`；npm 提供的自动方案会把 Next 破坏性降级到 9.3.3，因此未执行 `audit fix --force`。升级 Next 或其兼容依赖后必须重新审计并移除此项。
 
 ## 功能边界
 
