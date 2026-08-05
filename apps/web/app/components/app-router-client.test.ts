@@ -32,12 +32,20 @@ describe('route transition skeleton', () => {
     expect(component).toContain(
       'const [pageReady, setPageReady] = useState(false)',
     );
+    expect(component).toContain(
+      'import { useRouteTransitionPresentation } from "./route-transition-presentation"',
+    );
+    expect(component).toMatch(
+      /const routeLoading =[\s\S]*?routePending[\s\S]*?!pageReady/,
+    );
+    expect(component).toContain(
+      'const { showSkeleton, cancelMinimumDelay } = useRouteTransitionPresentation(routeLoading)',
+    );
+    expect(component).toContain('cancelMinimumDelay();');
     expect(component).toMatch(
       /const go = \(path: string, replace = false\) => \{[\s\S]*?isSameClientRoute\(path, window\.location\)[\s\S]*?setRoutePending\(true\)[\s\S]*?routeWatchdog\.current\?\.arm\(\)[\s\S]*?router\.(?:replace|push)/,
     );
-    expect(component).toMatch(
-      /if \([\s\S]*?routePending[\s\S]*?!pageReady[\s\S]*?\) return <RouteSkeleton/,
-    );
+    expect(component).toMatch(/if \(showSkeleton\) return <RouteSkeleton/);
     expect(component.indexOf('return <RouteSkeleton')).toBeLessThan(
       component.indexOf('if (screen === "LOGIN"'),
     );
