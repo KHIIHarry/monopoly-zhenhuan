@@ -1272,6 +1272,10 @@ export default function AppRouterClient({
       throw caught;
     }
   };
+  useEffect(() => {
+    routeWatchdog.current?.clear();
+    setRoutePending(false);
+  }, [page, roomId]);
   const loginDestination = () =>
     typeof window === "undefined"
       ? "/rooms"
@@ -1725,7 +1729,7 @@ export default function AppRouterClient({
       setSettlementPreview(null);
       setSnapshot(null);
       setWorkbench(null);
-      go(roomPath("seats", owner.roomId), true);
+      if (page !== "seats") go(roomPath("seats", owner.roomId), true);
       return ownsRoom(owner);
     }
     if (intent === "MANAGE") return ownsRoom(owner);
@@ -1819,6 +1823,7 @@ export default function AppRouterClient({
       skillEnabled: nextSeats.room.skillEnabled,
     });
     if (page === "finish") {
+      setPageReady(true);
       const preview = await call<SettlementPreviewView>(
         `/api/rooms/${owner.roomId}/settlement/preview`,
         { method: "POST", body: JSON.stringify({}) },
@@ -3938,6 +3943,10 @@ function AdminView({
     else if (event.key === "End") nextIndex = tabs.length - 1;
     else return;
     event.preventDefault();
+    if (nextIndex === currentIndex) {
+      event.currentTarget.focus({ preventScroll: true });
+      return;
+    }
     activateTab(tabs[nextIndex].id, true);
   }
 
