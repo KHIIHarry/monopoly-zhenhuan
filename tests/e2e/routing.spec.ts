@@ -65,6 +65,94 @@ test('route skeleton covers a direct protected route while auth and page data lo
   await expect(page.getByTestId('route-skeleton')).toHaveCount(0);
 });
 
+test('fast route data keeps the full-screen skeleton visible for the approved minimum', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'one timing gate is sufficient');
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/auth/sessions', (route) => route.fulfill({ json: [] }));
+
+  await page.goto('/rooms');
+  await expect(page.getByRole('button', { name: '个人信息' })).toBeVisible();
+  await page.getByRole('button', { name: '个人信息' }).click();
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  await page.getByRole('button', { name: /房间列表/ }).click();
+  await expect(page.getByRole('button', { name: '个人信息' })).toBeVisible();
+  await page.evaluate(() => {
+    document.documentElement.dataset.routeRevealObserved = 'false';
+    const observer = new MutationObserver(() => {
+      if (document.documentElement.dataset.routeReveal === 'true') {
+        document.documentElement.dataset.routeRevealObserved = 'true';
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-route-reveal'],
+    });
+  });
+  const startedAt = await page.evaluate(() => performance.now());
+  await page.getByRole('button', { name: '个人信息' }).click();
+  await expect(page.getByTestId('route-skeleton')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  const elapsed = await page.evaluate((started) => performance.now() - started, startedAt);
+
+  expect(elapsed).toBeGreaterThanOrEqual(550);
+  expect(elapsed).toBeLessThan(1_500);
+  await expect(page.locator('html')).toHaveAttribute('data-route-reveal-observed', 'true');
+});
+
+test('a real load longer than the minimum reveals immediately after data arrives', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'one timing gate is sufficient');
+  let releaseSessions!: () => void;
+  const sessionsGate = new Promise<void>((resolve) => {
+    releaseSessions = resolve;
+  });
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/auth/sessions', async (route) => {
+    await sessionsGate;
+    await route.fulfill({ json: [] });
+  });
+
+  await page.goto('/rooms');
+  await page.getByRole('button', { name: '个人信息' }).click();
+  await expect(page.getByTestId('route-skeleton')).toBeVisible();
+  await page.waitForTimeout(700);
+  const releasedAt = await page.evaluate(() => performance.now());
+  releaseSessions();
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  const revealDelay = await page.evaluate((started) => performance.now() - started, releasedAt);
+
+  expect(revealDelay).toBeLessThan(400);
+});
+
+test('reduced motion waits only for real route data', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chromium', 'one media gate is sufficient');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
+  await page.route('**/api/rooms/mine', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms/history', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/rooms', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/auth/sessions', (route) => route.fulfill({ json: [] }));
+
+  await page.goto('/rooms');
+  await page.getByRole('button', { name: '个人信息' }).click();
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  await page.getByRole('button', { name: /房间列表/ }).click();
+  await expect(page.getByRole('button', { name: '个人信息' })).toBeVisible();
+  const startedAt = await page.evaluate(() => performance.now());
+  await page.getByRole('button', { name: '个人信息' }).click();
+  await expect(page.getByRole('heading', { name: '个人信息' })).toBeVisible();
+  const elapsed = await page.evaluate((started) => performance.now() - started, startedAt);
+
+  expect(elapsed).toBeLessThan(550);
+  await expect(page.locator('html')).not.toHaveAttribute('data-route-reveal', 'true');
+});
+
 test('room routes remain addressable and enforce the selected workbench capability', async ({ page }) => {
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { account, sessions: [] } }));
   await page.route('**/api/rooms/room-1/seats', (route) => route.fulfill({ json: {

@@ -24,6 +24,7 @@ import {
   createRouteTransitionWatchdog,
   isSameClientRoute,
 } from "./route-transition";
+import { useRouteTransitionPresentation } from "./route-transition-presentation";
 import { selectCurrentLanding } from "./landing-lifecycle";
 import {
   completeTrashWrite,
@@ -1195,6 +1196,12 @@ export default function AppRouterClient({
   const showToast = useCallback((toast: ToastInput) => {
     enqueue(toast);
   }, [enqueue]);
+  const publicScreen =
+    screen === "LANDING" || screen === "LOGIN" || screen === "FORBIDDEN";
+  const routeLoading =
+    routePending ||
+    (!publicScreen && (!authChecked || !account || !pageReady));
+  const { showSkeleton, cancelMinimumDelay } = useRouteTransitionPresentation(routeLoading);
   useEffect(() => {
     const queue = createToastQueue(setCurrentToast);
     toastQueue.current = queue;
@@ -1208,6 +1215,7 @@ export default function AppRouterClient({
   > | null>(null);
   useEffect(() => {
     const watchdog = createRouteTransitionWatchdog(() => {
+      cancelMinimumDelay();
       setRoutePending(false);
       showNotice("页面加载较慢，请重试");
     });
@@ -1216,7 +1224,7 @@ export default function AppRouterClient({
       watchdog.clear();
       if (routeWatchdog.current === watchdog) routeWatchdog.current = null;
     };
-  }, [showNotice]);
+  }, [cancelMinimumDelay, showNotice]);
   const busyRef = useRef(false);
   const roomGeneration = useRef(0);
   const roomTarget = useRef<string | null>(null);
@@ -2239,13 +2247,7 @@ export default function AppRouterClient({
     }
   }, [enqueue, workbench]);
 
-  const publicScreen =
-    screen === "LANDING" || screen === "LOGIN" || screen === "FORBIDDEN";
-  if (
-    routePending ||
-    (!publicScreen && (!authChecked || !account || !pageReady))
-  )
-    return <RouteSkeleton />;
+  if (showSkeleton) return <RouteSkeleton />;
 
   if (screen === "LANDING")
     return <LandingPoster onJoin={() => go(account ? "/rooms" : "/login")} />;

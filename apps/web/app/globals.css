@@ -1856,8 +1856,18 @@ nav span { font-size: 10px; white-space: nowrap; }
   .app-shell { padding-bottom: 0; }
 }
 
+html[data-route-reveal="true"] #root > main {
+  animation: route-content-reveal 160ms ease-out both;
+}
+
+@keyframes route-content-reveal {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+  html[data-route-reveal="true"] #root > main { animation: none; }
 }
 
 @media (max-width: 600px) {
